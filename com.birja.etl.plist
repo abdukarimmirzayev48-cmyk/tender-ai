@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent — soatlik ETL (H bosqich).
+  O'rnatish (AVTOMATLASHTIRISH.md ga qarang):
+    cp com.birja.etl.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.birja.etl.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.birja.etl</string>
+
+    <!-- /bin/bash orqali aniq chaqiramiz (skriptni bevosita exec qilish
+         macOS'да EX_CONFIG=78 xatosi berishi mumkin) -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/a1234/.birja/etl-run.sh</string>
+    </array>
+
+    <!-- Har soatда (3600 soniya) -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <!-- Yuklanganда darhol bir marta ham yurmasin (soat kutsin) -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/a1234/.birja/launchd-etl.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/a1234/.birja/launchd-etl.log</string>
+</dict>
+</plist>

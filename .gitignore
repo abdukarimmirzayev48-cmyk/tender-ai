@@ -1,0 +1,29 @@
+# ===== Maxfiy — HECH QACHON push qilinmaydi =====
+.env
+*/.env
+!.env.example
+!*/.env.example
+
+# ===== Python =====
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ===== Node / frontend =====
+node_modules/
+dist/
+*.local
+
+# ===== Loglar / vaqtinchalik / zaxira =====
+*.log
+etl_cron.log
+*.tsv
+*.bak
+
+# ===== OS / muharrir =====
+.DS_Store
+.idea/
+.vscode/
+*.swp

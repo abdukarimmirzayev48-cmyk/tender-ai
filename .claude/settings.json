@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(psql \"dbname=xtxarid user=a1234 host=localhost\" -c \"\\\\dt\")",
+      "Bash(psql \"dbname=xtxarid user=a1234 host=localhost\" -tAc \"SELECT status, count\\(*\\) FROM tender GROUP BY status ORDER BY count\\(*\\) DESC;\")",
+      "Bash(psql \"dbname=xtxarid user=a1234 host=localhost\" -tAc \"SELECT 'dim_area', count\\(*\\) FROM dim_area UNION ALL SELECT 'dim_status', count\\(*\\) FROM dim_status UNION ALL SELECT 'dim_category', count\\(*\\) FROM dim_category UNION ALL SELECT 'tender_lot', count\\(*\\) FROM tender_lot UNION ALL SELECT 'tender_good', count\\(*\\) FROM tender_good;\")",
+      "Bash(/Users/a1234/Downloads/Birja/.venv/bin/pip list *)",
+      "Bash(/Users/a1234/Downloads/Birja/.venv/bin/python --version)"
+    ]
+  }
+}

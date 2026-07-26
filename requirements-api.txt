@@ -1,0 +1,6 @@
+# Backend API (3-bosqich) bog'liqliklari
+# O'rnatish:  .venv/bin/pip install -r requirements-api.txt
+fastapi>=0.139
+uvicorn[standard]>=0.51
+psycopg2-binary>=2.9
+python-dotenv>=1.2
