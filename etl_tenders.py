@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-xt-xarid.uz  |  ref_tender_public  ETL yig'uvchi skript
-=======================================================
-Vazifa: JSON-RPC endpointdan barcha (yoki filtrlangan) tenderlarni sahifalab
-yig'ib, PostgreSQL bazasiga (xt_xarid_schema.sql sxemasi) yuklaydi.
+xt-xarid.uz  |  ochiq reyestrlar ETL yig'uvchi skript
+=====================================================
+Vazifa: JSON-RPC endpointdan barcha (yoki filtrlangan) protseduralarni
+sahifalab yig'ib, PostgreSQL bazasiga (xt_xarid_schema.sql sxemasi) yuklaydi.
 
-Tadbirkorga mo'ljallangan: standart holatda faqat OCHIQ tenderlar ('open')
-yig'iladi, chunki tadbirkorga ariza berish mumkin bo'lgan tenderlar kerak.
+MUHIM: platformada BIR EMAS, IKKI ochiq reyestr bor va ular bir xil
+tuzilishga ega (`transform` ikkalasiga ham mos):
+    ref_tender_public     — "Tender" protseduralari      (type='tender')
+    ref_selection_public  — "Eng yaxshi taklifni tanlash" (type='selection')
+Faqat birinchisini yig'ish ochiq lotlarning katta qismini yo'qotadi, shuning
+uchun reyestr `--ref` bayrog'i bilan tanlanadi va run_etl.py ikkalasini ham
+chaqiradi. ID fazolari kesishmaydi (tekshirilgan), shuning uchun ular bitta
+`tender` jadvalida xavfsiz yashaydi.
+
+Tadbirkorga mo'ljallangan: standart holatda faqat OCHIQ protseduralar ('open')
+yig'iladi, chunki tadbirkorga ariza berish mumkin bo'lganlari kerak.
 Butun bazani olish uchun --all-statuses bayrog'ini bering.
 
 ISHGA TUSHIRISH (o'z muhitingizda — sandbox tarmog'i bu domenga chiqa olmaydi):
     pip install requests psycopg2-binary
     export XT_DB_DSN="dbname=xtxarid user=postgres password=... host=localhost"
-    python3 etl_tenders.py                 # faqat ochiq tenderlar
-    python3 etl_tenders.py --all-statuses  # barcha statuslar
-    python3 etl_tenders.py --dry-run       # DBga yozmasdan, faqat yig'ib sanaydi
+    python3 etl_tenders.py                          # ochiq tenderlar
+    python3 etl_tenders.py --ref ref_selection_public   # ochiq "tanlov"lar
+    python3 etl_tenders.py --all-statuses           # barcha statuslar
+    python3 etl_tenders.py --dry-run                # DBga yozmasdan, sanaydi
 
 ESLATMA (odob-axloq):
     Bu rasmiy hujjatlashtirilmagan ichki API. Serverga bosim qilmaslik uchun
@@ -41,7 +51,9 @@ except ImportError:
 # Konfiguratsiya
 # ---------------------------------------------------------------------------
 API_URL        = "https://api.xt-xarid.uz/rpc"
-REF_NAME       = "ref_tender_public"
+DEFAULT_REF    = "ref_tender_public"
+# Ma'lum ochiq reyestrlar — --ref uchun yordam matni va sinovlar shundan oladi
+KNOWN_REFS     = ("ref_tender_public", "ref_selection_public")
 PAGE_LIMIT     = 51          # aniqlangan standart limit
 REQUEST_DELAY  = 1.0         # so'rovlar orasi (sekund) — rate-limit hurmati
 MAX_RETRIES    = 4           # bitta sahifa uchun qayta urinishlar
@@ -79,10 +91,11 @@ def rpc_call(session: requests.Session, params: Dict[str, Any], req_id: int = 1)
     raise RuntimeError(f"{MAX_RETRIES} urinishdan keyin ham muvaffaqiyatsiz: {last_err}")
 
 
-def fetch_all_tenders(statuses: Optional[List[str]]) -> List[Dict[str, Any]]:
+def fetch_all_tenders(statuses: Optional[List[str]],
+                      ref: str = DEFAULT_REF) -> List[Dict[str, Any]]:
     """
-    ref_tender_public ni limit+offset bilan sahifalab, to'liq yig'adi.
-    Bo'sh sahifa (result==[]) kelguncha davom etadi.
+    Berilgan reyestrni (ref_tender_public / ref_selection_public) limit+offset
+    bilan sahifalab, to'liq yig'adi. Bo'sh sahifa (result==[]) kelguncha davom.
     """
     session = requests.Session()
     filters: Dict[str, Any] = {}
@@ -95,7 +108,7 @@ def fetch_all_tenders(statuses: Optional[List[str]]) -> List[Dict[str, Any]]:
     while True:
         page += 1
         params = {
-            "ref": REF_NAME, "op": "read",
+            "ref": ref, "op": "read",
             "limit": PAGE_LIMIT, "offset": offset,
             "filters": filters,
             # fields bermaymiz → API barcha maydonlarni qaytaradi
@@ -282,35 +295,44 @@ def load_to_db(dsn: str, tenders, lots, goods, categories) -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    ap = argparse.ArgumentParser(description="xt-xarid.uz tenderlarini yig'uvchi ETL")
+    ap = argparse.ArgumentParser(description="xt-xarid.uz protseduralarini yig'uvchi ETL")
+    ap.add_argument("--ref", default=DEFAULT_REF,
+                    help=f"Manba reyestri (ma'lumlari: {', '.join(KNOWN_REFS)}; "
+                         f"standart: {DEFAULT_REF})")
     ap.add_argument("--all-statuses", action="store_true",
                     help="Barcha statuslar (standart: faqat 'open')")
     ap.add_argument("--dry-run", action="store_true",
                     help="DBga yozmasdan, faqat yig'ib sanaydi")
+    ap.add_argument("--limit", type=int,
+                    help="Faqat birinchi N yozuvni qayta ishlash (sinov uchun)")
     ap.add_argument("--dsn", default=os.environ.get("XT_DB_DSN"),
                     help="PostgreSQL DSN (yoki XT_DB_DSN muhit o'zgaruvchisi)")
     args = ap.parse_args()
 
     statuses = None if args.all_statuses else ["open"]
     label = "BARCHA statuslar" if args.all_statuses else "faqat 'open' (ochiq)"
-    print(f"[1/3] Yig'ish boshlandi — {label}")
+    print(f"[1/3] Yig'ish boshlandi — {args.ref}, {label}")
 
-    records = fetch_all_tenders(statuses)
-    print(f"[1/3] Jami {len(records)} ta tender yig'ildi.\n")
+    records = fetch_all_tenders(statuses, args.ref)
+    if args.limit:
+        records = records[:args.limit]
+        print(f"  ! --limit {args.limit}: faqat birinchi {len(records)} yozuv olinadi")
+    print(f"[1/3] Jami {len(records)} ta yozuv yig'ildi ({args.ref}).\n")
 
     print("[2/3] Transform...")
     all_t, all_l, all_g, all_c = [], [], [], {}
     for rec in records:
         t, l, g, c = transform(rec)
         all_t.append(t); all_l.extend(l); all_g.extend(g); all_c.update(c)
-    print(f"[2/3] {len(all_t)} tender, {len(all_l)} lot, {len(all_g)} tovar, "
+    print(f"[2/3] {len(all_t)} protsedura, {len(all_l)} lot, {len(all_g)} tovar, "
           f"{len(all_c)} kategoriya.\n")
 
     if args.dry_run:
-        print("[3/3] --dry-run: DBga yozilmadi. Namuna (birinchi tender):")
+        print("[3/3] --dry-run: DBga yozilmadi. Namuna (birinchi yozuv):")
         if all_t:
             preview = {k: all_t[0][k] for k in
-                       ["id","name","status","currency","totalcost","area_leaf_id","company_name"]}
+                       ["id","type","name","status","currency","totalcost",
+                        "area_leaf_id","company_name"]}
             print("   ", json.dumps(preview, ensure_ascii=False, indent=2))
         return
 

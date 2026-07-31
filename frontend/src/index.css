@@ -1,0 +1,185 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/* =============================================================================
+   TENDER AI — Tailwind v4 + Vengeance UI (shadcn registry) mavzusi
+   -----------------------------------------------------------------------------
+   RANGLAR O'ZGARMADI. Bu yerdagi qiymatlar avvalgi qo'lda yozilgan
+   `styles.css` :root palitrasidan bir xil ko'chirildi — migratsiya
+   KO'RINISHNI emas, QURILISH USULINI o'zgartiradi.
+
+     --accent #2b5cc4  -> --primary
+     --bg     #f6f7fb  -> --background
+     --surface#ffffff  -> --card / --popover
+     --text   #1a2233  -> --foreground
+     --muted  #7a8397  -> --muted-foreground
+     --urgent #dc2626  -> --destructive
+     --ok     #16a34a  -> --ok (qo'shimcha token)
+     --soon   #d97706  -> --soon (qo'shimcha token)
+
+   Vengeance UI komponentlari `bg-primary`, `text-muted-foreground`,
+   `ring-ring` kabi shadcn tokenlarini kutadi — shuning uchun nomlar
+   shadcn konvensiyasida, qiymatlar esa bizniki.
+   ============================================================================= */
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.625rem;
+
+  --background: #f6f7fb;
+  --foreground: #1a2233;
+
+  --card: #ffffff;
+  --card-foreground: #1a2233;
+  --popover: #ffffff;
+  --popover-foreground: #1a2233;
+
+  --primary: #2b5cc4;
+  --primary-foreground: #ffffff;
+
+  --secondary: #edf1fa;
+  --secondary-foreground: #2b5cc4;
+
+  --muted: #f8f9fd;
+  --muted-foreground: #7a8397;
+
+  --accent: #edf1fa;
+  --accent-foreground: #2b5cc4;
+
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+
+  --border: #e6e9f0;
+  --input: #e6e9f0;
+  --ring: #2b5cc4;
+
+  /* Loyihaga xos qo'shimcha holatlar — shadcn'da bunday token yo'q, lekin
+     muddat/holat rangi butun ilovada ishlatiladi (deadline, status, moslik). */
+  --ok: #16a34a;
+  --ok-soft: #dcfce7;
+  --soon: #d97706;
+  --soon-soft: #fef3c7;
+  --urgent: #dc2626;
+  --urgent-soft: #fef2f2;
+  --border-soft: #eef1f6;
+
+  /* Recharts seriyalari (StatsView). Asosiy rangdan boshlanadi. */
+  --chart-1: #2b5cc4;
+  --chart-2: #16a34a;
+  --chart-3: #d97706;
+  --chart-4: #7c3aed;
+  --chart-5: #0891b2;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1a2233;
+  --sidebar-primary: #2b5cc4;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #edf1fa;
+  --sidebar-accent-foreground: #2b5cc4;
+  --sidebar-border: #e6e9f0;
+  --sidebar-ring: #2b5cc4;
+}
+
+/* Qorong'i mavzu hozircha YOQILMAGAN (ilovada almashtirgich yo'q), lekin
+   Vengeance UI komponentlari `.dark` variantiga tayanadi — tokenlar bo'lmasa
+   ular qorong'i rejimda o'qib bo'lmas holga kelardi. */
+.dark {
+  --background: #0f1420;
+  --foreground: #e8ebf2;
+  --card: #151b2b;
+  --card-foreground: #e8ebf2;
+  --popover: #151b2b;
+  --popover-foreground: #e8ebf2;
+  --primary: #5b87e8;
+  --primary-foreground: #0f1420;
+  --secondary: #1e2740;
+  --secondary-foreground: #cdd7ef;
+  --muted: #1a2233;
+  --muted-foreground: #98a2ba;
+  --accent: #1e2740;
+  --accent-foreground: #cdd7ef;
+  --destructive: #f87171;
+  --destructive-foreground: #0f1420;
+  --border: #253049;
+  --input: #253049;
+  --ring: #5b87e8;
+  --ok: #4ade80;
+  --ok-soft: #14331f;
+  --soon: #fbbf24;
+  --soon-soft: #33260c;
+  --urgent: #f87171;
+  --urgent-soft: #331616;
+  --border-soft: #1e2740;
+  --sidebar: #131926;
+  --sidebar-foreground: #e8ebf2;
+  --sidebar-accent: #1e2740;
+  --sidebar-accent-foreground: #cdd7ef;
+  --sidebar-border: #253049;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-border-soft: var(--border-soft);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-soon: var(--soon);
+  --color-soon-soft: var(--soon-soft);
+  --color-urgent: var(--urgent);
+  --color-urgent-soft: var(--urgent-soft);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  /* Raqamli ustunlar (summa, ball, miqdor) bir-birining tagida turishi uchun */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

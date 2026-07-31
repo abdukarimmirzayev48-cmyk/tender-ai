@@ -18,33 +18,58 @@ Endpointlar:
     GET /statuses          — status dropdown
     GET /health            — sog'liq tekshiruvi
 """
+import json
 import os
 import re
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import List, Optional
 from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Response
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi.responses import (JSONResponse, RedirectResponse,
+                               Response as FileResponse, StreamingResponse)
+from pydantic import BaseModel, field_validator
 
 load_dotenv()  # .env ni import paytida yuklaymiz (pool DSN'ni ko'rishi uchun)
 
-from api import ai, db, matching, queries  # noqa: E402  (load_dotenv dan keyin bo'lishi shart)
+from api import (ai, ai_gonogo, ai_match, compliance, db, importer,  # noqa: E402
+                 matching, notify, pricing, queries, stock,
+                 telegram)  # (load_dotenv dan keyin shart)
 
 
 # ---------------------------------------------------------------------------
 # So'rov modellari (aqlli moslashtirish)
 # ---------------------------------------------------------------------------
 class ProfileIn(BaseModel):
+    # --- akkaunt (yon paneldagi foydalanuvchi bloki shulardan o'qiydi) ---
+    contact_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    position: Optional[str] = None
+    # --- qidiruv sozlamalari ---
     name: Optional[str] = None
     keywords: List[str] = []
     regions: List[str] = []
     currency: Optional[str] = None
     min_cost: Optional[float] = None
     max_cost: Optional[float] = None
+    # --- salohiyat (Go/No-Go uchun; hammasi ixtiyoriy) ---
+    # To'ldirilmagani "yomon" degani emas, "ma'lumot yo'q" degani — AI shunda
+    # tegishli mezonni `malumot_yoq` deb belgilaydi va qarorni Review ga tushiradi.
+    about: Optional[str] = None
+    certificates: List[str] = []
+    clearances: List[str] = []
+    experience_years: Optional[int] = None
+    max_contract_value: Optional[float] = None
+    max_contract_currency: Optional[str] = None
+    employees: Optional[int] = None
+    capacity_note: Optional[str] = None
+    lead_time_days: Optional[int] = None
+    min_margin_percent: Optional[float] = None
+    constraints_note: Optional[str] = None
 
 
 class SavedSearchIn(BaseModel):
@@ -71,8 +96,179 @@ class CatalogItemIn(BaseModel):
 class CatalogMatchIn(BaseModel):
     region: Optional[str] = None
     currency: Optional[str] = None
+    # Mahsulot/xizmat filtri — foydalanuvchi katalogiga qo'shimcha toraytirish
+    products: List[str] = []
+    services: List[str] = []
     limit: int = 20
     offset: int = 0
+
+
+#: Foizli maydonlarning yuqori chegarasi (None = faqat manfiy bo'lmasin).
+#: Ustama 1000% gacha — chakana savdoda uchraydi; QQS va zaxira mantiqan 100% dan
+#: oshmaydi, oshsa bu kiritish xatosi.
+_PERCENT_MAX = {
+    "markup_percent": 1000, "risk_reserve_percent": 100,
+    "logistics_percent": 100, "vat_percent": 100,
+    "risk_reserve_fixed": None, "logistics_fixed": None,
+}
+_MAYDON_NOMI = {
+    "markup_percent": "Ustama", "risk_reserve_percent": "Risk zaxirasi",
+    "logistics_percent": "Logistika", "vat_percent": "QQS",
+    "risk_reserve_fixed": "Risk zaxirasi (qat'iy)",
+    "logistics_fixed": "Logistika (qat'iy)",
+}
+
+
+class PricingSettingsIn(BaseModel):
+    """Narx hisobining odatiy parametrlari (bitta faol yozuv).
+
+    Chegaralar ATAYIN qo'yilgan: manfiy ustama yoki 500% QQS smetani jimgina
+    ma'nosiz qiladi (tavsiya narxi tannarxdan past chiqadi) va buni faqat
+    tender yutqazilgach sezish mumkin. Shuning uchun kirishda rad etamiz.
+
+    Maydonlar Optional: yuborilmagani "TEGMA" degani, "standartga qaytar" emas.
+    """
+    markup_percent: Optional[float] = None
+    risk_reserve_percent: Optional[float] = None
+    risk_reserve_fixed: Optional[float] = None
+    logistics_percent: Optional[float] = None
+    logistics_fixed: Optional[float] = None
+    vat_percent: Optional[float] = None
+    currency: Optional[str] = None
+
+    @field_validator("markup_percent", "risk_reserve_percent", "logistics_percent",
+                     "vat_percent", "risk_reserve_fixed", "logistics_fixed")
+    @classmethod
+    def _oraliq(cls, v, info):
+        # Pydantic'ning o'z `Field(ge=…)` xabari inglizcha ("Input should be…"),
+        # interfeys esa o'zbekcha. Shuning uchun chegarani qo'lda tekshiramiz.
+        if v is None:
+            return v
+        yuqori = _PERCENT_MAX.get(info.field_name)
+        if v < 0:
+            raise ValueError(f"{_MAYDON_NOMI[info.field_name]} manfiy bo'lmasligi kerak.")
+        if yuqori is not None and v > yuqori:
+            raise ValueError(
+                f"{_MAYDON_NOMI[info.field_name]} {yuqori}% dan oshmasligi kerak.")
+        return v
+
+
+class PricingItemIn(BaseModel):
+    name: Optional[str] = None
+    unit: Optional[str] = None
+    qty: float = 0
+    unit_cost: float = 0               # BIZNING tannarximiz
+    currency: Optional[str] = None
+    ref_price: Optional[float] = None  # buyurtmachi narxi — faqat mo'ljal
+
+
+class PricingIn(BaseModel):
+    """Smetaning kiruvchi holati. Byudjet va minimal marja ATAYLAB YO'Q —
+    ularni server bazadan o'zi oladi (mijoz yuborganiga ishonmaydi)."""
+    items: List[PricingItemIn] = []
+    markup_percent: Optional[float] = None
+    risk_reserve_percent: Optional[float] = None
+    risk_reserve_fixed: Optional[float] = None
+    logistics_percent: Optional[float] = None
+    logistics_fixed: Optional[float] = None
+    vat_percent: Optional[float] = None
+    currency: Optional[str] = None
+    manual_price: Optional[float] = None   # broker qo'lda kiritgan narx
+    note: Optional[str] = None
+
+
+class NotifySettingsIn(BaseModel):
+    """Bildirishnoma sozlamalari (email + Telegram). SIRLAR YO'Q — SMTP paroli
+    va Telegram bot tokeni .env dan o'qiladi (SMTP_PASSWORD,
+    TELEGRAM_BOT_TOKEN), bazaga ham, bu modelga ham tushmaydi.
+
+    Maydonlar Optional: yuborilmagani "TEGMA" degani. Ilgari standart qiymat
+    qo'yilgani uchun `{"enabled": false}` yuborish SMTP hostini ham,
+    qabul qiluvchi emailni ham o'chirib yuborardi.
+    """
+    enabled: Optional[bool] = None       # EMAIL kanali
+    email: Optional[str] = None          # bo'sh -> company_profile.email
+    min_score: Optional[int] = None      # moslik chegarasi (IKKALA kanal uchun)
+    smtp_host: Optional[str] = None
+    smtp_port: Optional[int] = None
+    smtp_user: Optional[str] = None
+    smtp_use_tls: Optional[bool] = None
+    from_email: Optional[str] = None
+    base_url: Optional[str] = None       # kartochka havolasi shundan quriladi
+    # --- Telegram kanali (emaildan MUSTAQIL yoqiladi) ---
+    telegram_enabled: Optional[bool] = None
+    telegram_chat_id: Optional[str] = None
+
+    @field_validator("min_score")
+    @classmethod
+    def _ball_oraligi(cls, v):
+        if v is not None and not 0 <= v <= 100:
+            raise ValueError("Moslik chegarasi 0 va 100 orasida bo'lishi kerak.")
+        return v
+
+    @field_validator("smtp_port")
+    @classmethod
+    def _port_oraligi(cls, v):
+        if v is not None and not 1 <= v <= 65535:
+            raise ValueError("SMTP porti 1 va 65535 orasida bo'lishi kerak.")
+        return v
+
+    @field_validator("email", "from_email")
+    @classmethod
+    def _email_shakli(cls, v):
+        """Yuzaki, lekin yetarli tekshiruv. Buzuq manzil bazaga tushsa,
+        xato faqat ETL dan keyin — jimgina — chiqadi va foydalanuvchi
+        bildirishnoma kelmayotganini bilmay yuradi."""
+        if v is None or not v.strip():
+            return None
+        v = v.strip()
+        if not re.fullmatch(r"[^@\s]+@[^@\s.]+(\.[^@\s.]+)+", v):
+            raise ValueError(f"Email manzili noto'g'ri: {v!r}")
+        return v
+
+
+class CompanyDocumentIn(BaseModel):
+    """Kompaniya hujjati. Sanalar ixtiyoriy: `valid_until` bo'sh bo'lsa
+    hujjat MUDDATSIZ deb qaraladi ("ma'lumot yo'q" emas)."""
+    doc_type: str
+    name: str
+    number: Optional[str] = None
+    issued_at: Optional[date] = None
+    valid_until: Optional[date] = None
+    file_name: Optional[str] = None
+    file_ref: Optional[str] = None
+    note: Optional[str] = None
+
+    @field_validator("doc_type")
+    @classmethod
+    def _tur_kanonik(cls, v):
+        """Cheklist hujjatni FAQAT `code` bo'yicha topadi. Noma'lum turdagi
+        yozuv hech qaysi bandga tushmaydi — foydalanuvchi hujjatni kiritgan
+        bo'lsa ham cheklist "yo'q" deb turaveradi. Shuning uchun rad etamiz."""
+        v = (v or "").strip()
+        if v not in compliance.BY_CODE:
+            raise ValueError(
+                f"Noma'lum hujjat turi: {v!r}. "
+                f"Ruxsat etilganlari: {', '.join(compliance.BY_CODE)}")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _nom_bosh_emas(cls, v):
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Hujjat nomi bo'sh bo'lmasligi kerak.")
+        return v
+
+    @field_validator("valid_until")
+    @classmethod
+    def _muddat_berilishdan_keyin(cls, v, info):
+        """Amal qilish muddati berilgan sanadan oldin bo'lsa — bu kiritish
+        xatosi, va cheklist buni "muddati o'tgan" deb noto'g'ri belgilaydi."""
+        iss = info.data.get("issued_at")
+        if v and iss and v < iss:
+            raise ValueError("Amal qilish muddati berilgan sanadan oldin.")
+        return v
 
 
 class MatchIn(BaseModel):
@@ -83,6 +279,9 @@ class MatchIn(BaseModel):
     currency: Optional[str] = None
     q: Optional[str] = None
     category: Optional[str] = None
+    # Mahsulot/xizmat filtri — `q` dan alohida (faqat tovar nomi bo'yicha)
+    products: List[str] = []
+    services: List[str] = []
     limit: int = 20
     offset: int = 0
 
@@ -113,8 +312,14 @@ if _cors:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_methods=["GET"],
+        # Faqat GET yetmaydi: profil/katalog/qidiruvlar POST-PUT-DELETE ishlatadi
+        # (masalan POST /match) — preflight rad etilsa frontend "Failed to fetch"
+        # xatosini ko'rsatadi.
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
+        # Ro'yxatning umumiy soni shu header'da qaytadi — brauzer uni
+        # ochib bermasa frontend o'qiy olmaydi.
+        expose_headers=["X-Total-Count"],
     )
 
 
@@ -281,6 +486,8 @@ def list_tenders(
     source: Optional[str] = Query(None, description="Manba platforma (masalan xt-xarid)."),
     q: Optional[str] = Query(None, description="Qidiruv: tender nomi, buyurtmachi yoki tovar nomi."),
     category: Optional[str] = Query(None, description="Kategoriya kodi (parent tanlansa ichkilar ham kiradi)."),
+    product: Optional[List[str]] = Query(None, description="Mahsulot nomi — FAQAT tovar ro'yxati bo'yicha. Bir nechta berilsa: birortasi."),
+    service: Optional[List[str]] = Query(None, description="Xizmat nomi. Mahsulot bilan BIRGA berilsa: birortasi (OR)."),
     sort: str = Query(queries.DEFAULT_SORT, description="Saralash: close_at | publicated_at | totalcost | id. Kamayish uchun oldiga '-'."),
     limit: int = Query(51, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -289,7 +496,7 @@ def list_tenders(
     status_val = status or None  # bo'sh string -> filtr yo'q
     where, params = queries.build_tender_filters(
         status=status_val, region=region, currency=currency, source=source,
-        q=q, category=category,
+        q=q, category=category, products=(product or []) + (service or []),
     )
     order_by = queries.build_order_by(sort)
 
@@ -404,9 +611,20 @@ def get_tender(tender_id: int):
     return tender
 
 
+def _tender_bor_yoki_404(tender_id: int) -> None:
+    """Yo'q tender uchun 404. Bo'sh ro'yxat "hujjat yo'q" degani, "tender yo'q"
+    degani EMAS — ikkalasini bir xil javob bilan qaytarsak, mijoz noto'g'ri
+    havoladan kelganini bilolmaydi. /stock-check va /compliance allaqachon
+    shunday qiladi; qolganlarini ham shu qatorga keltiramiz."""
+    if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
+                        {"id": tender_id}):
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+
+
 @app.get("/tenders/{tender_id}/documents")
 def tender_documents(tender_id: int):
     """Faqat hujjatlar ro'yxati (yuklab olish havolalari bilan)."""
+    _tender_bor_yoki_404(tender_id)
     rows = db.query(queries.TENDER_DOCUMENTS_SQL, {"id": tender_id})
     return [_shape_document(r, tender_id) for r in rows]
 
@@ -526,6 +744,532 @@ def freshness():
     }
 
 
+# ---------------------------------------------------------------------------
+# AI MOSLIK TAHLILI — "bu tender menga mos keladimi?"
+#
+# Deterministik filtrlardan (mahsulot/xizmat/kategoriya) FARQI: ular nom
+# o'xshashligiga qaraydi, AI esa MA'NOGA. Katalogda "Насос" bo'lsa, matn
+# qidiruvi "Кольцо для ремонта насосов" ni ham tortadi — AI buni "mos emas,
+# bu nasos emas, uning zichlagichi" deb ajratadi.
+#
+# XARAJAT: natija keshlanadi (ai_analysis, kind='match_v1'). Hukm tender VA
+# katalogga bog'liq bo'lgani uchun kesh kaliti ikkalasini qamraydi.
+# ---------------------------------------------------------------------------
+@app.post("/tenders/{tender_id}/ai-match")
+def ai_match_tender(
+    tender_id: int,
+    refresh: bool = Query(False, description="Keshni chetlab o'tib qayta tahlil qilish."),
+):
+    """Tender foydalanuvchi katalogiga mos kelishini AI orqali baholaydi.
+
+    Javob: {verdict, score, reason_uz, matched_items, requirements, risks,
+            cached, model, generated_at}
+    """
+    row = db.query_one(queries.AI_TENDER_SQL, {"id": tender_id})
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+
+    products = db.query(queries.CATALOG_LIST_SQL)
+    profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL))
+
+    text = ai_match.build_input(row, products, profile)
+    h = ai_match.content_hash(text)
+
+    cached = db.query_one(queries.AI_CACHED_SQL, {"id": tender_id, "kind": ai_match.KIND})
+    if cached and cached["content_hash"] == h and not refresh:
+        return {**cached["result"], "cached": True,
+                "model": cached.get("model"),
+                "generated_at": _iso(cached.get("created_at"))}
+
+    try:
+        out = ai_match.analyze(row, products, profile)
+    except ai.AIUnavailable as e:
+        # Kalit yo'q / chaqiruv muvaffaqiyatsiz — 503, chunki bu vaqtinchalik
+        # va foydalanuvchi aybi emas. Frontend buni tushunarli ko'rsatadi.
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    saved = db.execute_returning(queries.AI_UPSERT_SQL, {
+        "tender_id": tender_id, "kind": ai_match.KIND, "content_hash": h,
+        "result": json.dumps(out["result"], ensure_ascii=False),
+        "model": out["model"],
+        "input_tokens": out["input_tokens"], "output_tokens": out["output_tokens"],
+    })
+    return {**out["result"], "cached": False, "model": out["model"],
+            "generated_at": _iso(saved["created_at"]) if saved else None}
+
+
+@app.post("/tenders/{tender_id}/ai-gonogo")
+def ai_gonogo_tender(
+    tender_id: int,
+    refresh: bool = Query(False, description="Keshni chetlab o'tib qayta tahlil qilish."),
+):
+    """GO / REVIEW / NO-GO tavsiyasi — 11 mezon bo'yicha.
+
+    `ai-match` dan farqi: u faqat mahsulot mosligini ko'radi, bu esa
+    qatnashish qarorini butun kesimda (muddat, byudjet, sertifikat, tajriba,
+    resurs) baholaydi.
+
+    Ma'lumot yetishmagan mezon `malumot_yoq` bo'lib qaytadi va qaror `review`
+    ga tushadi — model bo'sh joyni taxmin bilan to'ldirmaydi.
+    """
+    row = db.query_one(queries.AI_TENDER_SQL, {"id": tender_id})
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+    # Tender shartlari `ai_gonogo.build_input()` uchun ichma-ich shaklda kerak
+    row["detail"] = {"anno": row.get("anno"),
+                     "method_marks": row.get("method_marks"),
+                     "offer_period": row.get("offer_period")}
+
+    products = db.query(queries.CATALOG_LIST_SQL)
+    profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL))
+
+    text = ai_gonogo.build_input(row, products, profile)
+    h = ai_gonogo.content_hash(text)
+
+    cached = db.query_one(queries.AI_CACHED_SQL, {"id": tender_id, "kind": ai_gonogo.KIND})
+    if cached and cached["content_hash"] == h and not refresh:
+        return {**ai_gonogo.normalize(cached["result"]), "cached": True,
+                "model": cached.get("model"),
+                "generated_at": _iso(cached.get("created_at")),
+                "criteria_labels": ai_gonogo.CRITERIA}
+
+    try:
+        out = ai_gonogo.analyze(row, products, profile)
+    except ai.AIUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    saved = db.execute_returning(queries.AI_UPSERT_SQL, {
+        "tender_id": tender_id, "kind": ai_gonogo.KIND, "content_hash": h,
+        "result": json.dumps(out["result"], ensure_ascii=False),
+        "model": out["model"],
+        "input_tokens": out["input_tokens"], "output_tokens": out["output_tokens"],
+    })
+    return {**out["result"], "cached": False, "model": out["model"],
+            "generated_at": _iso(saved["created_at"]) if saved else None,
+            "criteria_labels": ai_gonogo.CRITERIA}
+
+
+# ---------------------------------------------------------------------------
+# HUJJAT MATNI (TZ P0-2) — ilova qilingan fayllarning MATN holati
+#
+# Matnni `etl_doc_text.py` oldindan ajratadi (pypdf / python-docx / openpyxl —
+# sof deterministik parserlar, AI emas) va `tender_document_text` da saqlaydi.
+# Bu endpoint TARMOQQA CHIQMAYDI, faqat bazadan o'qiydi.
+# ---------------------------------------------------------------------------
+@app.get("/tenders/{tender_id}/documents/text")
+def tender_documents_text(
+    tender_id: int,
+    ref: Optional[str] = Query(None, description="Bitta faylning matni (file_ref)."),
+    full: bool = Query(False, description="ref bilan birga — to'liq matn."),
+    preview_chars: int = Query(1500, ge=0, le=50000,
+                               description="Ro'yxatdagi matn parchasi uzunligi."),
+):
+    """`status`: ok | unreadable | unsupported | too_large | download_failed | pending.
+
+    'ok' dan boshqasi = "qo'lda tekshirish talab etiladi" (TZ P0-2 qabul mezoni).
+    """
+    _tender_bor_yoki_404(tender_id)
+    if ref and full:
+        row = db.query_one(queries.DOCUMENT_TEXT_FULL_SQL,
+                           {"id": tender_id, "ref": ref})
+        if not row:
+            raise HTTPException(status_code=404, detail="Hujjat matni topilmadi.")
+        return {
+            "file_ref": ref,
+            "status": row["status"],
+            "manual_review": row["status"] != "ok",
+            "reason": (None if row["status"] == "ok"
+                       else _DOC_TEXT_REASON.get(row["status"], row["status"])),
+            "detail": row.get("error"),
+            "char_count": row.get("char_count"),
+            "page_count": row.get("page_count"),
+            "extractor": row.get("extractor"),
+            "extracted_at": _iso(row.get("extracted_at")),
+            "text": row.get("text"),
+        }
+
+    rows = db.query(queries.TENDER_DOCUMENT_TEXT_SQL,
+                    {"id": tender_id, "preview": preview_chars})
+    docs, counts = [], {}
+    for r in rows:
+        # Matn yozuvi umuman yo'q -> ETL bu faylga hali yetib bormagan
+        status = r.get("status") or "pending"
+        counts[status] = counts.get(status, 0) + 1
+        docs.append({
+            "file_ref": r["file_ref"], "name": r.get("name"),
+            "file_type": r.get("file_type"), "size_bytes": r.get("size_bytes"),
+            "section": _doc_label(r.get("field_key")),
+            "status": status, "manual_review": status != "ok",
+            "reason": (None if status == "ok"
+                       else _DOC_TEXT_REASON.get(status, status)),
+            "detail": r.get("error"),
+            "char_count": r.get("char_count"), "page_count": r.get("page_count"),
+            "extractor": r.get("extractor"),
+            "extracted_at": _iso(r.get("extracted_at")),
+            "preview": r.get("preview"),
+        })
+    total = len(docs)
+    n_ok = counts.get("ok", 0)
+    return {
+        "tender_id": tender_id,
+        "summary": {"total": total, "ok": n_ok,
+                    "manual_review": total - n_ok,
+                    "pending": counts.get("pending", 0),
+                    "by_status": counts,
+                    "chars": sum(d["char_count"] or 0 for d in docs)},
+        "documents": docs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# KATALOG IMPORTI (TZ P0-4) — Excel/CSV/Google Sheets dan mahsulot + qoldiq
+# ---------------------------------------------------------------------------
+MAX_IMPORT_MB = 5
+
+
+@app.post("/catalog/import")
+def catalog_import(
+    file: UploadFile = File(..., description="Excel (.xlsx) yoki CSV fayl."),
+    dry_run: bool = Query(True, description="TRUE — faqat tekshirish, bazaga yozilmaydi."),
+):
+    """Format xatolari QATOR BO'YICHA qaytadi: bitta qatordagi xato butun
+    importni to'xtatmaydi. `dry_run=true` (default) bazaga umuman tegmaydi."""
+    data = file.file.read()
+    if len(data) > MAX_IMPORT_MB * 1024 * 1024:
+        raise HTTPException(status_code=413,
+                            detail=f"Fayl {MAX_IMPORT_MB} MB dan katta.")
+    try:
+        return importer.import_catalog(data, file.filename or "", dry_run=dry_run)
+    except importer.ImportFormatError as e:
+        # 422 — fayl formatiga oid xato (qatorga emas, butun faylga tegishli)
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/catalog/import/template")
+def catalog_import_template(fmt: str = Query("xlsx", pattern="^(xlsx|csv)$")):
+    """Namunaviy shablon fayl (sarlavhalar + misol qatorlar)."""
+    if fmt == "csv":
+        return FileResponse(
+            content=importer.template_csv(), media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="katalog_shablon.csv"'})
+    return FileResponse(
+        content=importer.template_xlsx(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="katalog_shablon.xlsx"'})
+
+
+@app.get("/tenders/{tender_id}/stock-check")
+def tender_stock_check(tender_id: int):
+    """TZ P0-6 — mos pozitsiyalar bo'yicha ombor qoldig'i. Yetishmayotganlar
+    ALOHIDA `shortages` ro'yxatida. Qoldiq eskirgan bo'lsa `preliminary: true`."""
+    res = stock.check_tender_stock(tender_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+    return res
+
+
+# ---------------------------------------------------------------------------
+# NARX HISOBI (TZ P0-7) — tannarx + ustama + xavf zaxirasi -> tavsiya etilgan narx
+#
+# AI YO'Q: butun mantiq `api/pricing.py` dagi SOF FUNKSIYADA. Endpointlar
+# faqat ma'lumot yig'adi, uni chaqiradi va saqlaydi.
+# ---------------------------------------------------------------------------
+@app.get("/pricing/settings")
+def get_pricing_settings():
+    """Odatiy parametrlar (har doim mavjud — patch id=1 ni yaratib qo'ygan)."""
+    return _shape_pricing_settings(db.query_one(queries.PRICING_SETTINGS_GET_SQL))
+
+
+@app.put("/pricing/settings")
+def put_pricing_settings(s: PricingSettingsIn):
+    """Odatiy parametrlarni saqlaydi — yangi tenderda boshlang'ich qiymat.
+
+    QISMAN yuborish mumkin: faqat kelgan maydonlar o'zgaradi. Ilgari model
+    maydonlariga standart qiymat berilgani uchun `{"markup_percent": 22}`
+    yuborilsa logistika va zaxira JIMGINA nolga qaytardi.
+    """
+    cur = db.query_one(queries.PRICING_SETTINGS_GET_SQL) or {}
+    patch = s.model_dump(exclude_unset=True)
+    merged = {k: patch.get(k, cur.get(k)) for k in
+              ("markup_percent", "risk_reserve_percent", "risk_reserve_fixed",
+               "logistics_percent", "logistics_fixed", "vat_percent", "currency")}
+    row = db.execute_returning(queries.PRICING_SETTINGS_UPSERT_SQL, merged)
+    return _shape_pricing_settings(row)
+
+
+@app.get("/tenders/{tender_id}/pricing")
+def get_tender_pricing(tender_id: int):
+    """Saqlangan smeta (yo'q bo'lsa null — 404 EMAS, chunki hisoblamaganlik
+    xato emas; `/profile` bilan bir xil uslub). TENDERNING O'ZI yo'q bo'lsa
+    esa bu boshqa hol — 404."""
+    _tender_bor_yoki_404(tender_id)
+    return _shape_tender_pricing(
+        db.query_one(queries.TENDER_PRICING_GET_SQL, {"id": tender_id}))
+
+
+@app.post("/tenders/{tender_id}/pricing")
+def post_tender_pricing(tender_id: int, body: PricingIn):
+    """Smetani qayta hisoblaydi va saqlaydi.
+
+    Frontend ham brauzerda hisoblaydi (bir xil formula — `pricing.ts`), lekin
+    bazaga YOZILADIGANI doim serverning natijasi: yagona haqiqat manbai bitta
+    bo'lishi kerak. Byudjet tenderdan, minimal foyda `company_profile` dan
+    olinadi (faqat o'qish — jadval o'zgarmaydi).
+    """
+    t = db.query_one(queries.PRICING_TENDER_SQL, {"id": tender_id})
+    if not t:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+
+    settings = db.query_one(queries.PRICING_SETTINGS_GET_SQL)
+    profile = db.query_one(queries.PROFILE_GET_SQL)
+    goods = db.query(queries.TENDER_GOODS_SQL, {"id": tender_id})
+
+    inp = pricing.build_inputs(settings, t, goods, profile, saved=None,
+                               override=body.model_dump(exclude={"note"}))
+    # `manual_price` ATAYLAB alohida: build_inputs None ni o'tkazib yuboradi,
+    # bu yerda esa None "qo'lda narxni O'CHIR" degani.
+    inp["manual_price"] = body.manual_price
+
+    result = pricing.calculate(inp)
+    if not result["ok"]:
+        # Noto'g'ri kiruvchidan chiqqan smetani SAQLAMAYMIZ (masalan valyuta
+        # aralashgan) — foydalanuvchi avval tuzatadi.
+        raise HTTPException(status_code=400, detail="; ".join(
+            e["message"] for e in result["errors"]))
+
+    saved = db.execute_returning(queries.TENDER_PRICING_UPSERT_SQL, {
+        "tender_id": tender_id,
+        "inputs": json.dumps(inp, ensure_ascii=False),
+        "result": json.dumps(result, ensure_ascii=False),
+        "manual_price": inp.get("manual_price"),
+        "currency": inp.get("currency"),
+        "note": body.note,
+    })
+    return {**_shape_tender_pricing(saved), **result}
+
+
+# ---------------------------------------------------------------------------
+# HUJJATLAR TO'LIQLIGI (TZ P0-8) — kompaniya hujjatlari + tender cheklisti
+#
+# STATIK cheklist: hujjat BORLIGI va MUDDATI tekshiriladi, mazmunining
+# huquqiy to'g'riligi EMAS (AI chaqirilmaydi). TZ da ataylab shunday
+# belgilangan — noto'g'ri huquqiy kafolat hissini yaratmaslik uchun.
+# ---------------------------------------------------------------------------
+@app.get("/company/document-types")
+def company_document_types():
+    """Kanonik hujjat turlari — formadagi dropdown shundan to'ladi."""
+    return [{"code": d["code"], "label": d["label"], "hint": d["hint"],
+             "base": d["base"]} for d in compliance.DOC_TYPES]
+
+
+@app.get("/company/documents")
+def company_documents():
+    """Kompaniya hujjatlari + har birining muddat holati."""
+    return [compliance.shape_document(r) for r in db.query(compliance.DOCS_LIST_SQL)]
+
+
+@app.post("/company/documents", status_code=201)
+def create_company_document(d: CompanyDocumentIn):
+    row = db.execute_returning(compliance.DOC_INSERT_SQL, d.model_dump())
+    return compliance.shape_document(row)
+
+
+@app.put("/company/documents/{doc_id}")
+def update_company_document(doc_id: int, d: CompanyDocumentIn):
+    row = db.execute_returning(compliance.DOC_UPDATE_SQL,
+                               {**d.model_dump(), "id": doc_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
+    return compliance.shape_document(row)
+
+
+@app.delete("/company/documents/{doc_id}", status_code=204)
+def delete_company_document(doc_id: int):
+    row = db.execute_returning(compliance.DOC_DELETE_SQL, {"id": doc_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
+    return None
+
+
+@app.get("/tenders/{tender_id}/compliance")
+def tender_compliance(tender_id: int):
+    """Majburiy hujjatlar ro'yxati + har biri uchun "bazada bor / yo'q" va
+    muddat holati. Tenderда talab topilmasa buni OCHIQ aytadi."""
+    if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
+                        {"id": tender_id}):
+        raise HTTPException(status_code=404, detail="Tender topilmadi.")
+    return compliance.check(tender_id)
+
+
+# ---------------------------------------------------------------------------
+# BILDIRISHNOMA (TZ P0-10) — "mosligi yuqori yangi tender chiqdi"
+#
+# IKKI KANAL: email (SMTP) va Telegram (Bot API). Xabarni `notify_new.py`
+# ETL dan keyin yuboradi; bu yerdagi endpointlar faqat SOZLAMALARNI
+# boshqaradi va sinov xabarini yuboradi.
+# ---------------------------------------------------------------------------
+@app.get("/notify/settings")
+def get_notify_settings():
+    """`smtp_password_set` / `telegram_token_set` — sirlar .env da bormi
+    (sirlarning O'ZI hech qachon qaytmaydi)."""
+    return notify.get_settings()
+
+
+@app.put("/notify/settings")
+def put_notify_settings(s: NotifySettingsIn):
+    """Sozlamalarni saqlaydi. QISMAN yuborish mumkin — yuborilmagan maydon
+    o'zgarmaydi (`exclude_unset`)."""
+    try:
+        return notify.save_settings(s.model_dump(exclude_unset=True))
+    except notify.NotifyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/notify/test")
+def notify_test():
+    """Sinov xabari. `notify_sent` ga YOZMAYDI — haqiqiy bildirishnomalarga
+    ta'sir qilmaydi."""
+    try:
+        return notify.send_test()
+    except notify.NotifyError as e:
+        # Sozlama/SMTP xatosi — foydalanuvchi tuzatishi mumkin -> 400
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/notify/run")
+def notify_run(dry_run: bool = Query(True, description="Yubormasdan ko'rish.")):
+    """Bildirishnoma tsiklini qo'lda yurgizadi (standart: dry-run)."""
+    try:
+        res = notify.run(dry_run=dry_run)
+    except notify.NotifyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Xabar tanasi (text/html) javobda kerak emas — faqat xulosa
+    return {k: v for k, v in res.items() if k not in ("text", "html")}
+
+
+# --- Telegram kanali --------------------------------------------------------
+# Bot tokeni FAQAT .env da (TELEGRAM_BOT_TOKEN) — bu endpointlar uni HECH
+# QACHON qaytarmaydi, faqat "sozlanganmi" belgisi va bot username'i.
+@app.get("/notify/telegram/bot")
+def telegram_bot_info():
+    """Bot haqida (username) — foydalanuvchi QAYSI botga /start yozishini
+    bilsin. Token yo'q/noto'g'ri bo'lsa 400 va ANIQ matn."""
+    if not telegram.token_set():
+        raise HTTPException(
+            status_code=400,
+            detail=("Telegram bot tokeni serverда yo'q. .env fayliga "
+                    "TELEGRAM_BOT_TOKEN=... qo'shing va API'ni qayta ishga "
+                    "tushiring."))
+    try:
+        return telegram.get_me()
+    except telegram.TelegramError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/notify/telegram/subscribers")
+def telegram_subscribers():
+    """Obunachilar ro'yxati — botga /start bosgan har bir suhbat.
+
+    BO'SH ro'yxat XATO EMAS: shunchaki hali hech kim /start bosmagan.
+    """
+    return {"subscribers": notify.subscribers(),
+            "ready": notify.subscribers_ready()}
+
+
+@app.post("/notify/telegram/link")
+def telegram_link_create():
+    """Telegramni ulash uchun BIR MARTALIK havola yaratadi.
+
+    Foydalanuvchi shu havolani bosadi -> Telegram botni ochadi -> "Start"
+    bosiladi -> bot `/start <token>` xabarini oladi. Faqat SHU token bilan
+    kelgan suhbat ulanadi: tokensiz /start bosgan begona odam obunachi
+    BO'LMAYDI.
+    """
+    try:
+        return notify.create_link()
+    except notify.NotifyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/notify/telegram/link/{token}")
+def telegram_link_status(token: str):
+    """Havola ishlatildimi. Interfeys havolani ochgach shuni qisqa oraliqda
+    so'rab turadi va ulanish yakunlanishi bilan ro'yxatni yangilaydi.
+
+    So'rov `consume_links()` ni ham chaqiradi — aks holda ulanish faqat
+    keyingi bildirishnoma tsiklida qayd etilardi va foydalanuvchi
+    "ishlamadi" deb o'ylardi.
+    """
+    try:
+        notify.consume_links()
+    except notify.NotifyError:
+        pass          # holatni baribir qaytaramiz (quyida `found: false` bo'ladi)
+    return {**notify.link_status(token), "subscribers": notify.subscribers()}
+
+
+class SubscriberIn(BaseModel):
+    """Obunachini yoqish/o'chirish. Bu YAGONA tahrirlanadigan maydon —
+    qolgani (nom, tur) Telegramdan keladi."""
+    enabled: bool
+
+
+@app.put("/notify/telegram/subscribers/{chat_id}")
+def telegram_subscriber_update(chat_id: str, body: SubscriberIn):
+    """Obunachiga xabar ketishini yoqadi/o'chiradi."""
+    row = db.execute_returning(notify.SUB_SET_ENABLED_SQL,
+                               {"chat_id": chat_id, "enabled": body.enabled})
+    if not row:
+        raise HTTPException(status_code=404, detail="Obunachi topilmadi.")
+    return {"subscribers": notify.subscribers()}
+
+
+@app.delete("/notify/telegram/subscribers/{chat_id}")
+def telegram_subscriber_delete(chat_id: str):
+    """Obunachini ro'yxatdan o'chiradi.
+
+    DIQQAT: u botga QAYTA /start yozsa yana qo'shiladi. Butunlay to'xtatish
+    uchun `enabled=false` qo'ying — o'chirish faqat ro'yxatni tozalaydi.
+    """
+    row = db.execute_returning(notify.SUB_DELETE_SQL, {"chat_id": chat_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="Obunachi topilmadi.")
+    return {"subscribers": notify.subscribers()}
+
+
+@app.post("/notify/telegram/test")
+def telegram_test(chat_id: Optional[str] = Query(
+        None, description="Faqat shu obunachiga. Bo'sh — barchasiga.")):
+    """Telegram sinov xabari. `notify_sent` ga YOZMAYDI va `telegram_enabled`
+    ni talab qilmaydi — yoqishdan OLDIN tekshirish uchun."""
+    try:
+        return notify.send_telegram_test(chat_id=chat_id)
+    except notify.NotifyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/products")
+def products(
+    q: Optional[str] = Query(None, description="Nom bo'yicha filtr (lotin/kirill farqsiz)."),
+    kind: Optional[str] = Query(None, description="'product' — faqat mahsulot, 'service' — faqat xizmat, bo'sh — hammasi."),
+    status: Optional[str] = Query("open", description="Qaysi status bo'yicha sanash. Barchasi uchun bo'sh."),
+    limit: int = Query(30, ge=1, le=200),
+):
+    """Mahsulot/xizmat filtri uchun takliflar — tenderlarда uchraydigan nomlar.
+
+    Alohida lug'at QURILMAGAN: `tender_good.name` ikkala manbada ham to'liq
+    to'ldirilgan va yaxshi takrorlanadi, shuning uchun ro'yxat to'g'ridan-to'g'ri
+    ma'lumotdan chastota bo'yicha olinadi. Qidiruv alifbodan qat'i nazar
+    ishlaydi (api/translit.py).
+
+    Mahsulot/xizmat bo'linishi manbada berilmagan — u OKED bo'limi, o'lchov
+    birligi va nomdan aniqlanadi (queries.SERVICE_PREDICATE).
+    """
+    cond, params = queries.build_column_search("g.name", q) if q else ("", {})
+    rows = db.query(queries.products_sql(cond, kind=kind or ""),
+                    {**params, "status": status or "", "limit": limit})
+    return [{"name": r["name"], "tender_count": r["tender_count"]} for r in rows]
+
+
 @app.get("/categories")
 def categories():
     """Kategoriya daraxti (2 daraja) + har birida ochiq tenderlar soni.
@@ -551,12 +1295,29 @@ def _shape_profile(r: Optional[dict]) -> Optional[dict]:
         return None
     return {
         "id": r["id"],
+        "contact_name": r.get("contact_name"),
+        "email": r.get("email"),
+        "phone": r.get("phone"),
+        "position": r.get("position"),
         "name": r["name"],
         "keywords": r["keywords"] or [],
         "regions": r["regions"] or [],
         "currency": r["currency"],
         "min_cost": _num(r["min_cost"]),
         "max_cost": _num(r["max_cost"]),
+        # Salohiyat maydonlari (Go/No-Go). Eski profil qatorlarida bo'lmasligi
+        # mumkin, shuning uchun .get() bilan o'qiladi.
+        "about": r.get("about"),
+        "certificates": r.get("certificates") or [],
+        "clearances": r.get("clearances") or [],
+        "experience_years": r.get("experience_years"),
+        "max_contract_value": _num(r.get("max_contract_value")),
+        "max_contract_currency": r.get("max_contract_currency"),
+        "employees": r.get("employees"),
+        "capacity_note": r.get("capacity_note"),
+        "lead_time_days": r.get("lead_time_days"),
+        "min_margin_percent": _num(r.get("min_margin_percent")),
+        "constraints_note": r.get("constraints_note"),
         "updated_at": _iso(r["updated_at"]),
     }
 
@@ -643,7 +1404,58 @@ def _shape_product(r: dict) -> dict:
         "category_code": r["category_code"], "keywords": r["keywords"] or [],
         "unit": r["unit"], "price": _num(r["price"]), "currency": r["currency"],
         "notify": r["notify"], "created_at": _iso(r["created_at"]),
+        # --- P0-4/P0-6: ombor qoldig'i ---
+        "stock_qty": _num(r.get("stock_qty")),
+        "stock_unit": r.get("stock_unit"),
+        "stock_updated_at": _iso(r.get("stock_updated_at")),
+        "cost_price": _num(r.get("cost_price")),
     }
+
+
+def _pnum(v):
+    """NUMERIC -> float (psycopg2 Decimal qaytaradi, JSON uni bilmaydi)."""
+    return None if v is None else float(v)
+
+
+def _shape_pricing_settings(r: Optional[dict]) -> Optional[dict]:
+    if not r:
+        return None
+    return {
+        "markup_percent": _pnum(r["markup_percent"]),
+        "risk_reserve_percent": _pnum(r["risk_reserve_percent"]),
+        "risk_reserve_fixed": _pnum(r["risk_reserve_fixed"]),
+        "logistics_percent": _pnum(r["logistics_percent"]),
+        "logistics_fixed": _pnum(r["logistics_fixed"]),
+        "vat_percent": _pnum(r["vat_percent"]),
+        "currency": r["currency"],
+        "updated_at": _iso(r["updated_at"]),
+    }
+
+
+def _shape_tender_pricing(r: Optional[dict]) -> Optional[dict]:
+    if not r:
+        return None
+    return {
+        "tender_id": r["tender_id"],
+        "inputs": r["inputs"],
+        "result": r["result"],
+        "manual_price": _pnum(r["manual_price"]),
+        "currency": r["currency"],
+        "note": r["note"],
+        "updated_at": _iso(r["updated_at"]),
+    }
+
+
+# Nega hujjat matni o'qilmadi — foydalanuvchiga tushunarli sabab.
+# TZ P0-2: 'ok' dan boshqa HAR QANDAY status "qo'lda tekshirish talab etiladi"
+# toifasiga kiradi, lekin SABABI turlicha va keyingi qadam ham turlicha.
+_DOC_TEXT_REASON = {
+    "unreadable":      "Matn chiqmadi — skan qilingan yoki rasm ko'rinishidagi hujjat",
+    "unsupported":     "Format qo'llab-quvvatlanmaydi (arxiv yoki eski binar fayl)",
+    "too_large":       "Fayl juda katta — avtomatik o'qilmadi",
+    "download_failed": "Manbadan yuklab olinmadi",
+    "pending":         "Hali qayta ishlanmagan",
+}
 
 
 def _product_matches(cand: dict, product: dict) -> Optional[str]:
@@ -658,15 +1470,17 @@ def _product_matches(cand: dict, product: dict) -> Optional[str]:
     terms = [product["name"]] + (product.get("keywords") or [])
     blob = matching._norm(f"{cand.get('name') or ''} {cand.get('goods_blob') or ''}")
     for t in terms:
-        if t and matching._norm(t) in blob:
+        # _hits — alifbodan qat'i nazar: katalogda "nasos" bo'lsa "Насос"
+        # tovarli tender ham mos keladi (api/translit.py)
+        if t and matching._hits(t, blob):
             return "name"
     return None
 
 
-def _catalog_candidates(region=None, currency=None):
+def _catalog_candidates(region=None, currency=None, products=None):
     """Ochiq nomzod tenderlar (katalog moslik uchun bir marta olinadi)."""
     where, params = queries.build_tender_filters(
-        status="open", region=region, currency=currency)
+        status="open", region=region, currency=currency, products=products)
     return db.query(queries.match_candidates_sql(where, cap=MATCH_CAP), params)
 
 
@@ -712,7 +1526,8 @@ def catalog_match(body: CatalogMatchIn):
     """Katalogga mos ochiq tenderlar. Kategoriya = asosiy relevantlik,
     nom = qo'shimcha. Har tenderда qaysi mahsulot(lar) mos kelgani ko'rsatiladi."""
     prods = db.query(queries.CATALOG_LIST_SQL)
-    cand = _catalog_candidates(region=body.region, currency=body.currency)
+    cand = _catalog_candidates(region=body.region, currency=body.currency,
+                               products=body.products + body.services)
 
     matched = []
     for c in cand:
@@ -772,12 +1587,27 @@ def get_profile():
 def put_profile(p: ProfileIn):
     """Profilni saqlaydi (bitta faol profil — bor bo'lsa yangilanadi)."""
     row = db.execute_returning(queries.PROFILE_UPSERT_SQL, {
+        "contact_name": p.contact_name,
+        "email": p.email,
+        "phone": p.phone,
+        "position": p.position,
         "name": p.name,
         "keywords": p.keywords,
         "regions": p.regions,
         "currency": p.currency,
         "min_cost": p.min_cost,
         "max_cost": p.max_cost,
+        "about": p.about,
+        "certificates": p.certificates,
+        "clearances": p.clearances,
+        "experience_years": p.experience_years,
+        "max_contract_value": p.max_contract_value,
+        "max_contract_currency": p.max_contract_currency,
+        "employees": p.employees,
+        "capacity_note": p.capacity_note,
+        "lead_time_days": p.lead_time_days,
+        "min_margin_percent": p.min_margin_percent,
+        "constraints_note": p.constraints_note,
     })
     return _shape_profile(row)
 
@@ -792,6 +1622,7 @@ def match(body: MatchIn):
     where, params = queries.build_tender_filters(
         status=body.status or None, region=body.region,
         currency=body.currency, q=body.q, category=body.category,
+        products=body.products + body.services,
     )
     rows = db.query(queries.match_candidates_sql(where, cap=MATCH_CAP), params)
 

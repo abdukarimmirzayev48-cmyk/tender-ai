@@ -20,6 +20,10 @@ MUHIM NUANCELAR (empirik aniqlangan):
   5. Hudud ID umuman yo'q — faqat nom, turli alifboda. Shuning uchun
      viloyat darajasida ANIQ jadval bilan moslashtiramiz (pastda).
   6. UzEx'da "lot" tushunchasi yo'q — butun savdo = bitta lot (frontend /lot/{id}).
+  7. TypeId savdo TURINI bildiradi va u `tender.type` ga o'giriladi (TYPE_BY_ID).
+     Ilgari "tender" qattiq yozilgan edi — TypeId=1 yozuvlari ham noto'g'ri
+     "tender" bo'lib qolar edi. Endi TypeId=1 -> 'selection' (xt-xarid'dagi
+     ref_selection_public bilan bir xil atama).
 
 Ishga tushirish:
     export XT_DB_DSN="dbname=xtxarid user=a1234 password=... host=localhost"
@@ -74,6 +78,15 @@ REGION_MAP: Dict[int, Tuple[str, str]] = {
     2858: ("33.2890", "Xorazm viloyati"),
     3049: ("33.3081", "Qoraqalpog‘iston Respublikasi"),
 }
+
+# SAVDO TURI: UzEx TypeId -> bizning kanonik `tender.type` qiymati.
+# xt-xarid ham xuddi shu atamalarni beradi ('tender' / 'selection'), shuning
+# uchun ikkala platformada tur bo'yicha filtr bir xil ishlaydi.
+TYPE_BY_ID: Dict[int, str] = {
+    1: "selection",   # "Eng yaxshi takliflarni tanlash"
+    2: "tender",      # klassik tender
+}
+DEFAULT_TYPE = "tender"   # noma'lum TypeId uchun xavfsiz zaxira
 
 # Muddat birligini kunga o'girish
 PERIOD_DAYS = {"дней": 1, "день": 1, "кун": 1, "kun": 1,
@@ -181,7 +194,7 @@ def scan_documents(detail: dict, tender_id: int) -> List[dict]:
     return docs
 
 
-def transform(row: dict, detail: dict) -> dict:
+def transform(row: dict, detail: dict, type_id: int = 2) -> dict:
     src_id = int(row["id"])
     tid = UZEX_OFFSET + src_id
     area_path, area_leaf = region_for(row.get("region_name"))
@@ -190,7 +203,8 @@ def transform(row: dict, detail: dict) -> dict:
 
     tender = {
         "id": tid, "source_id": src_id, "source_platform": SOURCE,
-        "type": "tender",
+        # Tur TypeId dan olinadi (ilgari "tender" qattiq yozilgan edi)
+        "type": TYPE_BY_ID.get(type_id, DEFAULT_TYPE),
         "name": row.get("name") or detail.get("display_no"),
         "status": "open",                       # TradeList faqat faollarni beradi
         "totalcost": detail.get("start_cost") or row.get("cost"),
@@ -347,7 +361,8 @@ def main() -> None:
     ap.add_argument("--dsn", default=os.environ.get("XT_DB_DSN"))
     args = ap.parse_args()
 
-    print(f"[1/3] TradeList (TypeId={args.type_id}) yig'ilyapti...")
+    ttype = TYPE_BY_ID.get(args.type_id, DEFAULT_TYPE)
+    print(f"[1/3] TradeList (TypeId={args.type_id} -> type='{ttype}') yig'ilyapti...")
     rows = fetch_list(args.type_id)
     if args.limit:
         rows = rows[:args.limit]
@@ -368,7 +383,7 @@ def main() -> None:
     for i, row in enumerate(rows, 1):
         try:
             detail = get(f"/common/GetTrade/{row['id']}/0")
-            rec = transform(row, detail)
+            rec = transform(row, detail, args.type_id)
         except Exception as e:  # noqa: BLE001
             failed += 1
             print(f"  [{i}/{len(rows)}] #{row['id']} — XATO: {str(e)[:70]}")

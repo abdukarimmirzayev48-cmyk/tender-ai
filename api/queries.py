@@ -7,6 +7,8 @@ bilan tekshiriladi, chunki ustun nomini parametrlashtirib bo'lmaydi.
 """
 from typing import Any, Dict, List, Tuple
 
+from api import translit
+
 # Ro'yxat va bitta tender uchun umumiy SELECT boshi (JOIN'lar bilan).
 # name_uz hozircha bo'sh — shuning uchun name_ru ni ham qaytaramiz, frontend tanlaydi.
 _TENDER_SELECT = """
@@ -77,6 +79,147 @@ _AI_TEXT = """concat_ws(' ',
         COALESCE(ax.result->'category_tags', '[]'::jsonb)) x))"""
 
 
+# ---------------------------------------------------------------------------
+# MATNLI QIDIRUV — alifbodan qat'i nazar (api/translit.py ga qarang)
+#
+# Manba nomlari aralash alifboda: "Спектрометр", "Listlarni bukish mashinasi",
+# "Ўткир юрак-қон томир", "Deflazakort". Oddiy ILIKE bilan lotin so'rov deyarli
+# hech narsa topmasdi (`nasos` -> 0, `насос` -> 15).
+#
+# Ishlash tartibi:
+#   1. Ustunlar SQL da YIG'ILADI (translit.sql_fold): ь ъ o'chadi, э->е, ы й->и.
+#   2. So'rov ham yig'iladi va alifbo variantlariga yoyiladi (translit.variants).
+#   3. Variantlar `LIKE ANY(ARRAY[...])` bilan solishtiriladi.
+#
+# NEGA `LIKE ANY`, `OR` emas: variantlarni OR bilan qo'shsak, translate() har
+# variant uchun QAYTA hisoblanadi (6 variant = 6 marta). `LIKE ANY` da esa
+# ustun bir marta yig'iladi va massivga solishtiriladi — o'lchovda qidiruv
+# ~3x tezlashdi.
+#
+# Ikkala tomon yig'ilgani uchun ILIKE emas, oddiy LIKE yetarli.
+# ---------------------------------------------------------------------------
+
+
+def _like_patterns(variants: List[str]) -> List[str]:
+    """LIKE naqshlari — foydalanuvchi kiritgan joker belgilar ekranlanadi.
+
+    Qiymatlar parametr orqali uzatiladi (injection yo'q), lekin `%` va `_`
+    LIKE uchun maxsus belgi: "50%" so'rovi ekranlanmasa hamma narsaga mos keladi.
+    """
+    out = []
+    for v in variants:
+        v = v.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        out.append(f"%{v}%")
+    return out
+
+
+def build_column_search(col: str, q: str,
+                        param: str = "pats") -> Tuple[str, Dict[str, Any]]:
+    """Bitta ustun bo'yicha alifbodan qat'i nazar qidiruv sharti.
+
+    `/products` takliflari uchun ishlatiladi — u yerda faqat tovar nomi
+    qidiriladi (buyurtmachi/AI matni emas).
+    """
+    variants = translit.variants(q)
+    if not variants:
+        return "", {}
+    cond = f"{translit.sql_fold(col)} LIKE ANY(%({param})s)"
+    return cond, {param: _like_patterns(variants)}
+
+
+# ---------------------------------------------------------------------------
+# XIZMAT vs MAHSULOT — manbada bunday bayroq YO'Q, uni o'zimiz aniqlaymiz.
+#
+# Uchta signal birlashtiriladi (o'lchov asosida tanlangan, 2357 tovar qatorida):
+#   1) OKED bo'limi (good_code) — rasmiy klassifikator, 99% qatorda bor.
+#      NACE'da 33, 35-39, 41-53, 55-66, 68-82, 84-96 — xizmat bo'limlari.
+#      EHTIYOT: good_code ba'zan UUID bo'ladi (31 qator), o'shanda birinchi
+#      ikki belgi bo'lim deb o'qilib "Шайба" xizmatga aylanib qolgan edi.
+#      Shuning uchun `^\d{2}\.` shakli TEKSHIRILADI.
+#   2) O'lchov birligi — "усл. ед", "порция", "объект", "шартли бирлик".
+#   3) Nom — "услуга/работы/хизмат/ишлари/қуриш...".
+#      EHTIYOT: "ремонт"/"монтаж" faqat SO'Z BOSHIDA hisobga olinadi, aks holda
+#      "Кольцо для ремонта насосов" va "Панель электромонтажная" (mahsulotlar)
+#      xizmat bo'lib qolardi.
+#
+# Natija: 193 xizmat qatori / 62 turli nom, 2156 mahsulot qatori / 710 nom.
+# Bu EVRISTIKA — manbaning o'z xatolari o'tib ketishi mumkin (masalan "Отвод"
+# quvur bo'lagi manbada qurilish kodi 42.21 bilan berilgan).
+# ---------------------------------------------------------------------------
+_SERVICE_DIVISIONS = (
+    [33] + list(range(35, 40)) + list(range(41, 54)) +
+    list(range(55, 67)) + list(range(68, 83)) + list(range(84, 97))
+)
+
+SERVICE_PREDICATE = (
+    "("
+    "  (g.good_code ~ '^\\d{2}\\.'"
+    "   AND substring(g.good_code from '^(\\d{2})')::int IN ("
+    + ",".join(str(d) for d in _SERVICE_DIVISIONS) + "))"
+    "  OR g.unit ~* '^\\s*(усл|порц|об[ъь]ект|шартли)'"
+    "  OR g.name ~* '(услуг|работ|обслуживани|строительств|^\\s*ремонт|^\\s*монтаж"
+    "|xizmat|хизмат|таъмир|ишлари|қуриш|ish lari)'"
+    ")"
+)
+
+
+def kind_predicate(kind: str) -> str:
+    """`kind` -> SQL sharti. 'service' | 'product' | boshqa (=hammasi)."""
+    if kind == "service":
+        return SERVICE_PREDICATE
+    if kind == "product":
+        return f"NOT {SERVICE_PREDICATE}"
+    return ""
+
+
+def build_product_filter(products: List[str],
+                         param: str = "prod_pats") -> Tuple[str, Dict[str, Any]]:
+    """MAHSULOT filtri — FAQAT tovar nomi bo'yicha.
+
+    Erkin matnli `q` dan ATAYIN ajratilgan. `q` tender nomi va BUYURTMACHI
+    nomini ham qamraydi, bu esa mahsulot uchun soxta natija beradi: "qurilish"
+    so'rovi "Курилиш дирекцияси" MCHJ e'lon qilgan 39 ta tenderni tortadi,
+    ularда qurilish tovari yo'q bo'lsa ham. Xuddi shu sabab bilan
+    matching.score_tender() ham company_name ni hisobga olmaydi.
+
+    Bir nechta mahsulot berilsa — ULARDAN BIRORTASI (OR): ta'minotchi bir
+    nechta narsa sotadi, hammasi bitta tenderда bo'lishi shart emas. Xizmatlar
+    ham shu ro'yxatga qo'shiladi (ular ham "men taklif qilaman" ma'nosida).
+    """
+    pats: List[str] = []
+    for p in products or []:
+        pats.extend(_like_patterns(translit.variants(p)))
+    if not pats:
+        return "", {}
+    cond = ("EXISTS (SELECT 1 FROM tender_good g "
+            f"        WHERE g.tender_id = t.id "
+            f"          AND {translit.sql_fold('g.name')} LIKE ANY(%({param})s))")
+    return cond, {param: pats}
+
+
+def build_text_search(q: str, param: str = "q_pats") -> Tuple[str, Dict[str, Any]]:
+    """Erkin matnli qidiruv sharti. Bo'sh so'rovda ('', {}) qaytadi."""
+    variants = translit.variants(q)
+    if not variants:
+        return "", {}
+
+    pat = f"LIKE ANY(%({param})s)"
+    fold = translit.sql_fold
+    company = fold("COALESCE(t.company_name, '')")
+    clause = (
+        f"({fold('t.name')} {pat}"
+        f" OR {company} {pat}"
+        f" OR EXISTS (SELECT 1 FROM tender_good g"
+        f"            WHERE g.tender_id = t.id AND {fold('g.name')} {pat})"
+        # AI kalit so'zlari — "kompyuter" so'rovi "Моноблок" tenderini topadi
+        # (AI sinonimlarni yozib qo'ygan). Tahlil qilinmaganда shart FALSE.
+        f" OR EXISTS (SELECT 1 FROM ai_analysis ax"
+        f"            WHERE ax.tender_id = t.id AND ax.kind = 'summary_v1'"
+        f"              AND {fold(_AI_TEXT)} {pat}))"
+    )
+    return clause, {param: _like_patterns(variants)}
+
+
 def build_tender_filters(
     status: str = None,
     region: str = None,
@@ -84,6 +227,7 @@ def build_tender_filters(
     source: str = None,
     q: str = None,
     category: str = None,
+    products: List[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """WHERE bo'lagini va parametrlarni quradi (bo'sh filtrlar tashlab yuboriladi)."""
     clauses: List[str] = []
@@ -92,6 +236,12 @@ def build_tender_filters(
     if status:
         clauses.append("t.status = %(status)s")
         params["status"] = status
+        if status == "open":
+            # MUDDAT HAM TEKSHIRILADI. `status` — manba bergan oxirgi qiymat.
+            # Tender yopilgach manba ro'yxatidan CHIQIB KETADI, biz uni boshqa
+            # ko'rmaymiz va bizdagi 'open' abadiy qotib qoladi. Natijada
+            # ro'yxatda taklif berib bo'lmaydigan tenderlar chiqardi.
+            clauses.append("(t.close_at IS NULL OR t.close_at > now())")
     if region:
         # Ierarxik PREFIX moslashuvi: dim_area.area_id to'liq nuqtali yo'l
         # ('33.2137' = viloyat, '33.2137.2138.2140' = leaf). Viloyat tanlansa,
@@ -113,24 +263,18 @@ def build_tender_filters(
             "EXISTS (SELECT 1 FROM tender_category tc WHERE tc.tender_id = t.id "
             "        AND (tc.code = %(category)s OR tc.code LIKE %(category)s || '/%%'))")
         params["category"] = category
+    if products:
+        # Mahsulot filtri `q` bilan VA (AND) bog'lanadi: "насос sotaman VA
+        # Toshkentda" — ikkalasi bir vaqtda ishlashi kerak.
+        clause, p_params = build_product_filter(products)
+        if clause:
+            clauses.append(clause)
+            params.update(p_params)
     if q:
-        # name, company_name yoki tovar nomi bo'yicha qidiruv (katta-kichik farqsiz).
-        # MUHIM: baza `C` locale bilan yaratilgan — oddiy ILIKE kirill harflarni
-        # katta-kichik qila olmaydi. Shuning uchun har ustunga COLLATE "unicode"
-        # (ICU) qo'yamiz — kirillcha ham to'g'ri ishlaydi, locale'ga bog'liq emas.
-        clauses.append(
-            '(t.name COLLATE "unicode" ILIKE %(q)s '
-            'OR t.company_name COLLATE "unicode" ILIKE %(q)s '
-            "OR EXISTS (SELECT 1 FROM tender_good g "
-            '           WHERE g.tender_id = t.id AND g.name COLLATE "unicode" ILIKE %(q)s)'
-            # AI kalit so'zlari bo'yicha ham qidiramiz — shu bilan "kompyuter"
-            # so'rovi "Моноблок" tenderini topadi (AI sinonimlarni yozib qo'ygan).
-            # Tahlil qilinmagan tenderlarда bu shart oddiygina FALSE bo'ladi.
-            " OR EXISTS (SELECT 1 FROM ai_analysis ax "
-            "            WHERE ax.tender_id = t.id AND ax.kind = 'summary_v1' "
-            f'              AND {_AI_TEXT} COLLATE "unicode" ILIKE %(q)s))'
-        )
-        params["q"] = f"%{q}%"
+        clause, q_params = build_text_search(q)
+        if clause:
+            clauses.append(clause)
+            params.update(q_params)
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     return where, params
@@ -217,12 +361,21 @@ ORDER BY g.lot_id, g.good_code
 """
 
 # --- /stats ---
-STATS_OPEN_COUNT_SQL = "SELECT count(*) AS n FROM tender WHERE status = %(status)s"
+# MUDDAT TEKSHIRUVI: `status` — manba bergan oxirgi qiymat. Tender yopilgach
+# manba ro'yxatidan chiqib ketadi, biz uni boshqa ko'rmaymiz va bizdagi 'open'
+# abadiy qotib qoladi. Shuning uchun 'open' so'ralganda close_at ham qaraladi.
+# Boshqa statuslarda shart o'z-o'zidan rost bo'ladi.
+STATS_OPEN_COUNT_SQL = """
+SELECT count(*) AS n FROM tender
+WHERE status = %(status)s
+  AND (%(status)s <> 'open' OR close_at IS NULL OR close_at > now())
+"""
 
 STATS_BY_CURRENCY_SQL = """
 SELECT currency, count(*) AS tender_count, COALESCE(SUM(totalcost), 0) AS total_value
 FROM tender
 WHERE status = %(status)s
+  AND (%(status)s <> 'open' OR close_at IS NULL OR close_at > now())
 GROUP BY currency
 ORDER BY currency
 """
@@ -234,6 +387,7 @@ SELECT a.area_id,
 FROM tender t
 LEFT JOIN dim_area a ON a.area_id = t.area_leaf_id
 WHERE t.status = %(status)s
+  AND (%(status)s <> 'open' OR t.close_at IS NULL OR t.close_at > now())
 GROUP BY a.area_id, COALESCE(a.name_uz, a.name_ru)
 ORDER BY tender_count DESC
 """
@@ -295,25 +449,57 @@ LIMIT {int(cap)}
 
 
 # --- profil (CRUD, bitta faol profil) ---
-PROFILE_GET_SQL = """
-SELECT id, name, keywords, regions, currency, min_cost, max_cost, updated_at
+# Ustunlar ikki guruh:
+#   QIDIRUV sozlamalari — keywords, regions, currency, min_cost, max_cost
+#   SALOHIYAT (Go/No-Go uchun) — about, certificates, clearances,
+#       experience_years, max_contract_value/currency, employees, capacity_note
+# Ikkinchi guruh schema_patch_gonogo.sql da qo'shilgan; hammasi ixtiyoriy.
+_PROFILE_COLS = ("id, name, keywords, regions, currency, min_cost, max_cost, "
+                 "about, certificates, clearances, experience_years, "
+                 "max_contract_value, max_contract_currency, employees, "
+                 "capacity_note, lead_time_days, min_margin_percent, "
+                 "constraints_note, contact_name, email, phone, position, "
+                 "updated_at")
+
+PROFILE_GET_SQL = f"""
+SELECT {_PROFILE_COLS}
 FROM company_profile
 ORDER BY updated_at DESC
 LIMIT 1
 """
 
 # Bitta faol profil: bor bo'lsa yangilaymiz, yo'q bo'lsa qo'shamiz
-PROFILE_UPSERT_SQL = """
-INSERT INTO company_profile (id, name, keywords, regions, currency, min_cost, max_cost, updated_at)
+PROFILE_UPSERT_SQL = f"""
+INSERT INTO company_profile (
+    id, name, keywords, regions, currency, min_cost, max_cost,
+    about, certificates, clearances, experience_years,
+    max_contract_value, max_contract_currency, employees, capacity_note,
+    lead_time_days, min_margin_percent, constraints_note,
+    contact_name, email, phone, position, updated_at)
 VALUES (
     COALESCE((SELECT id FROM company_profile ORDER BY updated_at DESC LIMIT 1), 1),
-    %(name)s, %(keywords)s, %(regions)s, %(currency)s, %(min_cost)s, %(max_cost)s, now()
+    %(name)s, %(keywords)s, %(regions)s, %(currency)s, %(min_cost)s, %(max_cost)s,
+    %(about)s, %(certificates)s, %(clearances)s, %(experience_years)s,
+    %(max_contract_value)s, %(max_contract_currency)s, %(employees)s,
+    %(capacity_note)s, %(lead_time_days)s, %(min_margin_percent)s,
+    %(constraints_note)s, %(contact_name)s, %(email)s, %(phone)s,
+    %(position)s, now()
 )
 ON CONFLICT (id) DO UPDATE SET
     name=EXCLUDED.name, keywords=EXCLUDED.keywords, regions=EXCLUDED.regions,
     currency=EXCLUDED.currency, min_cost=EXCLUDED.min_cost, max_cost=EXCLUDED.max_cost,
+    about=EXCLUDED.about, certificates=EXCLUDED.certificates,
+    clearances=EXCLUDED.clearances, experience_years=EXCLUDED.experience_years,
+    max_contract_value=EXCLUDED.max_contract_value,
+    max_contract_currency=EXCLUDED.max_contract_currency,
+    employees=EXCLUDED.employees, capacity_note=EXCLUDED.capacity_note,
+    lead_time_days=EXCLUDED.lead_time_days,
+    min_margin_percent=EXCLUDED.min_margin_percent,
+    constraints_note=EXCLUDED.constraints_note,
+    contact_name=EXCLUDED.contact_name, email=EXCLUDED.email,
+    phone=EXCLUDED.phone, position=EXCLUDED.position,
     updated_at=now()
-RETURNING id, name, keywords, regions, currency, min_cost, max_cost, updated_at
+RETURNING {_PROFILE_COLS}
 """
 
 
@@ -359,15 +545,124 @@ SELECT c.code, c.parent, c.name_uz, c.sort_order,
           FROM tender_category tc
           JOIN tender t ON t.id = tc.tender_id
          WHERE t.status = 'open'
+           AND (t.close_at IS NULL OR t.close_at > now())
            AND (tc.code = c.code OR tc.code LIKE c.code || '/%%')) AS cnt
 FROM dim_category_uz c
 ORDER BY c.sort_order
 """
 
+# --- Hujjat matni (P0-2) ---
+# LEFT JOIN — matn ajratilmagan hujjat ham ro'yxatda qoladi ('pending'),
+# aks holda "hali ishlanmagan" va "o'qib bo'lmadi" farqlanmay qolardi.
+TENDER_DOCUMENT_TEXT_SQL = """
+SELECT d.file_ref, d.name, d.file_type, d.field_key, d.size_bytes,
+       t.status, t.char_count, t.page_count, t.error, t.extractor,
+       t.extracted_at,
+       left(t.text, %(preview)s) AS preview
+FROM tender_document d
+LEFT JOIN tender_document_text t
+       ON t.tender_id = d.tender_id AND t.file_ref = d.file_ref
+WHERE d.tender_id = %(id)s
+ORDER BY d.field_key, d.name
+"""
+
+# Bitta faylning TO'LIQ matni (?ref=... &full=true)
+DOCUMENT_TEXT_FULL_SQL = """
+SELECT status, char_count, page_count, error, extractor, extracted_at, text
+FROM tender_document_text
+WHERE tender_id = %(id)s AND file_ref = %(ref)s
+"""
+
+
+# --- AI moslik tahlili (kind='match_v1') ---
+# Tenderning AI uchun kerakli barcha ma'lumoti bitta so'rovda (etl_ai_summary.py
+# dagi FETCH_SQL bilan bir xil shakl — ai.build_input() ikkalasini ham o'qiydi).
+AI_TENDER_SQL = """
+SELECT
+    t.id, t.type, t.name, t.company_name, t.totalcost, t.currency,
+    -- Go/No-Go uchun qo'shimcha: muddat, hudud yo'li va tender shartlari.
+    -- `ai.build_input()` bu maydonlarni O'QIMAYDI, shuning uchun ai_match
+    -- keshi buzilmaydi — faqat ai_gonogo ulardan foydalanadi.
+    t.close_at, t.area_path, t.status,
+    td.anno, td.method_marks, td.offer_period,
+    COALESCE(a.name_uz, a.name_ru)  AS region_name,
+    COALESCE(td.doc_count, 0)       AS doc_count,
+    ARRAY(SELECT DISTINCT g.name FROM tender_good g
+          WHERE g.tender_id = t.id AND g.name IS NOT NULL
+          ORDER BY g.name LIMIT 25) AS goods,
+    (SELECT json_agg(json_build_object('lot_id', l.lot_id, 'title', l.title)
+                     ORDER BY l.lot_id)
+       FROM tender_lot l WHERE l.tender_id = t.id) AS lots,
+    (SELECT json_agg(json_build_object(
+                'name', i.name, 'unit', i.unit,
+                'delivery_period', i.delivery_period, 'guarantee', i.guarantee,
+                'spec', i.spec, 'properties', i.properties))
+       FROM tender_item i WHERE i.tender_id = t.id) AS items
+FROM tender t
+LEFT JOIN dim_area     a  ON a.area_id = t.area_leaf_id
+LEFT JOIN tender_detail td ON td.tender_id = t.id
+WHERE t.id = %(id)s
+"""
+
+# Keshdagi tahlil. `content_hash` mos kelsa AI qayta chaqirilmaydi.
+AI_CACHED_SQL = """
+SELECT result, model, content_hash, input_tokens, output_tokens, created_at
+FROM ai_analysis WHERE tender_id = %(id)s AND kind = %(kind)s
+"""
+
+AI_UPSERT_SQL = """
+INSERT INTO ai_analysis (tender_id, kind, content_hash, result, model,
+                         input_tokens, output_tokens)
+VALUES (%(tender_id)s, %(kind)s, %(content_hash)s, %(result)s, %(model)s,
+        %(input_tokens)s, %(output_tokens)s)
+ON CONFLICT (tender_id, kind) DO UPDATE SET
+    content_hash  = EXCLUDED.content_hash,
+    result        = EXCLUDED.result,
+    model         = EXCLUDED.model,
+    input_tokens  = EXCLUDED.input_tokens,
+    output_tokens = EXCLUDED.output_tokens,
+    created_at    = now()
+RETURNING result, model, content_hash, created_at
+"""
+
+
+# --- /products — mahsulot/xizmat bo'yicha filtr uchun takliflar ---
+# ALOHIDA LUG'AT QURMAYMIZ: ma'lumotning o'zi lug'at. tender_good.name ikkala
+# manbada ham 100% to'ldirilgan va yaxshi takrorlanadi (2357 qatorda 775 turli
+# nom; "сальник" 20x, "водяной насос" 12x). Shuning uchun ro'yxat shu ustundan
+# chastota bo'yicha olinadi. `kind` bilan mahsulot/xizmatga bo'linadi.
+def products_sql(where_extra: str = "", kind: str = "") -> str:
+    """Tovar/xizmat nomlari, chastota bo'yicha.
+
+    `where_extra` — qidiruv sharti (build_column_search dan), bo'sh bo'lishi mumkin.
+    `kind` — 'product' | 'service' | '' (hammasi).
+    """
+    cond = f"AND {where_extra}" if where_extra else ""
+    kp = kind_predicate(kind)
+    if kp:
+        cond += f" AND {kp}"
+    return f"""
+SELECT g.name AS name, count(DISTINCT g.tender_id) AS tender_count
+FROM tender_good g
+JOIN tender t ON t.id = g.tender_id
+WHERE g.name IS NOT NULL AND g.name <> ''
+  AND (%(status)s = '' OR t.status = %(status)s)
+  AND (%(status)s <> 'open' OR t.close_at IS NULL OR t.close_at > now())
+  {cond}
+GROUP BY g.name
+ORDER BY count(DISTINCT g.tender_id) DESC, g.name
+LIMIT %(limit)s
+"""
+
+
 # ---------------------------------------------------------------------------
 # MAHSULOT KATALOGI (REJA.md P0-4/5)
 # ---------------------------------------------------------------------------
+# Ombor ustunlari (P0-4/P0-6) — `schema_patch_stock.sql` da qo'shilgan.
+# INSERT/UPDATE ga tegish shart emas: qo'lda kiritishda qoldiq to'ldirilmaydi,
+# `RETURNING {_CP_COLS}` esa yangi ustunlarni avtomatik qaytaradi.
 _CP_COLS = ("id, name, category_code, keywords, unit, price, currency, "
+            "stock_qty, stock_unit, stock_updated_at, cost_price, "
             "notify, created_at, updated_at")
 
 CATALOG_LIST_SQL = f"SELECT {_CP_COLS} FROM catalog_product ORDER BY created_at"
@@ -423,3 +718,52 @@ FROM dim_status
 WHERE domain = 'tender'
 ORDER BY status_id NULLS LAST, status_code
 """
+
+
+# ---------------------------------------------------------------------------
+# NARX HISOBI (P0-7) — schema_patch_pricing.sql
+# ---------------------------------------------------------------------------
+_PS_COLS = ("id, markup_percent, risk_reserve_percent, risk_reserve_fixed, "
+            "logistics_percent, logistics_fixed, vat_percent, currency, updated_at")
+
+# Sozlamalar bitta yozuv (id=1) — patch uni INSERT qilib qo'ygan, shuning
+# uchun SELECT hech qachon bo'sh qaytarmaydi.
+PRICING_SETTINGS_GET_SQL = f"SELECT {_PS_COLS} FROM pricing_settings WHERE id = 1"
+
+PRICING_SETTINGS_UPSERT_SQL = f"""
+INSERT INTO pricing_settings (
+    id, markup_percent, risk_reserve_percent, risk_reserve_fixed,
+    logistics_percent, logistics_fixed, vat_percent, currency, updated_at)
+VALUES (1, %(markup_percent)s, %(risk_reserve_percent)s, %(risk_reserve_fixed)s,
+        %(logistics_percent)s, %(logistics_fixed)s, %(vat_percent)s,
+        %(currency)s, now())
+ON CONFLICT (id) DO UPDATE SET
+    markup_percent=EXCLUDED.markup_percent,
+    risk_reserve_percent=EXCLUDED.risk_reserve_percent,
+    risk_reserve_fixed=EXCLUDED.risk_reserve_fixed,
+    logistics_percent=EXCLUDED.logistics_percent,
+    logistics_fixed=EXCLUDED.logistics_fixed,
+    vat_percent=EXCLUDED.vat_percent,
+    currency=EXCLUDED.currency,
+    updated_at=now()
+RETURNING {_PS_COLS}
+"""
+
+_TP_COLS = ("tender_id, inputs, result, manual_price, currency, note, "
+            "created_at, updated_at")
+
+TENDER_PRICING_GET_SQL = f"SELECT {_TP_COLS} FROM tender_pricing WHERE tender_id = %(id)s"
+
+TENDER_PRICING_UPSERT_SQL = f"""
+INSERT INTO tender_pricing (tender_id, inputs, result, manual_price, currency, note)
+VALUES (%(tender_id)s, %(inputs)s, %(result)s, %(manual_price)s, %(currency)s, %(note)s)
+ON CONFLICT (tender_id) DO UPDATE SET
+    inputs=EXCLUDED.inputs, result=EXCLUDED.result,
+    manual_price=EXCLUDED.manual_price, currency=EXCLUDED.currency,
+    note=EXCLUDED.note, updated_at=now()
+RETURNING {_TP_COLS}
+"""
+
+# Smeta uchun tenderdan faqat byudjet va valyuta kerak — to'liq tender
+# so'rovi (lot/tovar/hujjat bilan) bu yerda ortiqcha yuk bo'lardi.
+PRICING_TENDER_SQL = "SELECT id, totalcost, currency FROM tender WHERE id = %(id)s"

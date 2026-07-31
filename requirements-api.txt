@@ -4,3 +4,15 @@ fastapi>=0.139
 uvicorn[standard]>=0.51
 psycopg2-binary>=2.9
 python-dotenv>=1.2
+requests>=2.32
+# AI tahlil (api/ai.py, api/ai_match.py, api/ai_gonogo.py). Kalitsiz ham import
+# bo'ladi — xato faqat chaqiruv paytida chiqadi, qolgan endpointlar ishlayveradi.
+anthropic>=0.120
+
+# Fayl yuklash — P0-4 katalog importi (FastAPI UploadFile buni TALAB qiladi)
+python-multipart>=0.0.20
+# Ombor/katalog importi (.xlsx) — P0-4
+openpyxl>=3.1
+# Hujjat matnini ajratish — P0-2 (sof deterministik parserlar, AI emas)
+pypdf>=6.0
+python-docx>=1.1

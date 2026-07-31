@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler rejimi — Vite modullarni o'zi hal qiladi */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Tekshiruv. `strict` YOQILGAN: migratsiya paytida backend javoblari
+       uchun aniq turlar yozildi, shuning uchun uni yumshatishga hojat yo'q. */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* Vengeance UI komponentlari `@/lib/utils` dan import qiladi.
+       TypeScript 7 da `baseUrl` OLIB TASHLANGAN — `paths` endi tsconfig
+       joylashgan katalogga nisbatan hisoblanadi. */
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src"]
+}

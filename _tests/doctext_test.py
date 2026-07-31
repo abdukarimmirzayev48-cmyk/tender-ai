@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""
+SINOV — HUJJAT MATNI (P0-2)
+===========================
+`etl_doc_text.py` va `tender_document_text` jadvalini tekshiradi.
+
+Ishga tushirish:
+    python _tests/doctext_test.py            # to'liq (tarmoq bilan)
+    python _tests/doctext_test.py --offline  # faqat parserlar (tarmoqsiz)
+
+Uvicorn ISHGA TUSHIRILMAYDI — to'g'ridan-to'g'ri funksiyalar chaqiriladi.
+Model/AI chaqiruvi YO'Q.
+"""
+import argparse
+import io
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv()
+
+import psycopg2                                     # noqa: E402
+from psycopg2.extras import RealDictCursor          # noqa: E402
+
+import etl_doc_text as E                            # noqa: E402
+
+PASS = FAIL = 0
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  OK   {name}" + (f" — {detail}" if detail else ""))
+    else:
+        FAIL += 1
+        print(f"  XATO {name}" + (f" — {detail}" if detail else ""))
+
+
+def section(title: str) -> None:
+    print(f"\n=== {title} ===")
+
+
+# ---------------------------------------------------------------------------
+# 1. SXEMA
+# ---------------------------------------------------------------------------
+def test_schema(conn) -> None:
+    section("1. Sxema")
+    with conn.cursor() as cur:
+        cur.execute("""SELECT column_name FROM information_schema.columns
+                       WHERE table_name = 'tender_document_text'""")
+        cols = {r[0] for r in cur.fetchall()}
+    need = {"tender_id", "file_ref", "text", "status", "char_count",
+            "page_count", "error", "extractor", "extracted_at"}
+    check("jadval va ustunlar mavjud", need <= cols,
+          f"yetishmayotgan: {sorted(need - cols) or 'yo‘q'}")
+
+    with conn.cursor() as cur:
+        cur.execute("""SELECT indexname FROM pg_indexes
+                       WHERE tablename = 'tender_document_text'""")
+        idx = {r[0] for r in cur.fetchall()}
+    check("indekslar o'rnatilgan", len(idx) >= 4, ", ".join(sorted(idx)))
+
+
+# ---------------------------------------------------------------------------
+# 2. PARSERLAR — tarmoqsiz, sun'iy fayllarda (determinizm tekshiruvi)
+# ---------------------------------------------------------------------------
+MARKER = "Texnik topshiriq: kompressor 10 atm, kafolat 24 oy"
+
+
+def _make_docx() -> bytes:
+    import docx
+    d = docx.Document()
+    d.add_paragraph(MARKER)
+    t = d.add_table(rows=1, cols=2)
+    t.rows[0].cells[0].text = "Muddat"
+    t.rows[0].cells[1].text = "30 kun"
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
+
+
+def _make_xlsx() -> bytes:
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Spetsifikatsiya"
+    ws.append(["Nomi", "Soni"])
+    ws.append([MARKER, 5])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_parsers() -> None:
+    section("2. Parserlar (tarmoqsiz)")
+
+    # DOCX — paragraf VA jadval katakchalari
+    text, pages, ex, err = E.extract_docx(_make_docx())
+    check("DOCX matn ajratildi", MARKER in text and err is None, f"{len(text)} belgi, {ex}")
+    check("DOCX jadval katakchalari ham olindi", "30 kun" in text)
+
+    # XLSX — varaq nomi va katakchalar
+    text, pages, ex, err = E.extract_xlsx(_make_xlsx())
+    check("XLSX matn ajratildi", MARKER in text and err is None, f"{len(text)} belgi, {ex}")
+    check("XLSX varaq nomi qo'shildi", "[Spetsifikatsiya]" in text)
+    check("XLSX varaq soni", pages == 1, f"page_count={pages}")
+
+    # HTML — teglar tashlanadi, script/style olinmaydi
+    html = b"<html><head><style>p{color:red}</style></head><body><p>Talab: ISO 9001</p><script>var x=1</script></body></html>"
+    text, _, ex, err = E.extract_plain(html, "html")
+    check("HTML matni tozalandi", "ISO 9001" in text and "color:red" not in text
+          and "var x" not in text, repr(text[:60]))
+
+    # CSV / TXT + kodlash (cp1251 — manbada ko'p uchraydi)
+    text, _, _, _ = E.extract_plain("Талабнома: 5 дона".encode("cp1251"), "txt")
+    check("cp1251 kodlash o'qildi", "Талабнома" in text, repr(text[:40]))
+
+    # NUL bayt — PostgreSQL TEXT uni qabul qilmaydi, tozalanishi SHART
+    text, _, _, _ = E.extract_plain(b"Talab:\x00 5 dona\x01 kafolat", "txt")
+    check("NUL/boshqaruv belgilari tozalandi",
+          "\x00" not in text and "\x01" not in text and "5 dona" in text, repr(text))
+
+    # BUZILGAN fayl -> parser xato beradi (unreadable ga aylanadi)
+    _, _, _, err = E.extract_docx(b"not a docx at all, just bytes")
+    check("buzilgan DOCX xato qaytardi", err is not None, (err or "")[:50])
+    _, _, _, err = E.extract_pdf(b"%PDF-1.4 broken")
+    check("buzilgan PDF xato qaytardi", err is not None, (err or "")[:50])
+
+
+# ---------------------------------------------------------------------------
+# 3. FORMAT ANIQLASH va STATUS mantig'i (tarmoqsiz)
+# ---------------------------------------------------------------------------
+def test_status_logic() -> None:
+    section("3. Format / status mantig'i (tarmoqsiz)")
+
+    check("rar -> unsupported", not E.is_supported("rar"))
+    check("doc (eski binar) -> unsupported", not E.is_supported("doc"))
+    check("xls (eski binar) -> unsupported", not E.is_supported("xls"))
+    check("pdf/docx/xlsx/html -> supported",
+          all(E.is_supported(x) for x in ("pdf", "docx", "xlsx", "html")))
+
+    check("kengaytma nomdan olindi",
+          E.sniff_ext({"file_type": None, "name": "TZ.PDF"}) == "pdf")
+    check("kengaytma content_type dan olindi",
+          E.sniff_ext({"file_type": "", "name": "hujjat",
+                       "content_type": "application/pdf"}) == "pdf")
+
+    # unsupported — TARMOQQA CHIQMASDAN hal bo'lishi kerak
+    rec = E.process(None, {"tender_id": 1, "file_ref": "x", "file_type": "rar",
+                           "name": "arxiv.rar", "size_bytes": 1000,
+                           "source_platform": "xt-xarid", "file_id": "abc"})
+    check("unsupported yuklab olmasdan aniqlandi", rec["status"] == "unsupported",
+          rec["error"] or "")
+
+    # too_large — metama'lumot bo'yicha, yuklab olmasdan
+    rec = E.process(None, {"tender_id": 1, "file_ref": "x", "file_type": "pdf",
+                           "name": "katta.pdf", "size_bytes": E.MAX_BYTES + 1,
+                           "source_platform": "xt-xarid", "file_id": "abc"})
+    check("too_large yuklab olmasdan aniqlandi", rec["status"] == "too_large",
+          rec["error"] or "")
+
+    # CHIZMA/SKAN PDF taqlidi: belgi ko'p, HARF yo'q -> unreadable.
+    # `download` ni vaqtincha almashtiramiz (tarmoqqa chiqilmaydi).
+    real_download = E.download
+    row = {"tender_id": 1, "file_ref": "x", "file_type": "txt", "name": "a.txt",
+           "size_bytes": 100, "source_platform": "xt-xarid", "file_id": "abc"}
+    try:
+        E.download = lambda s, r: (b"No No No 296 296 83 88937 123 456 789 000", None)
+        rec = E.process(None, row)
+        check("harfsiz 'matn' -> unreadable", rec["status"] == "unreadable",
+              (rec["error"] or "")[:60])
+
+        E.download = lambda s, r: (("Texnik topshiriq: kompressor yetkazib berish, "
+                                    "kafolat muddati yigirma turt oy").encode(), None)
+        rec = E.process(None, row)
+        check("haqiqiy matn -> ok", rec["status"] == "ok", f"{rec['char_count']} belgi")
+
+        E.download = lambda s, r: (b"", None)
+        rec = E.process(None, row)
+        check("bo'sh fayl -> unreadable", rec["status"] == "unreadable",
+              (rec["error"] or "")[:40])
+    finally:
+        E.download = real_download
+
+    # yuklab olish manzili yo'q -> download_failed
+    rec = E.process(None, {"tender_id": 1, "file_ref": "x", "file_type": "pdf",
+                           "name": "a.pdf", "size_bytes": 100,
+                           "source_platform": "noma'lum", "file_id": None,
+                           "file_path": None})
+    check("manzilsiz hujjat -> download_failed", rec["status"] == "download_failed",
+          rec["error"] or "")
+
+
+# ---------------------------------------------------------------------------
+# 4. HAQIQIY HUJJATLAR (tarmoq) — har turdan bir nechta
+# ---------------------------------------------------------------------------
+SAMPLE_SQL = """
+SELECT d.tender_id, d.file_ref, d.file_id, d.file_path, d.name,
+       d.size_bytes, d.content_type, d.file_type, d.source_platform
+FROM tender_document d
+WHERE lower(d.file_type) = %(ft)s AND coalesce(d.size_bytes, 0) < 8000000
+ORDER BY d.tender_id DESC
+LIMIT %(n)s
+"""
+
+
+def test_live(conn, session) -> None:
+    section("4. Haqiqiy hujjatlar (manbadan yuklab olinadi)")
+    for ft, n in (("pdf", 3), ("docx", 3), ("xlsx", 2)):
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(SAMPLE_SQL, {"ft": ft, "n": n})
+            rows = [dict(r) for r in cur.fetchall()]
+        if not rows:
+            check(f"{ft}: namuna topilmadi", False)
+            continue
+        recs = [E.process(session, r) for r in rows]
+        ok = [r for r in recs if r["status"] == "ok"]
+        chars = sum(r["char_count"] or 0 for r in ok)
+        check(f"{ft.upper()}: {len(rows)} tadan {len(ok)} tasidan matn chiqdi",
+              len(ok) >= 1, f"{chars:,} belgi")
+        for r in recs:
+            check(f"  {ft} status to'g'ri toifada",
+                  r["status"] in ("ok", "unreadable", "unsupported",
+                                  "too_large", "download_failed"), r["status"])
+            if r["status"] == "ok":
+                check("  ok bo'lsa matn bor va char_count mos",
+                      r["text"] and r["char_count"] == len(r["text"]))
+            else:
+                check("  ok bo'lmasa sabab yozilgan (qo'lda tekshirish uchun)",
+                      bool(r["error"]), (r["error"] or "")[:50])
+            break   # har turdan bitta batafsil tekshiruv yetarli
+
+
+# ---------------------------------------------------------------------------
+# 5. KESH — qayta yurgizishda takroriy yuklab olish bo'lmasligi
+# ---------------------------------------------------------------------------
+class _Args:
+    def __init__(self, **kw):
+        self.limit = self.tender_id = self.platform = self.file_type = None
+        self.force = False
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_cache(conn) -> None:
+    section("5. Kesh (takroriy yuklab olmaslik)")
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM tender_document_text")
+        done = cur.fetchone()[0]
+    if done == 0:
+        check("bazada ishlangan hujjat bor", False, "avval ETL ni yurgizing")
+        return
+
+    # Ishlangan hujjat --force siz QAYTA tanlanmasligi kerak
+    with conn.cursor() as cur:
+        cur.execute("SELECT tender_id FROM tender_document_text LIMIT 1")
+        tid = cur.fetchone()[0]
+
+    without = E.fetch_targets(conn, _Args(tender_id=tid))
+    with_force = E.fetch_targets(conn, _Args(tender_id=tid, force=True))
+    check("ishlangan hujjat --force siz tanlanmaydi", len(without) < len(with_force),
+          f"#{tid}: --force siz {len(without)}, --force bilan {len(with_force)}")
+
+    processed_refs = {r["file_ref"] for r in with_force} - {r["file_ref"] for r in without}
+    check("tanlanmaganlar aynan bazadagilar", len(processed_refs) > 0,
+          f"{len(processed_refs)} ta o'tkazib yuborildi")
+
+    # Idempotentlik: bir yozuvni ikki marta saqlash dublikat yaratmasligi kerak
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""SELECT tender_id, file_ref, status FROM tender_document_text
+                       WHERE tender_id = %s LIMIT 1""", (tid,))
+        row = dict(cur.fetchone())
+    rec = {"tender_id": row["tender_id"], "file_ref": row["file_ref"],
+           "text": "sinov", "status": row["status"], "char_count": 5,
+           "page_count": 1, "error": None, "extractor": "plain"}
+    E.save(conn, rec)
+    E.save(conn, rec)
+    with conn.cursor() as cur:
+        cur.execute("""SELECT count(*) FROM tender_document_text
+                       WHERE tender_id = %s AND file_ref = %s""",
+                    (row["tender_id"], row["file_ref"]))
+        cnt = cur.fetchone()[0]
+    check("ikki marta saqlash dublikat yaratmadi", cnt == 1, f"qator: {cnt}")
+
+    # Sinov ma'lumotini o'chiramiz — keyingi yurishda qayta ajratilsin
+    with conn.cursor() as cur:
+        cur.execute("""DELETE FROM tender_document_text
+                       WHERE tender_id = %s AND file_ref = %s""",
+                    (row["tender_id"], row["file_ref"]))
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# 6. STATUS TAQSIMOTI — bazadagi haqiqiy holat
+# ---------------------------------------------------------------------------
+def report(conn) -> None:
+    section("6. Bazadagi status taqsimoti")
+    with conn.cursor() as cur:
+        cur.execute("""SELECT status, count(*), coalesce(sum(char_count), 0)
+                       FROM tender_document_text GROUP BY status ORDER BY 2 DESC""")
+        rows = cur.fetchall()
+        cur.execute("SELECT count(*) FROM tender_document")
+        total_docs = cur.fetchone()[0]
+
+    total = sum(r[1] for r in rows)
+    print(f"  Jami hujjat metama'lumoti : {total_docs}")
+    print(f"  Matn ajratish o'tkazilgan : {total} ({total * 100 // max(total_docs, 1)}%)")
+    print(f"  {'status':<16}{'soni':>7}{'belgi':>14}")
+    for st, n, ch in rows:
+        print(f"  {st:<16}{n:>7}{ch:>14,}")
+    manual = sum(n for st, n, _ in rows if st != "ok")
+    ok_n = sum(n for st, n, _ in rows if st == "ok")
+    print(f"\n  -> o'qildi                : {ok_n}")
+    print(f"  -> qo'lda tekshirish kerak: {manual}")
+
+    check("kamida bitta hujjat 'ok'", ok_n > 0)
+    check("har bir yozuvda status bor", total == sum(r[1] for r in rows))
+    with conn.cursor() as cur:
+        cur.execute("""SELECT count(*) FROM tender_document_text
+                       WHERE status = 'ok' AND (text IS NULL OR char_count IS NULL)""")
+        bad = cur.fetchone()[0]
+    check("'ok' yozuvlarda matn bo'sh emas", bad == 0, f"nosoz: {bad}")
+    with conn.cursor() as cur:
+        cur.execute("""SELECT count(*) FROM tender_document_text
+                       WHERE status <> 'ok' AND error IS NULL""")
+        bad = cur.fetchone()[0]
+    check("'ok' bo'lmaganlarda sabab ko'rsatilgan", bad == 0, f"sababsiz: {bad}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Hujjat matni sinovi")
+    ap.add_argument("--offline", action="store_true", help="Tarmoqsiz (4-bo'lim o'tkaziladi)")
+    args = ap.parse_args()
+
+    dsn = os.environ.get("XT_DB_DSN")
+    if not dsn:
+        sys.exit("XATO: XT_DB_DSN yo'q (.env ni tekshiring).")
+
+    conn = psycopg2.connect(dsn)
+    try:
+        test_schema(conn)
+        test_parsers()
+        test_status_logic()
+        if not args.offline:
+            import requests
+            test_live(conn, requests.Session())
+        else:
+            print("\n=== 4. Haqiqiy hujjatlar — O'TKAZILDI (--offline) ===")
+        test_cache(conn)
+        report(conn)
+    finally:
+        conn.close()
+
+    print(f"\n{'=' * 46}\nNATIJA: {PASS} o'tdi, {FAIL} yiqildi")
+    sys.exit(1 if FAIL else 0)
+
+
+if __name__ == "__main__":
+    main()

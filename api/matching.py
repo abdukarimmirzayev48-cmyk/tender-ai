@@ -13,6 +13,8 @@ Ball tarkibi (jami 0–100, shaffof):
 """
 from typing import Any, Dict, List, Optional
 
+from api import translit
+
 # Ball og'irliklari (o'zgartirish oson — bitta joyda)
 W_KEYWORD = 60
 W_REGION = 20
@@ -21,8 +23,22 @@ W_CURRENCY = 5
 
 
 def _norm(s: Optional[str]) -> str:
-    """Kichik harfga (Python .lower() kirillcha ham to'g'ri ishlaydi, C-locale'dan farqli)."""
-    return (s or "").lower()
+    """Solishtirishga tayyorlaydi: kichik harf + alifbo yig'ish.
+
+    Yig'ish (ь ъ o'chadi, э->е, ы й->и) SQL tomondagi translit.SQL_FOLD bilan
+    bir xil — shu sabab "kalit so'z topildi" natijasi qidiruv natijasiga mos
+    keladi. Batafsil: api/translit.py.
+    """
+    return translit.norm_text(s)
+
+
+def _hits(term: Optional[str], blob: str) -> bool:
+    """`term` matnда bormi — alifbodan qat'i nazar.
+
+    Profilга "nasos" yozilgan bo'lsa, "Насос" tovarli tender ham topilsin
+    (aks holda lotin alifbosida yozilgan profil hech narsa topmaydi).
+    """
+    return any(v in blob for v in translit.variants(term or ""))
 
 
 def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -49,7 +65,7 @@ def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, A
     matched_kw: List[str] = []
     if keywords:
         for kw in keywords:
-            if _norm(kw) in blob:
+            if _hits(kw, blob):
                 matched_kw.append(kw)
         kw_score = W_KEYWORD * (len(matched_kw) / len(keywords)) if matched_kw else 0.0
         if matched_kw:

@@ -1,0 +1,1014 @@
+#!/usr/bin/env python3
+"""
+BILDIRISHNOMA SINOVLARI (TZ P0-10) — email va Telegram
+======================================================
+TARMOQQA HECH NARSA CHIQMAYDI:
+  * `smtplib.SMTP` soxta transport bilan almashtiriladi (FakeSMTP)
+  * `api.telegram.call` soxta funksiya bilan almashtiriladi (FakeTelegram)
+Ikkalasi ham xabarni faqat XOTIRADA to'playdi. Haqiqiy email ham, haqiqiy
+Telegram xabari ham YUBORILMAYDI.
+
+Nimalar tekshiriladi:
+  1. Chegaradan PAST ballli tender tanlanmaydi
+  2. Bir tender haqida IKKI MARTA xabar ketmaydi (`notify_sent`)
+  3. Xabarда TENDER KARTOCHKASIGA HAVOLA bor (TZ qabul mezoni) — matn+HTML+TG
+  4. `--dry-run` hech narsa yubormaydi va bazaga yozmaydi
+  5. SMTP/Telegram sozlanmaganda ANIQ xato (jimgina o'tmaydi)
+  6. HTML va matn versiyalari ikkalasi ham to'g'ri (multipart/alternative)
+  7. Soatlik tsikl oynasi: oxirgi ETL tsiklidan OLDIN ko'rilgan tender tushmaydi
+  8. TELEGRAM: HTML escape, 4096 belgilik chegara BLOK CHEGARASIDAN bo'linadi
+  9. TELEGRAM: kanallar mustaqil — o'z jurnali (`kind`) va biri yiqilsa
+     ikkinchisi baribir yuboriladi
+
+Ishga tushirish:
+    .venv/Scripts/python.exe _tests/notify_test.py
+
+SINOVDAN KEYIN barcha sinov yozuvlari bazadan tozalanadi (notify_sent qatorlari
+o'chiriladi, notify_settings esa sinovdan OLDINGI holatiga qaytariladi).
+"""
+import os
+import smtplib
+import sys
+from datetime import datetime, timedelta, timezone
+
+from dotenv import load_dotenv
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+load_dotenv(os.path.join(ROOT, ".env"))
+
+from api import db, notify, telegram  # noqa: E402
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Soxta SMTP transporti — tarmoqqa CHIQMAYDI
+# ---------------------------------------------------------------------------
+class FakeSMTP:
+    """smtplib.SMTP o'rnini bosadi: xabarni xotirada saqlaydi."""
+    sent = []          # [(host, port, EmailMessage), ...]
+    started_tls = []
+    logins = []
+
+    def __init__(self, host, port=0, timeout=None, **kw):
+        self.host, self.port = host, port
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def ehlo(self, *a, **kw):
+        return (250, b"ok")
+
+    def starttls(self, *a, **kw):
+        FakeSMTP.started_tls.append((self.host, self.port))
+        return (220, b"ready")
+
+    def login(self, user, password):
+        FakeSMTP.logins.append((user, password))
+
+    def send_message(self, msg):
+        FakeSMTP.sent.append((self.host, self.port, msg))
+
+    def quit(self):
+        pass
+
+    @classmethod
+    def reset(cls):
+        cls.sent, cls.started_tls, cls.logins = [], [], []
+
+
+class ExplodingSMTP(FakeSMTP):
+    """Ulanishga URINISH BO'LMASLIGI kerak bo'lgan joylarda ishlatiladi."""
+    def __init__(self, *a, **kw):
+        raise AssertionError("SMTP ga ulanmaslik kerak edi!")
+
+
+# ---------------------------------------------------------------------------
+# Soxta Telegram transporti — api.telegram.call O'RNINI bosadi
+# ---------------------------------------------------------------------------
+# Nima uchun aynan `call`: undan pastda faqat `requests` bor, ya'ni bu eng
+# past nuqta — yuqoridagi HAMMA mantiq (bo'lish, escape, xato o'rash) haqiqiy
+# kod bo'lib qoladi va sinovда tekshiriladi.
+class FakeTelegram:
+    sent = []          # [(chat_id, text), ...]
+    fail = None        # o'rnatilsa har chaqiruv shu matn bilan yiqiladi
+    # `getUpdates` qaytaradigan xabar matni. Ulash tokenini shu yerga
+    # qo'yamiz — foydalanuvchi havolani bosgani shunday ko'rinadi.
+    update_text = None
+
+    @classmethod
+    def call(cls, method, params=None):
+        params = params or {}
+        if cls.fail:
+            raise telegram.TelegramError(cls.fail)
+        if method == "sendMessage":
+            cls.sent.append((str(params.get("chat_id")), params.get("text") or ""))
+            return {"message_id": len(cls.sent)}
+        if method == "getMe":
+            return {"id": 1, "username": "sinov_bot", "first_name": "Sinov"}
+        if method == "getUpdates":
+            # AYNAN sinov chati qaytadi: `run()` yuborishdan oldin
+            # `consume_links()` ni chaqiradi, va u haqiqiy chatlarni
+            # bazaga yozib qo'ymasligi kerak.
+            msg = {"chat": {"id": TEST_CHAT, "type": "supergroup",
+                            "title": "Sinov guruhi"}}
+            if cls.update_text:
+                msg["text"] = cls.update_text
+            return [{"message": msg}]
+        raise AssertionError(f"kutilmagan Telegram metodi: {method}")
+
+    @classmethod
+    def reset(cls, fail=None):
+        cls.sent, cls.fail, cls.update_text = [], fail, None
+
+
+class _TgPatch:
+    """`telegram.call` ni soxta bilan almashtiruvchi context manager.
+
+    `require_token` ham almashtiriladi — sinov .env dagi haqiqiy tokenga
+    BOG'LIQ BO'LMASIN (token bo'lsa ham, bo'lmasa ham bir xil o'tsin).
+
+    OBUNACHILARNI HAM IZOLYATSIYA QILADI. Bu SHART: bazada haqiqiy
+    obunachilar bor (botga /start bosgan odamlar). Ularsiz sinov
+    `notify_sent` ga o'sha odamlar nomidan qator yozib qo'yardi va keyin
+    ularga haqiqiy tenderlar HECH QACHON ketmasdi. Shuning uchun sinov
+    davomida hammasi o'chiriladi va faqat TEST_CHAT yoqiladi.
+    """
+
+    def __init__(self, fail=None, token="SINOV:token", with_subscriber=True):
+        self.fail, self.token = fail, token
+        self.with_subscriber = with_subscriber
+
+    def __enter__(self):
+        FakeTelegram.reset(self.fail)
+        self._call, self._req = telegram.call, telegram.require_token
+        self._env = os.environ.get("TELEGRAM_BOT_TOKEN")
+        telegram.call = FakeTelegram.call
+        telegram.require_token = lambda: self.token
+        if self.token:
+            os.environ["TELEGRAM_BOT_TOKEN"] = self.token
+        else:
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+
+        # Haqiqiy obunachilarni vaqtincha o'chiramiz
+        self._subs = db.query(
+            "SELECT chat_id, enabled FROM notify_telegram_subscriber")
+        db.execute_returning(
+            "UPDATE notify_telegram_subscriber SET enabled = false "
+            "RETURNING chat_id")
+        if self.with_subscriber:
+            db.execute_returning(
+                "INSERT INTO notify_telegram_subscriber (chat_id, title, chat_type) "
+                "VALUES (%(c)s, 'Sinov obunachisi', 'supergroup') "
+                "ON CONFLICT (chat_id) DO UPDATE SET enabled = true "
+                "RETURNING chat_id", {"c": TEST_CHAT})
+        return FakeTelegram
+
+    def __exit__(self, *exc):
+        telegram.call, telegram.require_token = self._call, self._req
+        if self._env is None:
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        else:
+            os.environ["TELEGRAM_BOT_TOKEN"] = self._env
+        # Sinov obunachisi, uning tokenlari va jurnali tozalanadi,
+        # haqiqiy obunachilar esa tiklanadi
+        db.execute_returning(
+            "DELETE FROM notify_telegram_subscriber WHERE chat_id = %(c)s "
+            "RETURNING chat_id", {"c": TEST_CHAT})
+        db.execute_returning(
+            "DELETE FROM notify_telegram_link "
+            "WHERE chat_id = %(c)s OR used_at IS NULL RETURNING token",
+            {"c": TEST_CHAT})
+        for r in self._subs:
+            db.execute_returning(
+                "UPDATE notify_telegram_subscriber SET enabled = %(e)s "
+                "WHERE chat_id = %(c)s RETURNING chat_id",
+                {"c": r["chat_id"], "e": r["enabled"]})
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Kichik sinov harnessi (loyihada pytest yo'q)
+# ---------------------------------------------------------------------------
+CASES = []
+FAILED = []
+
+
+def case(fn):
+    CASES.append(fn)
+    return fn
+
+
+def eq(a, b, what=""):
+    if a != b:
+        raise AssertionError(f"{what}: kutilgan {b!r}, olingan {a!r}")
+
+
+def ok(cond, what=""):
+    if not cond:
+        raise AssertionError(what or "shart bajarilmadi")
+
+
+# ---------------------------------------------------------------------------
+# Sinov ma'lumotlari
+# ---------------------------------------------------------------------------
+TEST_EMAIL = "sinov@example.invalid"
+TEST_BASE = "http://localhost:5173"
+
+TEST_CHAT = "-100123456789"
+
+# Telegram ATAYIN O'CHIRIQ: sinovlarning ko'pchiligi email haqida va ular
+# tasodifan HAQIQIY chatga xabar yubormasligi kerak. Telegram sinovlari uni
+# o'zi yoqib oladi (`_TgPatch` bilan birga).
+TEST_SETTINGS = {
+    "enabled": True, "email": TEST_EMAIL, "min_score": 70,
+    "base_url": TEST_BASE,
+    "telegram_enabled": False, "telegram_chat_id": None,
+}
+
+# SMTP endi PLATFORMA sozlamasi (.env), foydalanuvchi formasida emas.
+# Sinov davomida uni MUHITGA qo'yamiz — haqiqiy `.env` ga bog'liq bo'lmaslik
+# uchun (u to'ldirilgan ham, bo'sh ham bo'lishi mumkin).
+TEST_SMTP_ENV = {
+    "SMTP_HOST": "localhost",
+    "SMTP_PORT": "1025",
+    "SMTP_USER": "",
+    "SMTP_PASSWORD": "",
+    "SMTP_FROM": "tender-ai@example.invalid",
+    "SMTP_TLS": "0",
+}
+_ORIGINAL_SMTP_ENV = {}
+
+# Sinov davomida yaratilgan notify_sent qatorlari — oxirida o'chiriladi
+CREATED_SENT = set()
+_ORIGINAL_SETTINGS = None
+
+
+def fake_tender(tid=99, name="Насос va kompyuter xaridi", cats=None, goods=""):
+    """`_product_matches`/`score_tender` kutadigan minimal nomzod qatori."""
+    return {
+        "id": tid, "name": name, "company_name": "Sinov buyurtmachi",
+        "totalcost": 1000000, "currency": "UZS", "region_name": "Toshkent shahri",
+        "area_path": "33.2137", "close_at": None, "publicated_at": None,
+        "source_platform": "xt-xarid",
+        "category_codes": cats or [], "goods_blob": goods,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 1. Chegara — past ballli tender tanlanmaydi
+# ---------------------------------------------------------------------------
+@case
+def test_ball_shkalasi():
+    """Ball /catalog/match shkalasi bilan bir xil: kategoriya=100, nom=70."""
+    prod = {"id": 1, "name": "kompyuter", "category_code": "elektronika",
+            "keywords": [], "notify": True}
+
+    by_cat = notify.score_candidate(
+        fake_tender(cats=["elektronika/kompyuter"]), [prod], None)
+    eq(by_cat["score"], 100, "kategoriya mosligi")
+    eq(by_cat["by"], "katalog", "manba")
+
+    by_name = notify.score_candidate(
+        fake_tender(name="Kompyuter xaridi", cats=["qurilish"]), [prod], None)
+    eq(by_name["score"], 70, "nom mosligi")
+
+    no_match = notify.score_candidate(
+        fake_tender(name="Non va sut", cats=["oziq-ovqat"], goods="non sut"),
+        [prod], None)
+    eq(no_match["score"], 0, "moslik yo'q")
+
+
+@case
+def test_chegaradan_past_tanlanmaydi():
+    """min_score dan PAST ballli tender ro'yxatga tushmaydi."""
+    since = datetime.now(timezone.utc) - timedelta(days=3650)
+
+    hammasi = notify.find_candidates(min_score=0, since=since, limit=0)
+    ok(len(hammasi) > 0, "bazada nomzod tender bo'lishi kerak (min_score=0)")
+
+    eng_yuqori = max(t["score"] for t in hammasi)
+    past_ballar = [t for t in hammasi if t["score"] < eng_yuqori]
+    ok(len(past_ballar) > 0,
+       "sinov uchun chegaradan PAST ballli tender kerak (hammasi bir xil ball)")
+
+    # Chegara = eng yuqori ball -> pastdagilar BITTA HAM tushmasligi kerak
+    natija = notify.find_candidates(min_score=eng_yuqori, since=since, limit=0)
+    chiqqan = {t["id"] for t in natija}
+    for t in natija:
+        ok(t["score"] >= eng_yuqori, f"chegaradan past ball o'tib ketdi: {t['score']}")
+    for t in past_ballar:
+        ok(t["id"] not in chiqqan,
+           f"past ballli tender ({t['score']} < {eng_yuqori}) tanlandi")
+
+    # Filtr AYNAN ball bo'yicha ishlaydi (ortiqcha/kam tender yo'q)
+    for chegara in (0, 50, 70, 100):
+        kutilgan = {t["id"] for t in hammasi if t["score"] >= chegara}
+        olingan = {t["id"] for t in
+                   notify.find_candidates(min_score=chegara, since=since, limit=0)}
+        eq(olingan, kutilgan, f"chegara {chegara} da tanlov noto'g'ri")
+
+
+# ---------------------------------------------------------------------------
+# 2. Takroriy xabar yo'q
+# ---------------------------------------------------------------------------
+@case
+def test_ikki_marta_yuborilmaydi():
+    """`notify_sent` da qayd etilgan tender ikkinchi marta tanlanmaydi."""
+    since = datetime.now(timezone.utc) - timedelta(days=3650)
+    oldin = notify.find_candidates(min_score=0, since=since, limit=0)
+    ok(len(oldin) > 0, "sinov uchun nomzod kerak")
+
+    nishon = oldin[0]
+    notify.mark_sent(nishon["id"], TEST_EMAIL, nishon["score"])
+    CREATED_SENT.add(nishon["id"])
+
+    keyin = notify.find_candidates(min_score=0, since=since, limit=0)
+    ok(nishon["id"] not in {t["id"] for t in keyin},
+       "yuborilgan tender qayta tanlandi (takroriy xabar!)")
+    eq(len(keyin), len(oldin) - 1, "faqat bitta tender chiqib ketishi kerak")
+
+    # --force (include_sent=True) bo'lsa qaytadi
+    majburiy = notify.find_candidates(min_score=0, since=since, limit=0,
+                                      include_sent=True)
+    ok(nishon["id"] in {t["id"] for t in majburiy}, "--force ishlamadi")
+
+    # Takroriy INSERT xato bermaydi (ON CONFLICT DO NOTHING) va qator ko'paymaydi
+    notify.mark_sent(nishon["id"], TEST_EMAIL, nishon["score"])
+    n = db.scalar("SELECT count(*) FROM notify_sent WHERE tender_id=%(id)s",
+                  {"id": nishon["id"]})
+    eq(int(n), 1, "notify_sent da dublikat paydo bo'ldi")
+
+
+# ---------------------------------------------------------------------------
+# 3 + 6. Xabar matni: havola, HTML va matn versiyalari
+# ---------------------------------------------------------------------------
+@case
+def test_xabarda_kartochka_havolasi():
+    """TZ QABUL MEZONI: xabar tizimdagi tender kartochkasiga havolani
+    o'z ichiga oladi — matnli va HTML versiyada ham."""
+    t = {"id": 20000502564, "name": "Server infratuzilmasi xaridi",
+         "company_name": "AGROBANK ATB", "totalcost": 17128200000,
+         "currency": "UZS", "region_name": "Toshkent shahri",
+         "close_at": datetime(2026, 7, 31, 18, 51), "score": 100,
+         "by": "katalog", "reasons": ["Katalogingizga mos: kompyuter"]}
+
+    subj, text, html = notify.render([t], TEST_BASE, 70)
+    kutilgan = f"{TEST_BASE}/?tender=20000502564"
+
+    eq(notify.card_url(TEST_BASE, t["id"]), kutilgan, "kartochka havolasi")
+    ok(kutilgan in text, "MATNLI versiyada havola yo'q")
+    ok(kutilgan in html, "HTML versiyada havola yo'q")
+    ok(f'href="{kutilgan}"' in html, "HTML da havola <a href> ichida emas")
+
+
+@case
+def test_matn_va_html_tarkibi():
+    """Ikkala versiyada ham: nomi, buyurtmachi, summa, muddat, ball."""
+    t = {"id": 42, "name": "Planshet xaridi", "company_name": "Taminot DUK",
+         "totalcost": 15938332700, "currency": "UZS",
+         "region_name": "Toshkent shahri",
+         "close_at": datetime(2026, 8, 4, 14, 45), "score": 85,
+         "by": "profil", "reasons": ["2 ta kalit so'z mos"]}
+    subj, text, html = notify.render([t], TEST_BASE, 70)
+
+    ok("85" in subj and "1 ta" in subj, f"mavzu noto'g'ri: {subj}")
+
+    for kesim, nom in ((text, "matn"), (html, "html")):
+        ok("Planshet xaridi" in kesim, f"{nom}: tender nomi yo'q")
+        ok("Taminot DUK" in kesim, f"{nom}: buyurtmachi yo'q")
+        ok("15 938 332 700 UZS" in kesim, f"{nom}: summa noto'g'ri formatlandi")
+        ok("04.08.2026 14:45" in kesim, f"{nom}: muddat yo'q")
+        ok("85" in kesim, f"{nom}: moslik balli yo'q")
+        ok("2 ta kalit so'z mos" in kesim, f"{nom}: sabab yo'q")
+
+    ok(html.lstrip().startswith("<!DOCTYPE html>"), "HTML hujjat emas")
+    ok("<div" not in text and "<a " not in text, "matn versiyasida HTML teglari bor")
+    ok("&gt;" not in text and "&#x27;" not in text,
+       "matn versiyasi HTML-escape qilingan")
+    # Apostrof HTML da ham o'qiladigan holida qolsin (&#x27; emas)
+    ok("&#x27;" not in html, "HTML da apostrof escape qilinib qolgan")
+
+
+@case
+def test_multipart_alternative():
+    """Yuborilgan xabar HAM matn, HAM HTML qismga ega bo'lishi kerak."""
+    FakeSMTP.reset()
+    st = notify.get_settings()
+    subj, text, html = notify.render(
+        [{"id": 7, "name": "Sinov", "company_name": "X", "totalcost": None,
+          "currency": None, "region_name": None, "close_at": None,
+          "score": 90, "by": "katalog", "reasons": []}], TEST_BASE, 70)
+
+    orig = smtplib.SMTP
+    smtplib.SMTP = FakeSMTP
+    try:
+        notify.send(st, TEST_EMAIL, subj, text, html)
+    finally:
+        smtplib.SMTP = orig
+
+    eq(len(FakeSMTP.sent), 1, "aynan bitta xabar yuborilishi kerak")
+    _, _, msg = FakeSMTP.sent[0]
+    eq(msg["To"], TEST_EMAIL, "qabul qiluvchi")
+    eq(msg.get_content_type(), "multipart/alternative", "xabar turi")
+
+    plain = msg.get_body(preferencelist=("plain",))
+    rich = msg.get_body(preferencelist=("html",))
+    ok(plain is not None, "matn qismi yo'q")
+    ok(rich is not None, "HTML qismi yo'q")
+    ok(f"{TEST_BASE}/?tender=7" in plain.get_content(), "matn qismida havola yo'q")
+    ok(f"{TEST_BASE}/?tender=7" in rich.get_content(), "HTML qismida havola yo'q")
+
+
+# ---------------------------------------------------------------------------
+# 4. --dry-run
+# ---------------------------------------------------------------------------
+@case
+def test_dry_run_hech_narsa_qilmaydi():
+    """--dry-run: SMTP ga ulanmaydi va `notify_sent` ga yozmaydi."""
+    oldin = int(db.scalar("SELECT count(*) FROM notify_sent"))
+
+    orig = smtplib.SMTP
+    smtplib.SMTP = ExplodingSMTP     # ulanishga urinilsa — sinov yiqiladi
+    try:
+        res = notify.run(min_score=0, limit=5, dry_run=True, since_hours=87600)
+    finally:
+        smtplib.SMTP = orig
+
+    ok(res["found"] > 0, "dry-run uchun nomzod topilishi kerak edi")
+    eq(res["sent"], 0, "dry-run da yuborilgan bo'lmasligi kerak")
+    ok(res["dry_run"] is True, "dry_run bayrog'i")
+    ok("dry-run" in (res["message"] or ""), "dry-run xabari yo'q")
+    ok(res.get("text") and res.get("html"), "dry-run xabar matnini ko'rsatishi kerak")
+
+    keyin = int(db.scalar("SELECT count(*) FROM notify_sent"))
+    eq(keyin, oldin, "dry-run BAZAGA YOZDI (yozmasligi kerak edi)")
+
+
+# ---------------------------------------------------------------------------
+# 5. SMTP sozlanmaganda aniq xato
+# ---------------------------------------------------------------------------
+@case
+def test_smtp_sozlanmagan_aniq_xato():
+    """SMTP endi PLATFORMA sozlamasi (.env). Host/parol/jo'natuvchi yo'q bo'lsa
+    -> NotifyError, jimgina emas. Xato matni OPERATORGA qaratilgan: bu server
+    sozlamasi, foydalanuvchi uni tuzata olmaydi."""
+    orig = smtplib.SMTP
+    smtplib.SMTP = ExplodingSMTP
+    saqlangan = {k: os.environ.get(k) for k in TEST_SMTP_ENV}
+
+    def env(**kw):
+        for k in TEST_SMTP_ENV:
+            os.environ.pop(k, None)
+        for k, v in kw.items():
+            os.environ[k] = v
+
+    try:
+        st = notify.get_settings()
+
+        # (a) host yo'q
+        env(SMTP_FROM="a@example.invalid")
+        try:
+            notify.send(st, TEST_EMAIL, "s", "t", "<b>h</b>")
+            raise AssertionError("host yo'q edi — xato kutilgandi")
+        except notify.NotifyError as e:
+            ok("SMTP_HOST" in str(e), f"xato .env ni ko'rsatmadi: {e}")
+
+        # (b) SMTP_USER bor, lekin SMTP_PASSWORD yo'q
+        env(SMTP_HOST="smtp.example.com", SMTP_USER="u@example.invalid",
+            SMTP_FROM="a@example.invalid")
+        try:
+            notify.send(st, TEST_EMAIL, "s", "t", "<b>h</b>")
+            raise AssertionError("parol yo'q edi — xato kutilgandi")
+        except notify.NotifyError as e:
+            ok("SMTP_PASSWORD" in str(e), f"xato .env ni ko'rsatmadi: {e}")
+
+        # (c) jo'natuvchi manzil yo'q
+        env(SMTP_HOST="smtp.example.com")
+        try:
+            notify.send(st, TEST_EMAIL, "s", "t", "<b>h</b>")
+            raise AssertionError("jo'natuvchi yo'q edi — xato kutilgandi")
+        except notify.NotifyError as e:
+            ok("SMTP_FROM" in str(e), f"xato matni tushunarsiz: {e}")
+
+        # (d) hammasi bor -> `smtp_ready()` true
+        env(**TEST_SMTP_ENV)
+        ok(notify.smtp_ready(), "to'liq sozlamada smtp_ready false qaytdi")
+    finally:
+        smtplib.SMTP = orig
+        for k, v in saqlangan.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@case
+def test_qabul_qiluvchi_yoq_aniq_xato():
+    """Email ham sozlamada, ham profilda yo'q -> NotifyError."""
+    st = dict(notify.get_settings(), email=None)
+    profil_email = db.scalar(notify.PROFILE_EMAIL_SQL)
+    if profil_email:
+        # Profilda email bor — zaxira manba ISHLASHI kerak
+        eq(notify.recipient(st), profil_email, "profil emaili ishlatilmadi")
+        return
+    try:
+        notify.recipient(st)
+        raise AssertionError("email yo'q edi — xato kutilgandi")
+    except notify.NotifyError as e:
+        ok("email" in str(e).lower(), f"xato matni tushunarsiz: {e}")
+
+
+# ---------------------------------------------------------------------------
+# 7. To'liq tsikl (soxta SMTP bilan) + kuzatuv oynasi
+# ---------------------------------------------------------------------------
+@case
+def test_toliq_tsikl_va_jurnal():
+    """run(): xabar yuboriladi, `notify_sent` ga yoziladi, ikkinchi yurishda
+    esa QAYTA YUBORILMAYDI (soatlik tsikl takror xabar bermasin)."""
+    FakeSMTP.reset()
+    orig = smtplib.SMTP
+    smtplib.SMTP = FakeSMTP
+    try:
+        res = notify.run(min_score=0, limit=3, dry_run=False, since_hours=87600)
+        ok(res["found"] > 0, "nomzod topilmadi")
+        eq(res["sent"], res["found"], "hamma tender jurnalga yozilishi kerak")
+        eq(len(FakeSMTP.sent), 1, "bitta jamlangan xabar ketishi kerak")
+        eq(res["to"], TEST_EMAIL, "qabul qiluvchi")
+        for t in res["tenders"]:
+            CREATED_SENT.add(t["id"])
+
+        _, _, msg = FakeSMTP.sent[0]
+        tana = msg.get_body(preferencelist=("plain",)).get_content()
+        for t in res["tenders"]:
+            ok(f"/?tender={t['id']}" in tana, f"{t['id']} havolasi yo'q")
+
+        # IKKINCHI YURISH — o'sha tenderlar qayta ketmasligi kerak
+        FakeSMTP.reset()
+        res2 = notify.run(min_score=0, limit=3, dry_run=False, since_hours=87600)
+        yuborilgan = {t["id"] for t in res["tenders"]}
+        qayta = {t["id"] for t in res2["tenders"]} & yuborilgan
+        eq(qayta, set(), "o'sha tenderlar haqida IKKINCHI marta xabar ketdi")
+        for t in res2["tenders"]:
+            CREATED_SENT.add(t["id"])
+    finally:
+        smtplib.SMTP = orig
+
+
+@case
+def test_ochirilganda_yuborilmaydi():
+    """enabled=false bo'lsa xabar ketmaydi (lekin sabab aniq aytiladi)."""
+    notify.save_settings(dict(TEST_SETTINGS, enabled=False))
+    orig = smtplib.SMTP
+    smtplib.SMTP = ExplodingSMTP
+    try:
+        res = notify.run(min_score=0, limit=3, dry_run=False, since_hours=87600,
+                         force=True)
+        eq(res["sent"], 0, "o'chirilganда yuborilmasligi kerak")
+        ok("o'chirilgan" in (res["message"] or ""), f"sabab aytilmadi: {res['message']}")
+    finally:
+        smtplib.SMTP = orig
+        notify.save_settings(TEST_SETTINGS)
+
+
+# ---------------------------------------------------------------------------
+# 8. TELEGRAM: xabar matni
+# ---------------------------------------------------------------------------
+@case
+def test_telegram_kartochka_havolasi():
+    """TZ QABUL MEZONI Telegram uchun ham: xabarда kartochkaga havola bor."""
+    t = {"id": 20000502564, "name": "Server infratuzilmasi xaridi",
+         "company_name": "AGROBANK ATB", "totalcost": 17128200000,
+         "currency": "UZS", "region_name": "Toshkent shahri",
+         "close_at": datetime(2026, 7, 31, 18, 51), "score": 100,
+         "by": "katalog", "reasons": ["Katalogingizga mos: kompyuter"]}
+
+    head, blocks, foot = notify.render_telegram([t], TEST_BASE, 70)
+    blok = blocks[0]
+    kutilgan = f"{TEST_BASE}/?tender=20000502564"
+
+    ok(f'href="{kutilgan}"' in blok, "Telegram blokida <a href> havola yo'q")
+    ok("Server infratuzilmasi xaridi" in blok, "tender nomi yo'q")
+    ok("AGROBANK ATB" in blok, "buyurtmachi yo'q")
+    ok("17 128 200 000 UZS" in blok, "summa noto'g'ri formatlandi")
+    ok("31.07.2026 18:51" in blok, "muddat yo'q")
+    ok("100 ball" in blok, "moslik balli yo'q")
+    ok("Katalogingizga mos: kompyuter" in blok, "sabab yo'q")
+    ok("70 ball" in head, "sarlavhada chegara yo'q")
+    eq(len(blocks), 1, "bitta tender -> bitta blok")
+
+
+@case
+def test_telegram_html_escape():
+    """`<`, `>`, `&` escape qilinadi (aks holda Telegram xabarni RAD ETADI),
+    APOSTROF esa TEGILMAYDI — o'zbekcha matnда u har qadamda uchraydi."""
+    t = {"id": 5, "name": "Truba <DN100> & flanets", "company_name": "O'zbekiston MTM",
+         "totalcost": None, "currency": None, "region_name": None,
+         "close_at": None, "score": 70, "by": "katalog",
+         "reasons": ["Nomi bo'yicha mos"]}
+    blok = notify.telegram_block(t, TEST_BASE)
+
+    ok("&lt;DN100&gt;" in blok, "< > escape qilinmadi")
+    ok("&amp; flanets" in blok, "& escape qilinmadi")
+    ok("O'zbekiston MTM" in blok, "apostrof buzildi (&#x27; ga aylandi)")
+    ok("bo'yicha" in blok, "sabab matnidagi apostrof buzildi")
+    # Bizning teglarimiz JOYIDA qolishi kerak
+    ok("<b>" in blok and "<a href=" in blok, "HTML teglari yo'qoldi")
+
+
+@case
+def test_telegram_uzun_xabar_bolinadi():
+    """Telegram bitta xabarga 4096 belgi beradi. Bo'linish BLOK CHEGARASIDAN
+    o'tishi kerak — tender o'rtasidan kesilsa ochilgan <b>/<a> tegi yopilmay
+    qoladi va Telegram BUTUN xabarni rad etadi."""
+    with _TgPatch() as tg:
+        blocks = [f"<b>Blok {i}</b>\n" + ("x" * 900) for i in range(12)]
+        n = telegram.send_blocks(TEST_CHAT, "<b>Sarlavha</b>", blocks, "<i>izoh</i>")
+
+    eq(n, len(tg.sent), "qaytgan son yuborilganlar soniga teng emas")
+    ok(n > 1, "uzun ro'yxat bitta xabarga sig'ib qolmasligi kerak edi")
+    for _, text in tg.sent:
+        ok(len(text) <= telegram.MAX_MESSAGE,
+           f"xabar Telegram chegarasidan uzun: {len(text)}")
+        # Teg butunligi: har bir <b> uchun </b> bo'lishi kerak
+        eq(text.count("<b>"), text.count("</b>"), "yopilmagan <b> tegi")
+    # Bironta blok yo'qolmasligi kerak
+    hammasi = "".join(t for _, t in tg.sent)
+    for i in range(12):
+        ok(f"Blok {i}" in hammasi, f"Blok {i} yo'qoldi")
+
+
+# ---------------------------------------------------------------------------
+# 9. TELEGRAM: kanal mustaqilligi va to'liq tsikl
+# ---------------------------------------------------------------------------
+@case
+def test_telegram_toliq_tsikl():
+    """Telegram yoqilganда OBUNACHIGA xabar ketadi, `notify_sent` ga uning
+    O'Z `kind` i bilan yoziladi va ikkinchi yurishда QAYTA yuborilmaydi."""
+    with _TgPatch() as tg:
+        notify.save_settings(dict(TEST_SETTINGS, enabled=False,
+                                  telegram_enabled=True))
+        orig = smtplib.SMTP
+        smtplib.SMTP = ExplodingSMTP      # email o'chiq -> SMTP ga tegilmasin
+        try:
+            res = notify.run(min_score=0, limit=3, dry_run=False, since_hours=87600)
+            t = res["telegram"]
+            ok(t["found"] > 0, "Telegram uchun nomzod topilmadi")
+            eq(t["sent"], t["found"], "hamma tender jurnalga yozilishi kerak")
+            eq(t["errors"], [], f"Telegram xatosi: {t['errors']}")
+            eq(t["chats"], [TEST_CHAT], "boshqa obunachiga ketdi")
+            ok(len(tg.sent) >= 1, "Telegramga xabar ketmadi")
+            for cid, _ in tg.sent:
+                eq(cid, TEST_CHAT, "boshqa chatga ketdi")
+
+            # Jurnal AYNAN shu OBUNACHI kaliti bilan yozilgan
+            yuborilgan = {x["id"] for x in t["tenders"]}
+            jurnal = notify.sent_ids(notify.tg_kind(TEST_CHAT))
+            CREATED_SENT.update(jurnal)
+            ok(yuborilgan <= jurnal,
+               f"yuborilgan tenderlar '{notify.tg_kind(TEST_CHAT)}' jurnaliga tushmadi")
+
+            # IKKINCHI YURISH — o'shalar qayta ketmaydi
+            tg.reset()
+            res2 = notify.run(min_score=0, limit=3, dry_run=False, since_hours=87600)
+            qayta = {x["id"] for x in res2["telegram"]["tenders"]} & yuborilgan
+            eq(qayta, set(), "o'sha tenderlar Telegramga IKKINCHI marta ketdi")
+            CREATED_SENT.update(notify.sent_ids(notify.tg_kind(TEST_CHAT)))
+        finally:
+            smtplib.SMTP = orig
+            notify.save_settings(TEST_SETTINGS)
+
+
+@case
+def test_tokensiz_start_obunachi_qilmaydi():
+    """XAVFSIZLIK MEZONI: botga shunchaki /start bosgan odam OBUNACHI
+    BO'LMAYDI. Aks holda botni topgan begona ham, bot tasodifan qo'shilgan
+    guruh ham kompaniyaning mos tenderlarini olardi."""
+    with _TgPatch(with_subscriber=False) as tg:
+        tg.update_text = "/start"           # tokenSIZ
+        res = notify.consume_links()
+        eq(res["added"], 0, "tokensiz /start obunachi qilib qo'ydi")
+        eq(notify.enabled_subscribers(), [], "tokensiz chat obunachi bo'lib qoldi")
+
+        # Yaroqsiz token ham o'tmasligi kerak
+        tg.update_text = "/start " + ("x" * 24)
+        eq(notify.consume_links()["added"], 0, "yaroqsiz token qabul qilindi")
+        eq(notify.enabled_subscribers(), [], "yaroqsiz token bilan ulanib qolindi")
+
+
+@case
+def test_ulash_havolasi_obunachi_qiladi():
+    """TZ MOHIYATI: platforma bir martalik havola beradi, foydalanuvchi uni
+    bosadi va bot tokenni oladi -> AYNAN o'sha suhbat ulanadi.
+
+    Token BIR MARTA ishlaydi va ulangan suhbat SHU yurishда xabar oladi."""
+    with _TgPatch(with_subscriber=False) as tg:
+        notify.save_settings(dict(TEST_SETTINGS, enabled=False,
+                                  telegram_enabled=True))
+        orig = smtplib.SMTP
+        smtplib.SMTP = ExplodingSMTP
+        try:
+            link = notify.create_link()
+            ok(link["url"].startswith("https://t.me/sinov_bot?start="),
+               f"havola noto'g'ri: {link['url']}")
+            ok(link["token"] in link["url"], "havolada token yo'q")
+            eq(notify.link_status(link["token"])["connected"], False,
+               "hali bosilmagan havola ulangan deb ko'rsatildi")
+
+            # Foydalanuvchi havolani bosdi -> Telegram "/start <token>" yubordi
+            tg.update_text = f"/start {link['token']}"
+
+            res = notify.run(min_score=0, limit=3, dry_run=False, since_hours=87600)
+            subs = {s["chat_id"] for s in notify.enabled_subscribers()}
+            eq(subs, {TEST_CHAT}, "havola bosilgan suhbat ulanmadi")
+            eq(notify.link_status(link["token"])["connected"], True,
+               "havola ishlatilgan deb belgilanmadi")
+            ok(res["telegram"]["sent"] > 0,
+               "yangi ulanmaga SHU yurishда xabar ketishi kerak edi")
+            ok(len(tg.sent) >= 1, "Telegramga xabar ketmadi")
+            CREATED_SENT.update(notify.sent_ids(notify.tg_kind(TEST_CHAT)))
+
+            # TOKEN BIR MARTALIK: o'sha matn qayta kelsa yangi ulanma yo'q
+            eq(notify.consume_links()["added"], 0, "token ikkinchi marta ishladi")
+        finally:
+            smtplib.SMTP = orig
+            notify.save_settings(TEST_SETTINGS)
+
+
+@case
+def test_muddati_otgan_havola_ishlamaydi():
+    """Muddati o'tgan token bilan ulanib bo'lmaydi — havola boshqa qo'lga
+    tushsa ham cheksiz ochiq qolmasligi kerak."""
+    with _TgPatch(with_subscriber=False) as tg:
+        link = notify.create_link()
+        db.execute_returning(
+            "UPDATE notify_telegram_link SET expires_at = now() - INTERVAL '1 minute' "
+            "WHERE token = %(t)s RETURNING token", {"t": link["token"]})
+        tg.update_text = f"/start {link['token']}"
+        eq(notify.consume_links()["added"], 0, "muddati o'tgan token ishladi")
+        eq(notify.enabled_subscribers(), [], "muddati o'tgan token bilan ulanildi")
+
+
+@case
+def test_ochirilgan_obunachi_xabar_olmaydi():
+    """`enabled=false` obunachiga xabar KETMAYDI va /start qayta bosilsa ham
+    O'ZI QAYTA YOQILMAYDI (egasi ataylab o'chirgan)."""
+    with _TgPatch() as tg:
+        notify.save_settings(dict(TEST_SETTINGS, enabled=False,
+                                  telegram_enabled=True))
+        db.execute_returning(
+            "UPDATE notify_telegram_subscriber SET enabled=false "
+            "WHERE chat_id=%(c)s RETURNING chat_id", {"c": TEST_CHAT})
+        orig = smtplib.SMTP
+        smtplib.SMTP = ExplodingSMTP
+        try:
+            res = notify.run(min_score=0, limit=3, dry_run=False, since_hours=87600)
+        finally:
+            smtplib.SMTP = orig
+            notify.save_settings(TEST_SETTINGS)
+
+        eq(len(tg.sent), 0, "o'chirilgan obunachiga xabar ketdi")
+        eq(res["telegram"]["sent"], 0, "o'chirilgan obunachi 'yuborildi' deb hisoblandi")
+        # sync (/start) uni QAYTA YOQMASLIGI kerak
+        row = db.query_one("SELECT enabled FROM notify_telegram_subscriber "
+                           "WHERE chat_id=%(c)s", {"c": TEST_CHAT})
+        eq(row["enabled"], False, "o'chirilgan obunachi /start dan keyin qayta yoqildi")
+
+
+@case
+def test_kanallar_mustaqil():
+    """Bir kanal yiqilsa IKKINCHISI baribir yuboriladi va xato JIMGINA
+    yutilmaydi (natijada `error` maydonida qaytadi)."""
+    with _TgPatch(fail="Chat topilmadi (sinov)"):
+        notify.save_settings(dict(TEST_SETTINGS, enabled=True,
+                                  telegram_enabled=True))
+        FakeSMTP.reset()
+        orig = smtplib.SMTP
+        smtplib.SMTP = FakeSMTP
+        try:
+            res = notify.run(min_score=0, limit=3, dry_run=False,
+                             since_hours=87600, force=True)
+            # Telegram yiqildi...
+            ok(res["telegram"]["error"], "Telegram xatosi qayd etilmadi")
+            eq(res["telegram"]["sent"], 0, "yiqilgan kanal 'yuborildi' demasligi kerak")
+            # ...email esa baribir ketdi
+            eq(len(FakeSMTP.sent), 1, "Telegram xatosi emailni to'xtatib qo'ydi")
+            eq(res["sent"], res["found"], "email yuborilmadi")
+            ok("XATO" in (res["message"] or ""), "xato xulosaда ko'rinmadi")
+            for t in res["tenders"]:
+                CREATED_SENT.add(t["id"])
+        finally:
+            smtplib.SMTP = orig
+            notify.save_settings(TEST_SETTINGS)
+
+
+@case
+def test_telegram_sozlanmagan_aniq_xato():
+    """Obunachi yo'q / token yo'q -> ANIQ xato, jimgina o'tmaydi."""
+    # (a) obunachi yo'q — sinov xabari aniq sabab aytadi
+    with _TgPatch(with_subscriber=False):
+        try:
+            notify.send_telegram_test()
+            raise AssertionError("obunachi yo'q edi — xato kutilgandi")
+        except notify.NotifyError as e:
+            ok("/start" in str(e), f"xato nima qilishni aytmadi: {e}")
+
+    # (b) token yo'q — `require_token` HAQIQIY holida qoladi
+    eski = os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+    try:
+        try:
+            telegram.require_token()
+            raise AssertionError("token yo'q edi — xato kutilgandi")
+        except telegram.TelegramError as e:
+            ok("TELEGRAM_BOT_TOKEN" in str(e), f"xato .env ni ko'rsatmadi: {e}")
+        # Yoqishga urinish ham to'xtatiladi
+        try:
+            notify.save_settings(dict(TEST_SETTINGS, telegram_enabled=True))
+            raise AssertionError("tokensiz yoqib bo'lmasligi kerak edi")
+        except notify.NotifyError as e:
+            ok("TELEGRAM_BOT_TOKEN" in str(e), f"xato matni tushunarsiz: {e}")
+    finally:
+        if eski is not None:
+            os.environ["TELEGRAM_BOT_TOKEN"] = eski
+        notify.save_settings(TEST_SETTINGS)
+
+
+@case
+def test_telegram_ochirilganda_yuborilmaydi():
+    """telegram_enabled=false -> Bot API ga UMUMAN tegilmaydi."""
+    with _TgPatch() as tg:
+        notify.save_settings(dict(TEST_SETTINGS, enabled=False,
+                                  telegram_enabled=False))
+        orig = smtplib.SMTP
+        smtplib.SMTP = ExplodingSMTP
+        try:
+            res = notify.run(min_score=0, limit=3, dry_run=False,
+                             since_hours=87600, force=True)
+        finally:
+            smtplib.SMTP = orig
+        eq(len(tg.sent), 0, "o'chirilganда Telegramga xabar ketdi")
+        eq(res["telegram"]["sent"], 0, "o'chirilganда 'yuborildi' deyildi")
+        ok("o'chirilgan" in (res["telegram"]["message"] or ""),
+           f"sabab aytilmadi: {res['telegram']['message']}")
+
+
+@case
+def test_telegram_dry_run():
+    """--dry-run: Telegramga ham HECH NARSA ketmaydi."""
+    with _TgPatch() as tg:
+        notify.save_settings(dict(TEST_SETTINGS, telegram_enabled=True))
+        oldin = int(db.scalar("SELECT count(*) FROM notify_sent"))
+        orig = smtplib.SMTP
+        smtplib.SMTP = ExplodingSMTP
+        try:
+            res = notify.run(min_score=0, limit=5, dry_run=True, since_hours=87600)
+        finally:
+            smtplib.SMTP = orig
+            notify.save_settings(TEST_SETTINGS)
+        eq(len(tg.sent), 0, "dry-run da Telegramga xabar ketdi")
+        eq(res["telegram"]["sent"], 0, "dry-run da 'yuborildi' deyildi")
+        eq(int(db.scalar("SELECT count(*) FROM notify_sent")), oldin,
+           "dry-run BAZAGA YOZDI")
+
+
+@case
+def test_telegram_chat_aniqlash():
+    """`discover_chats()` getUpdates javobidan chat ro'yxatini quradi."""
+    with _TgPatch():
+        chats = telegram.discover_chats()
+    eq(len(chats), 1, "bitta suhbat kutilgandi")
+    eq(chats[0]["chat_id"], TEST_CHAT, "chat ID")
+    eq(chats[0]["title"], "Sinov guruhi", "suhbat nomi")
+    eq(chats[0]["type"], "supergroup", "suhbat turi")
+
+
+@case
+def test_qayta_ulash_dublikat_qilmaydi():
+    """Bir chat YANGI havola bilan qayta ulansa — dublikat paydo bo'lmaydi,
+    ma'lumoti yangilanadi va O'CHIRILGAN ulanma QAYTA YOQILADI.
+
+    (Qayta ulash — foydalanuvchining aniq harakati, shuning uchun tokensiz
+    /start dan farqli o'laroq `enabled` ni tiklaydi.)"""
+    with _TgPatch(with_subscriber=False) as tg:
+        birinchi = notify.create_link()
+        tg.update_text = f"/start {birinchi['token']}"
+        eq(notify.consume_links()["added"], 1, "birinchi ulanish bo'lmadi")
+
+        # Egasi ulanmani o'chirdi
+        db.execute_returning(
+            "UPDATE notify_telegram_subscriber SET enabled=false "
+            "WHERE chat_id=%(c)s RETURNING chat_id", {"c": TEST_CHAT})
+
+        # YANGI havola bilan qayta ulanadi
+        ikkinchi = notify.create_link()
+        tg.update_text = f"/start {ikkinchi['token']}"
+        notify.consume_links()
+
+        n = int(db.scalar("SELECT count(*) FROM notify_telegram_subscriber "
+                          "WHERE chat_id=%(c)s", {"c": TEST_CHAT}))
+        eq(n, 1, "obunachilar jadvalида dublikat paydo bo'ldi")
+        row = db.query_one(
+            "SELECT title, chat_type, enabled, source FROM notify_telegram_subscriber "
+            "WHERE chat_id=%(c)s", {"c": TEST_CHAT})
+        eq(row["title"], "Sinov guruhi", "nom yangilanmadi")
+        eq(row["chat_type"], "supergroup", "tur yangilanmadi")
+        eq(row["enabled"], True, "qayta ulanganда ulanma tiklanmadi")
+        eq(row["source"], "link", "manba 'link' deb belgilanmadi")
+
+
+@case
+def test_kuzatuv_oynasi():
+    """Oxirgi ETL tsiklidan OLDIN ko'rilgan tenderlar tanlanmaydi
+    (TZ: bildirishnoma soatlik kuzatish tsikli davomida keladi)."""
+    since = notify.last_cycle_since()
+    ok(isinstance(since, datetime), "last_cycle_since datetime qaytarishi kerak")
+
+    kelajak = datetime.now(timezone.utc) + timedelta(days=1)
+    eq(len(notify.find_candidates(min_score=0, since=kelajak, limit=0)), 0,
+       "kelajakdagi oynada tender bo'lmasligi kerak")
+
+
+# ---------------------------------------------------------------------------
+# Tayyorlash / tozalash
+# ---------------------------------------------------------------------------
+def setup():
+    global _ORIGINAL_SETTINGS
+    db.init_pool()
+    # SMTP — PLATFORMA sozlamasi (.env). Sinov haqiqiy `.env` ga bog'liq
+    # bo'lmasligi kerak, shuning uchun muhitni o'zimiz qo'yamiz.
+    for k, v in TEST_SMTP_ENV.items():
+        _ORIGINAL_SMTP_ENV[k] = os.environ.get(k)
+        os.environ[k] = v
+    row = db.query_one(notify.SETTINGS_GET_SQL)
+    _ORIGINAL_SETTINGS = dict(row) if row else None
+    notify.save_settings(TEST_SETTINGS)
+
+
+def teardown():
+    """SINOV YOZUVLARINI TOZALAYDI: notify_sent qatorlari o'chiriladi,
+    notify_settings sinovdan oldingi holatiga qaytariladi."""
+    for tid in CREATED_SENT:
+        db.execute_returning(
+            "DELETE FROM notify_sent WHERE tender_id=%(id)s RETURNING tender_id",
+            {"id": tid})
+    # Ehtiyot chorasi: sinov emaili / sinov Telegram chati bilan ketgan qatorlar
+    for manzil in (TEST_EMAIL, f"tg:{TEST_CHAT}"):
+        db.execute_returning(
+            "DELETE FROM notify_sent WHERE email=%(e)s RETURNING tender_id",
+            {"e": manzil})
+
+    for k, v in _ORIGINAL_SMTP_ENV.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+    if _ORIGINAL_SETTINGS:
+        notify.save_settings(_ORIGINAL_SETTINGS)
+    else:
+        db.execute_returning(
+            "DELETE FROM notify_settings WHERE id=1 RETURNING id")
+    qoldi = int(db.scalar("SELECT count(*) FROM notify_sent WHERE email=%(e)s",
+                          {"e": TEST_EMAIL}) or 0)
+    print(f"\nTozalandi: {len(CREATED_SENT)} ta notify_sent yozuvi o'chirildi "
+          f"(qoldiq: {qoldi}), sozlamalar tiklandi.")
+
+
+def main() -> None:
+    if not os.environ.get("XT_DB_DSN"):
+        sys.exit("XATO: XT_DB_DSN o'rnatilmagan (.env).")
+
+    setup()
+    print(f"Sinovlar: {len(CASES)} ta\n" + "-" * 52)
+    try:
+        for fn in CASES:
+            nomi = fn.__name__
+            try:
+                fn()
+                print(f"  OK    {nomi}")
+            except Exception as e:  # noqa: BLE001
+                FAILED.append((nomi, e))
+                print(f"  XATO  {nomi}: {e}")
+    finally:
+        teardown()
+        db.close_pool()
+
+    print("-" * 52)
+    if FAILED:
+        print(f"YIQILDI: {len(FAILED)}/{len(CASES)}")
+        sys.exit(1)
+    print(f"HAMMASI O'TDI: {len(CASES)}/{len(CASES)}")
+    print("Haqiqiy email ham, Telegram xabari ham YUBORILMADI "
+          "(soxta SMTP va soxta Bot API transportlari).")
+
+
+if __name__ == "__main__":
+    main()

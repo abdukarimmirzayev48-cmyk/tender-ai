@@ -171,6 +171,7 @@ def transform(tender_id: int, result: dict) -> Tuple[dict, List[dict]]:
     }
     for d in docs:
         d["tender_id"] = tender_id
+        d["file_ref"] = d["file_id"]
     return detail, docs
 
 
@@ -179,7 +180,7 @@ def transform(tender_id: int, result: dict) -> Tuple[dict, List[dict]]:
 # ---------------------------------------------------------------------------
 DETAIL_COLS = ["tender_id", "anno", "method_marks", "company_details", "director",
                "close_time", "proc_lang", "offer_period", "doc_count", "raw_json"]
-DOC_COLS = ["tender_id", "file_id", "name", "size_bytes", "content_type",
+DOC_COLS = ["tender_id", "file_id", "file_ref", "name", "size_bytes", "content_type",
             "file_type", "field_key", "field_path"]
 
 
@@ -225,9 +226,9 @@ def main() -> None:
     # Qaysi tenderlarni yig'amiz
     conn = psycopg2.connect(args.dsn)
     with conn.cursor() as cur:
-        sql = "SELECT id FROM tender"
+        sql = "SELECT id FROM tender WHERE source_platform = 'xt-xarid'"
         if args.only_open:
-            sql += " WHERE status = 'open'"
+            sql += " AND status = 'open'"
         sql += " ORDER BY close_at DESC NULLS LAST"
         if args.limit:
             sql += f" LIMIT {int(args.limit)}"

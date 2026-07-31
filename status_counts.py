@@ -6,26 +6,28 @@ aniqlashga yordam beradi.
 
 Ishga tushirish:
     python3 status_counts.py
+    python3 status_counts.py --ref ref_selection_public   # 2-reyestr
 """
+import argparse
 import time
 import requests
 from collections import Counter
 
 API_URL   = "https://api.xt-xarid.uz/rpc"
-REF_NAME  = "ref_tender_public"
+DEFAULT_REF = "ref_tender_public"
 LIMIT     = 51
 DELAY     = 1.0
 HEADERS   = {"Content-Type": "application/json",
              "User-Agent": "xt-xarid-tender-aggregator/0.1 (research)"}
 
 
-def fetch_all():
+def fetch_all(ref: str = DEFAULT_REF):
     session = requests.Session()
     records, offset, page = [], 0, 0
     while True:
         page += 1
         payload = {"jsonrpc": "2.0", "id": page, "method": "ref",
-                   "params": {"ref": REF_NAME, "op": "read",
+                   "params": {"ref": ref, "op": "read",
                               "limit": LIMIT, "offset": offset, "filters": {}}}
         r = session.post(API_URL, json=payload, headers=HEADERS, timeout=30)
         r.raise_for_status()
@@ -41,8 +43,13 @@ def fetch_all():
 
 
 def main():
-    recs = fetch_all()
-    print(f"Jami: {len(recs)} tender\n")
+    ap = argparse.ArgumentParser(description="Reyestr statuslari taqsimoti")
+    ap.add_argument("--ref", default=DEFAULT_REF,
+                    help="ref_tender_public (standart) yoki ref_selection_public")
+    args = ap.parse_args()
+
+    recs = fetch_all(args.ref)
+    print(f"Jami: {len(recs)} yozuv ({args.ref})\n")
 
     # 1) Status taqsimoti
     status_ct = Counter(r.get("status") for r in recs)

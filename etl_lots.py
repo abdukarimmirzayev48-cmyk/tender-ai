@@ -131,6 +131,45 @@ def transform_items(tender_id: int, lot_id: int,
     return rows
 
 
+def fetch_items(session: requests.Session, tender_id: int, lot_id: int) -> List[dict]:
+    """Lot pozitsiyalarini API limiti bo'yicha to'liq sahifalab oladi."""
+    out: List[dict] = []
+    seen = set()
+    offset = 0
+    while True:
+        batch = urpc(
+            session,
+            "get_items",
+            {
+                "limit": ITEMS_PAGE,
+                "offset": offset,
+                "proc_id": tender_id,
+                "lot_id": lot_id,
+            },
+            tender_id,
+        )
+        if not batch or not isinstance(batch, list):
+            break
+        fresh = []
+        for item in batch:
+            key = str(
+                item.get("item_id")
+                or item.get("id")
+                or json.dumps(item, sort_keys=True, ensure_ascii=False)
+            )
+            if key not in seen:
+                seen.add(key)
+                fresh.append(item)
+        if not fresh:
+            break
+        out.extend(fresh)
+        if len(batch) < ITEMS_PAGE:
+            break
+        offset += len(batch)
+        time.sleep(REQUEST_DELAY)
+    return out
+
+
 ITEM_COLS = ["tender_id", "lot_id", "item_id", "product_code", "name", "unit",
              "amount_text", "price_text", "totalcost_text", "delivery_period",
              "guarantee", "prod_year", "country_of_origin", "delivery_address",
@@ -162,6 +201,8 @@ def main() -> None:
                     help="Allaqachon yig'ilgan tenderlarni o'tkazib yuborish "
                          "(uzilgan yurishni davom ettirish uchun)")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--tender-id", type=int, action="append", dest="tender_ids",
+                    help="Faqat berilgan tender ID (bir necha marta berish mumkin)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--dsn", default=os.environ.get("XT_DB_DSN"))
     args = ap.parse_args()
@@ -173,18 +214,22 @@ def main() -> None:
 
     conn = psycopg2.connect(args.dsn)
     with conn.cursor() as cur:
-        where = []
+        where = ["source_platform='xt-xarid'"]
         if args.only_open:
             where.append("status='open'")
         if args.skip_done:
             where.append("id NOT IN (SELECT DISTINCT tender_id FROM tender_item)")
+        params = ()
+        if args.tender_ids:
+            where.append("id = ANY(%s)")
+            params = (args.tender_ids,)
         sql = "SELECT id FROM tender"
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY close_at DESC NULLS LAST"
         if args.limit:
             sql += f" LIMIT {int(args.limit)}"
-        cur.execute(sql)
+        cur.execute(sql, params)
         ids = [r[0] for r in cur.fetchall()]
 
     print(f"[1/2] {len(ids)} ta tender uchun lot nomlari va pozitsiyalar...\n")
@@ -211,9 +256,7 @@ def main() -> None:
             if t:
                 titles[lid] = as_text(t)
 
-            items = urpc(session, "get_items",
-                         {"limit": ITEMS_PAGE, "offset": 0,
-                          "proc_id": tid, "lot_id": lid}, tid)
+            items = fetch_items(session, tid, lid)
             time.sleep(REQUEST_DELAY)
             if items:
                 all_items.extend(transform_items(tid, lid, items))
