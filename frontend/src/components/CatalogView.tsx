@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '@/api'
 import Icon from './Icon'
 import CatalogImport from './CatalogImport'
@@ -14,7 +14,9 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
+import { Skeleton } from '@/components/ui/skeleton'
 import { ConfirmDialog, useConfirm } from '@/components/ui/confirm-dialog'
+import Pagination from './Pagination'
 import { cn } from '@/lib/utils'
 import type { Category, Product } from '@/types'
 
@@ -23,16 +25,29 @@ import type { Category, Product } from '@/types'
 interface CatalogViewProps {
   items: Product[]
   categories: Category[]
+  loading?: boolean
+  loadError?: string | null
   onChanged: () => void
   onOpenMatch: (p: Product) => void
 }
 
-export default function CatalogView({ items, categories, onChanged, onOpenMatch }: CatalogViewProps) {
+const PAGE_SIZE = 50
+
+export default function CatalogView({
+  items, categories, loading = false, loadError, onChanged, onOpenMatch,
+}: CatalogViewProps) {
   const t = useT()
   const f = useFormat()
   const [editing, setEditing] = useState<Product | 'new' | null>(null)
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [page, setPage] = useState(1)
+  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE))
+  const shownItems = items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages)
+  }, [page, totalPages])
 
   // O'chirish xatosi KO'RINISHI kerak. Ilgari `await api.deleteProduct(...)`
   // to'g'ridan-to'g'ri onClick ichida edi: rad etilgan promise jimgina yo'qolar,
@@ -52,7 +67,11 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <p className="text-body text-muted-foreground">
-          {t('cat.lead')}
+          {t('cat.lead')} {items.length > 0 && (
+            <span className="ml-1 font-semibold text-foreground">
+              {t('cat.count', { n: items.length.toLocaleString() })}
+            </span>
+          )}
         </p>
         <div className="flex gap-2">
           {/* P0-4 — Excel/CSV/Google Sheets dan ommaviy import */}
@@ -73,6 +92,12 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
         </div>
       )}
 
+      {loadError && (
+        <div className="mb-3 rounded-lg border border-urgent/40 bg-urgent-soft px-3 py-2 text-body text-urgent-strong">
+          {t('common.errorWith', { msg: loadError })}
+        </div>
+      )}
+
       {editing && (
         <ProductForm
           product={editing === 'new' ? null : editing}
@@ -82,7 +107,9 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
         />
       )}
 
-      {items.length === 0 && !editing && (
+      {loading && items.length === 0 && <Skeleton className="h-56 w-full rounded-xl" />}
+
+      {!loading && items.length === 0 && !editing && !loadError && (
         <Empty className="rounded-xl border border-dashed bg-card">
           <EmptyHeader>
             <EmptyTitle>{t('cat.empty')}</EmptyTitle>
@@ -105,7 +132,7 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
               </TableRow>
             </TableHeader>
             <TableBody>
-              {items.map((p) => (
+              {shownItems.map((p) => (
                 <TableRow key={p.id} className="hover:bg-transparent">
                   <TableCell>
                     <div className="font-medium">{p.name}</div>
@@ -128,7 +155,9 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
                       : <span className="text-muted-foreground">—</span>}
                   </TableCell>
                   <TableCell className="tabular text-right">
-                    {p.match_count > 0 ? (
+                    {p.match_count == null ? (
+                      <span className="text-muted-foreground" title={t('cat.matchesDeferred')}>—</span>
+                    ) : p.match_count > 0 ? (
                       <button
                         className="font-semibold text-primary underline-offset-2 hover:underline"
                         onClick={() => onOpenMatch(p)}
@@ -156,6 +185,14 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
             </TableBody>
           </Table>
         </div>
+      )}
+
+      {items.length > 0 && (
+        <Pagination
+          page={page} totalPages={totalPages}
+          onPrev={() => setPage((p) => Math.max(1, p - 1))}
+          onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
+        />
       )}
 
       <ConfirmDialog

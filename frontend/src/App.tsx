@@ -102,6 +102,8 @@ export default function App() {
   const [docFocus, setDocFocus] = useState<string | null>(null)
   const [catalog, setCatalog] = useState<Product[]>([])
   const [catalogNew, setCatalogNew] = useState({ new: 0, total: 0 })
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogError, setCatalogError] = useState<string | null>(null)
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -140,9 +142,20 @@ export default function App() {
   // Bir martalik ma'lumotlar
   const loadSearches = useCallback(
     () => api.searches().then(setSearches).catch(() => {}), [])
-  const loadCatalog = useCallback(() => {
-    api.catalog().then(setCatalog).catch(() => {})
-    api.catalogNewCount().then(setCatalogNew).catch(() => {})
+  const loadCatalog = useCallback(async () => {
+    setCatalogLoading(true)
+    setCatalogError(null)
+    try {
+      const [items, count] = await Promise.all([
+        api.catalog(), api.catalogNewCount(),
+      ])
+      setCatalog(items)
+      setCatalogNew(count)
+    } catch (e) {
+      setCatalogError((e as Error).message)
+    } finally {
+      setCatalogLoading(false)
+    }
   }, [])
   // Ma'lumot FAQAT kirgandan keyin so'raladi: aks holda kirish ekrani
   // ochiq turganda o'nlab so'rov ketib, hammasi 401 qaytarardi.
@@ -433,6 +446,7 @@ export default function App() {
         {view === 'catalog' && (
           <CatalogView
             items={catalog} categories={categories}
+            loading={catalogLoading} loadError={catalogError}
             onChanged={loadCatalog}
             onOpenMatch={openProductMatch}
           />

@@ -30,6 +30,8 @@ dist/
 etl_cron.log
 *.tsv
 *.bak
+.tmp/
+.runtime/
 
 # ===== OS / muharrir =====
 .DS_Store

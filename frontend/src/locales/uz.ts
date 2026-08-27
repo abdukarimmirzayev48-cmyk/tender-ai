@@ -433,6 +433,8 @@ export const uz = {
 
   // ── Katalog ───────────────────────────────────────────────────────────
   'cat.lead': 'Nima sotasiz? Kiritganingizga qarab “Sizga mos” tenderlarni topadi.',
+  'cat.count': 'Katalogda: {n} ta',
+  'cat.matchesDeferred': 'Katta katalogda mos tenderlar soni ro‘yxat ochilishida hisoblanmaydi.',
   'cat.import': 'Import',
   'cat.addProduct': 'Mahsulot qo‘shish',
   'cat.empty': 'Katalog bo‘sh',

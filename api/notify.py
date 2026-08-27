@@ -52,7 +52,7 @@ from email.message import EmailMessage
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
-from api import db, i18n, matching, queries, telegram
+from api import db, i18n, matching, queries, telegram, translit
 
 # Xabar turi/kanali (notify_sent.kind). HAR KANAL O'Z JURNALINI yuritadi:
 # aks holda email allaqachon "yuborilgan" deb belgilagan tenderlar keyinroq
@@ -713,8 +713,72 @@ def _fetch_candidates(since: datetime) -> List[Dict[str, Any]]:
     return db.query(queries.match_candidates_sql(where, cap=CANDIDATE_CAP), params)
 
 
+#: Matn atamasining eng katta uzunligi — `queries.MAX_TERM_LEN` bilan
+#: bir xil sabab: undan uzunlari SKU artikullari va ular tender
+#: pozitsiyasida uchramaydi.
+ATAMA_MAX_LEN = 25
+
+
+def katalog_indeks(products: List[Dict[str, Any]],
+                   db_mos: bool = True) -> Dict[str, Any]:
+    """Katalogdan BIR MARTA quriladigan moslashtirish indeksi.
+
+    NEGA KERAK (o'lchangan, 1797 qatorli real katalog):
+        har nomzod uchun 1797 mahsulotni aylanish -> 10 nomzod = 67 s,
+        528 nomzod = 59 DAQIQA. Soatlik ETL ning bildirishnoma qadami
+        tugamasdi va keyingi yurish uni o'ldirardi.
+
+    Indeks nomzoddan MUSTAQIL, shuning uchun bir marta quriladi:
+        `kod`   -> [(prefiks, mahsulot_nomi)]      tasdiqlangan kodlar
+        `atama` -> [(atama, mahsulot_nomi, variantlar)]  kodsizlar uchun
+
+    Variantlar OLDINDAN hisoblanadi — `translit.variants()` qimmat va
+    u har nomzod uchun qayta hisoblanardi.
+    """
+    kod: List[Tuple[str, str]] = []
+    korilgan_kod = set()
+    for p in products:
+        for k in (p.get("codes") or []):
+            if k and k not in korilgan_kod:
+                korilgan_kod.add(k)
+                kod.append((k, p.get("name") or ""))
+
+    # ATAMALAR — `queries.catalog_terms()` dan, YAGONA MANBA.
+    # Bu yerda o'z qoidasini yozmaymiz: ilgari shunday qilingandi va
+    # indeks 1325 atamaga shishib ketgandi (SKU nomlari kirgani uchun).
+    juft, kesilgan = queries.catalog_terms(products)
+    atama = [(t, nom, translit.variants(t)) for t, nom in juft]
+
+    # MATN MOSLIGI SQL DA — `/catalog/match` bilan AYNAN bir usul.
+    #
+    # Ilgari bu yerda har nomzod uchun 400 atama Python siklida
+    # tekshirilardi: 528 nomzod x 400 atama x 3 regex = 630 ming amal,
+    # ya'ni bir yurish ~51 s. Endi Postgres bir so'rovda mos
+    # tenderlarni qaytaradi (~0.3 s) va `score_candidate` faqat
+    # to'plamga tegishlilikni tekshiradi.
+    #
+    # Ikki joyda ikki xil amalga oshirish bo'lmasin — bu loyihada
+    # aynan shu sabab bilan atama qoidasi ikkiga bo'linib ketgandi.
+    matn_mos: Optional[Dict[int, str]] = None
+    if db_mos and atama:
+        matn_mos = {}
+        tsql, tpar = queries.build_catalog_text_match([t for t, _n, _v in atama])
+        if tsql:
+            for r in db.query(tsql, tpar):
+                matn_mos.setdefault(r["tender_id"], r["pozitsiya"])
+
+    return {"kod": kod, "atama": atama, "kesilgan": kesilgan,
+            # `None` -> SQL to'plami YO'Q, `score_candidate` matnni
+            # o'zi tekshiradi. Bu sintetik nomzod uchun kerak (sinovlar
+            # bazada bo'lmagan tender yasaydi) — u holda to'plamga
+            # tegishlilik HAR DOIM yolg'on chiqardi va moslik jimgina
+            # yo'qolardi.
+            "matn_mos": matn_mos}
+
+
 def score_candidate(cand: Dict[str, Any], products: List[Dict[str, Any]],
-                    profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+                    profile: Optional[Dict[str, Any]],
+                    indeks: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Bitta tenderning moslik balli. YANGI MANTIQ YO'Q — mavjud ikki manba:
 
       katalog: api/main.py `_product_matches` (kod=100, nom=60)
@@ -739,13 +803,42 @@ def score_candidate(cand: Dict[str, Any], products: List[Dict[str, Any]],
     cat_score = 0
     matched_products: List[str] = []
     by_code = False
-    for p in products:
-        how = _product_matches(cand, p)
-        if not how:
-            continue
-        matched_products.append(p["name"])
-        if how == "kod":
-            by_code = True
+
+    # INDEKS BERILMAGAN -> bu yakka chaqiruv (sinov yoki ad-hoc).
+    # SQL to'plamini qurmaymiz: nomzod bazada bo'lmasligi mumkin.
+    ix = indeks if indeks is not None else katalog_indeks(products, db_mos=False)
+
+    # --- KOD (birlamchi) ---
+    for gc in (cand.get("good_codes") or []):
+        for pref, nom in ix["kod"]:
+            if gc and gc.startswith(pref):
+                by_code = True
+                if nom not in matched_products:
+                    matched_products.append(nom)
+
+    # --- NOM (faqat kodsiz mahsulotlar uchun) ---
+    #
+    # SQL allaqachon MOS TENDERLARNI aniqlab bergan (`matn_mos`), shuning
+    # uchun bu yerda faqat tegishlilik tekshiriladi. Mahsulot nomini esa
+    # atama bo'yicha topamiz — natija kichik, sikl arzon.
+    mm = ix.get("matn_mos")
+    matn_nomzod = (cand.get("id") in mm) if mm is not None else True
+    if not by_code and matn_nomzod:
+        blob = matching._norm(
+            f"{cand.get('name') or ''} {cand.get('goods_blob') or ''} "
+            f"{(mm or {}).get(cand.get('id')) or ''}")
+        for _term, nom, variants in ix["atama"]:
+            if matching.hits_variants(variants, blob):
+                if nom not in matched_products:
+                    matched_products.append(nom)
+                if len(matched_products) >= 5:
+                    break
+        if not matched_products and mm is not None and cand.get("id") in mm:
+            # SQL topgan, atama esa qaytadan topmadi — ehtimol
+            # `goods_blob` cap ga tushgan. Moslikni YO'QOTMAYMIZ,
+            # lekin mahsulot nomini TAXMIN QILMAYMIZ: mos kelgan
+            # POZITSIYA nomi ko'rsatiladi.
+            matched_products.append(mm[cand["id"]])
     if matched_products:
         # /catalog/match bilan AYNAN bir xil shkala (kod=100, nom=60).
         # Ikki joyda ikki shkala bo'lmasin: bildirishnoma va ekran bir
@@ -811,11 +904,15 @@ def find_candidates(min_score: Optional[int] = None,
 
     already = set() if include_sent else sent_ids(kind, company_id)
 
+    # INDEKS BIR MARTA — nomzod ichida emas. Aks holda 1797 qatorli
+    # katalogda bu sikl 59 daqiqa olardi (o'lchangan).
+    ix = katalog_indeks(products)
+
     out: List[Dict[str, Any]] = []
     for c in _fetch_candidates(since):
         if c["id"] in already:
             continue
-        s = score_candidate(c, products, profile)
+        s = score_candidate(c, products, profile, indeks=ix)
         if s["score"] < threshold:
             continue
         out.append({

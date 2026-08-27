@@ -560,6 +560,7 @@ VALUES (
                WHERE company_id = %(company_id)s
                ORDER BY updated_at DESC LIMIT 1),
              nextval(pg_get_serial_sequence('company_profile', 'id'))),
+    %(company_id)s,
     %(name)s, %(keywords)s, %(regions)s, %(currency)s, %(min_cost)s, %(max_cost)s,
     %(about)s, %(certificates)s, %(clearances)s, %(experience_years)s,
     %(max_contract_value)s, %(max_contract_currency)s, %(employees)s,
@@ -773,6 +774,148 @@ CATALOG_LIST_SQL = (
     "           '{}') AS codes "
     "FROM catalog_product "
     "WHERE company_id = %(company_id)s ORDER BY created_at")
+
+# ---------------------------------------------------------------------------
+# KATALOG MATN MOSLIGI — SQL DA, Python siklida EMAS
+#
+# O'LCHANGAN SABAB: real katalog 1797 qatorli. `matching.product_matches()`
+# ni Python siklida yurgizish 1797 x 782 = 1.4 mln chaqiruv demak, va har
+# chaqiruv `translit.variants()` + regex bajaradi:
+#
+#     25 nomzod x 1797 mahsulot = 82.6 s
+#     to'liq so'rov             = ~29 DAQIQA
+#
+# Brauzer ancha oldin uziladi. Foydalanuvchi BO'SH RO'YXAT ko'radi va uni
+# "mos tender yo'q" deb o'qiydi — aslida so'rov TUGAMAGAN. Bu 2-sinf
+# tuzog'i: salbiy shartdan olingan xulosa.
+#
+# Bu yerda naqshlar BIR MARTA quriladi va TAKRORSIZ (katalogda "Hikvision"
+# 699 marta uchraydi, naqsh esa bitta kerak). Solishtirishni Postgres
+# bajaradi.
+#
+# ATRIBUT: qaysi mahsulot mos kelgani ham SHU SO'ROVDA qaytadi — naqsh
+# `VALUES` jadvaliga mahsulot id si bilan birga qo'yiladi. Python tomonda
+# ikkinchi sikl kerak emas.
+# ---------------------------------------------------------------------------
+#: Matn atamasining eng katta uzunligi. Undan uzunlari SKU nomlari
+#: ("1280ZJ-S Германичная коробка Металлическая") va ular hech qachon
+#: tender pozitsiyasida uchramaydi — faqat naqsh sonini shishiradi.
+MAX_TERM_LEN = 25
+
+#: Bir so'rovda ishlatiladigan eng ko'p TURLI atama. Chegara bor, chunki
+#: naqsh soni SQL vaqtini chiziqli oshiradi. Kesilgan bo'lsa chaqiruvchi
+#: buni foydalanuvchiga AYTISHI shart (jimgina kesish yo'q).
+MAX_TERMS = 400
+
+
+def build_catalog_text_match(terms: List[str],
+                             cap: int = 400) -> Tuple[str, Dict[str, Any]]:
+    """TURLI atamalar ro'yxatidan SQL quradi. Naqsh bo'lmasa ("", {}).
+
+    Natija ustunlari: `tender_id`, `pozitsiya` (mos kelgan tovar nomi).
+
+    ATAMALAR GLOBAL TAKRORSIZ BO'LISHI SHART — bu tezlikning butun
+    mohiyati. O'lchangan (1797 qatorli real katalog, 782 ochiq tender):
+
+        (mahsulot, naqsh) juftligi -> 22 100 naqsh -> 81.2 s
+        GLOBAL takrorsiz atama     ->    925 naqsh ->  0.25 s
+
+    Ikkalasi ham AYNAN bir xil 12 ta tender topadi. Farq faqat shundaki,
+    birinchi variantda "Hikvision" naqshi 699 marta takrorlanadi.
+    Katalog o'sganda bu farq kattalashadi.
+
+    QAYSI MAHSULOT mos kelgani BU YERDA aniqlanmaydi — natija kichik
+    (o'nlab qator), shuning uchun atribut Python tomonda arzon.
+    """
+    pats: List[str] = []
+    korilgan = set()
+    for term in terms:
+        for pat in _like_patterns(translit.variants(term or "")):
+            if pat in korilgan:
+                continue
+            korilgan.add(pat)
+            pats.append(pat)
+    if not pats:
+        return "", {}
+
+    # TENDER NOMI HAM QARALADI, faqat pozitsiya emas.
+    # Python yo'li `cand.name + goods_blob` ni qarardi; SQL ni faqat
+    # `tender_good.name` bilan yozish MOSLIKNI TORAYTIRARDI — nomida
+    # "kompyuter" bor, pozitsiyasi boshqacha yozilgan tender tushib
+    # qolardi. Ikki yo'l bir xil natija berishi SHART.
+    sql = f"""
+SELECT tender_id, pozitsiya FROM (
+    SELECT g.tender_id, g.name AS pozitsiya
+    FROM tender_good g
+    JOIN tender t ON t.id = g.tender_id
+    WHERE t.status = 'open'
+      AND (t.close_at IS NULL OR t.close_at > now())
+      AND g.name IS NOT NULL
+      AND {translit.sql_fold('g.name')} LIKE ANY(%(pats)s)
+    UNION                       -- UNION o'zi takrorni olib tashlaydi
+    SELECT t.id AS tender_id, t.name AS pozitsiya
+    FROM tender t
+    WHERE t.status = 'open'
+      AND (t.close_at IS NULL OR t.close_at > now())
+      AND t.name IS NOT NULL
+      AND {translit.sql_fold('t.name')} LIKE ANY(%(pats)s)
+) x
+ORDER BY x.tender_id, x.pozitsiya
+LIMIT {int(cap)}
+"""
+    return sql, {"pats": pats}
+
+
+def catalog_terms(products: List[Dict[str, Any]]
+                  ) -> Tuple[List[Tuple[str, str]], int]:
+    """Katalogdan TURLI matn atamalarini ajratadi — YAGONA MANBA.
+
+    Qaytaradi: ([(atama, mahsulot_nomi)], kesilgan_soni). Kesilgan > 0
+    bo'lsa chaqiruvchi buni foydalanuvchiga ko'rsatishi SHART.
+
+    KODI BOR mahsulot TASHLANADI — `matching.product_matches()` bilan
+    bir xil qoida: kod aniq javob beradi, matn shovqin qo'shadi.
+
+    MAHSULOT NOMI HAM OLINADI, lekin OXIRGI navbatda. Tartib chastota
+    bo'yicha: kalit so'z ko'p mahsulotda takrorlanadi ("IP камеры" 220
+    marta), nom esa bitta mahsulotda — ya'ni nom tabiiy ravishda
+    ro'yxat oxirida qoladi va katta katalogda `MAX_TERMS` chegarasiga
+    tushadi.
+
+    Bu ATAYLAB shunday: kichik katalogda nom YAGONA ma'noli atama
+    bo'lishi mumkin (kalit so'z kiritilmagan bo'lsa), katta katalogda
+    esa nom SKU artikuli ("Tapo C110", "GNT-10703-60") va faqat shovqin
+    qo'shadi. Chastota tartibi ikkala holatni ham to'g'ri hal qiladi —
+    alohida shart yozish shart emas.
+
+    Nomni butunlay tashlab yuborish XATO edi va sinov uni tutdi:
+    kalit so'zsiz mahsulot ("kompyuter", keywords=[]) umuman mos
+    kelmay qoldi.
+
+    NEGA YAGONA FUNKSIYA: bu qoida avval IKKI joyda ikki xil edi —
+    `/catalog/match` faqat kalit so'zni olardi, `notify` esa nomni ham
+    qo'shardi va indeksi 1325 atamaga shishib ketgandi (4.6 daqiqa).
+    Ikki manba bo'lsa ular albatta chetga chiqadi.
+    """
+    say: Dict[str, int] = {}
+    egasi: Dict[str, str] = {}
+    for p in products:
+        if p.get("codes"):
+            continue
+        nom = p.get("name") or ""
+        # Kalit so'zlar OLDIN — teng chastotada ular ustun bo'lsin.
+        for t in list(p.get("keywords") or []) + [nom]:
+            t = (t or "").strip()
+            if 3 <= len(t) <= MAX_TERM_LEN:
+                say[t] = say.get(t, 0) + 1
+                egasi.setdefault(t, nom)
+    # Ko'p uchraydigan atama = katalogning asosiy yo'nalishi, shuning
+    # uchun chegaraga tushsa birinchi u qoladi. Uzunroq atama aniqroq,
+    # shuning uchun teng chastotada u oldinda.
+    tartib = sorted(say, key=lambda t: (-say[t], -len(t), t))
+    kesilgan = max(0, len(tartib) - MAX_TERMS)
+    return [(t, egasi[t]) for t in tartib[:MAX_TERMS]], kesilgan
+
 
 CATALOG_INSERT_SQL = f"""
 INSERT INTO catalog_product (company_id, name, category_code, keywords, unit,

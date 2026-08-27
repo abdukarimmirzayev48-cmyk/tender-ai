@@ -381,7 +381,8 @@ export const api = {
   updateProduct: (id: number, body: unknown) => request<Product>('PUT', `/catalog/${id}`, { body }),
   deleteProduct: (id: number) => request<null>('DELETE', `/catalog/${id}`),
   catalogMatch: (body: unknown) => request<Paged<TenderRow>>('POST', '/catalog/match', { body }),
-  catalogNewCount: () => request<{ new: number; total: number }>('GET', '/catalog/new-count'),
+  catalogNewCount: () => request<{ new: number; total: number; deferred?: boolean }>(
+    'GET', '/catalog/new-count'),
   catalogSeen: () => request<null>('POST', '/catalog/seen'),
 
 }

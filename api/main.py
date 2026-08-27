@@ -600,6 +600,13 @@ _BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 # `truncated: true` qaytadi.
 MATCH_CAP = 3000
 
+# Katalog ro'yxatida moslik sonini mahsulot x tender kesimida hisoblash
+# kvadratik ish. Sinovdagi 27 mahsulotda bilinmagan, 1 797 pozitsiyali real
+# katalogda esa GET /catalog bir necha daqiqaga qotib qoladi. Kichik katalogda
+# avvalgi qulaylik saqlanadi; katta katalogda ro'yxat darhol qaytadi, moslik
+# esa maxsus /catalog/match oqimida hisoblanadi.
+CATALOG_INLINE_MATCH_LIMIT = 100
+
 # Hujjat qaysi bo'limdan kelgani — o'qiladigan nom
 _FIELD_LABELS = {
     "anno_file": "Tender asos-hujjatlari",
@@ -2553,7 +2560,12 @@ def _catalog_candidates(region=None, currency=None, products=None):
 
 @app.get("/catalog")
 def list_catalog(request: Request):
-    """Katalog mahsulotlari + har birida mos ochiq tenderlar soni."""
+    """Katalog mahsulotlari.
+
+    Kichik katalogda har bir mahsulot uchun mos tenderlar soni ham qaytadi.
+    Katta katalogda bu qimmat hisob ro'yxat yuklanishini to'smaydi:
+    `match_count=null`, `match_count_deferred=true` qaytariladi.
+    """
     prods = db.query(queries.CATALOG_LIST_SQL,
                      {"company_id": company_id_of(request)})
     if not prods:
@@ -2562,13 +2574,16 @@ def list_catalog(request: Request):
     # hisoblangan qoldiq bilan almashtiriladi; ERP o'rnatilmagan bo'lsa
     # Excel importidan qolgan surat qoladi. `api/erp_stock.py`.
     stock_source = erp_stock.apply_to_products(prods)
-    cand = _catalog_candidates()
+    deferred = len(prods) > CATALOG_INLINE_MATCH_LIMIT
+    cand = [] if deferred else _catalog_candidates()
     out = []
     for p in prods:
-        cnt = sum(1 for c in cand if _product_matches(c, p))
+        cnt = None if deferred else sum(
+            1 for c in cand if _product_matches(c, p))
         # Raqam qayerdan kelgani har qatorда ko'rinadi: interfeys "ombor
         # jurnalidan" yoki "importdan" deb ochiq aytadi.
         out.append({**_shape_product(p), "match_count": cnt,
+                    "match_count_deferred": deferred,
                     "stock_source": stock_source})
     return out
 
@@ -2607,25 +2622,74 @@ def delete_product(product_id: int, request: Request):
 def catalog_match(body: CatalogMatchIn, request: Request):
     """Katalogga mos ochiq tenderlar. Kategoriya = asosiy relevantlik,
     nom = qo'shimcha. Har tenderда qaysi mahsulot(lar) mos kelgani ko'rsatiladi."""
-    prods = db.query(queries.CATALOG_LIST_SQL,
-                     {"company_id": company_id_of(request)})
-    cand = _catalog_candidates(region=body.region, currency=body.currency,
-                               products=body.products + body.services)
+    cid = company_id_of(request)
+    prods = db.query(queries.CATALOG_LIST_SQL, {"company_id": cid})
+
+    # ------------------------------------------------------------------
+    # SOLISHTIRISH SQL DA BAJARILADI, Python siklida EMAS.
+    #
+    # O'LCHANGAN SABAB (1797 qatorli real katalog, 782 ochiq tender):
+    #     Python sikli  1797 x 782 = 1.4 mln chaqiruv  ->  ~29 DAQIQA
+    # Brauzer ancha oldin uziladi va foydalanuvchi BO'SH RO'YXAT ko'radi.
+    # U buni "mos tender yo'q" deb o'qiydi, aslida so'rov TUGAMAGAN —
+    # ya'ni salbiy shartdan olingan xulosa. Aynan shu holat kuzatildi.
+    # ------------------------------------------------------------------
+
+    # --- 1. KOD yo'li (tasdiqlangan tasniflagich) ---
+    kod_rows = kodlash.moslik(cid, only_open=True, limit=1000)
+    poz = kodlash.pozitsiya_moslik(cid, [r["tender_id"] for r in kod_rows])
+    kod_ids = {r["tender_id"] for r in kod_rows}
+
+    # --- 2. MATN yo'li — FAQAT kodsiz mahsulotlar uchun ---
+    # `catalog_terms` kodi BOR mahsulotni o'zi tashlaydi — yagona qoida.
+    juft, kesilgan = queries.catalog_terms(prods)
+    terms = [t for t, _nom in juft]
+    matn_poz: Dict[int, List[str]] = {}
+    tsql, tpar = queries.build_catalog_text_match(terms)
+    if tsql:
+        for r in db.query(tsql, tpar):
+            matn_poz.setdefault(r["tender_id"], []).append(r["pozitsiya"])
+
+    ids = sorted(kod_ids | set(matn_poz))
+    if not ids:
+        # BO'SH NATIJANING SABABI AYTILADI. "Moslik yo'q" va "katalog
+        # kodlanmagan" butunlay boshqa holatlar va keyingi qadam ham
+        # boshqa.
+        return {"total": 0, "limit": body.limit, "offset": body.offset,
+                "items": [], "holat": kodlash.holat(cid),
+                "atama_kesildi": kesilgan}
+
+    # Filtrlar (hudud/valyuta/mahsulot) SHU YERDA qo'llanadi — nomzodlar
+    # allaqachon id bo'yicha qisqargan, ya'ni so'rov arzon.
+    where, params = queries.build_tender_filters(
+        status="open", region=body.region, currency=body.currency,
+        products=body.products + body.services)
+    where = (where + " AND t.id = ANY(%(ids)s)") if where else "WHERE t.id = ANY(%(ids)s)"
+    params["ids"] = ids
+    cand = db.query(queries.match_candidates_sql(where, cap=MATCH_CAP), params)
+
+    # Matn mosligini MAHSULOTGA biriktirish.
+    #
+    # ATAMA BO'YICHA, MAHSULOT BO'YICHA EMAS. Mahsulot bo'ylab yurish
+    # ikki xato berardi:
+    #   TEZLIK — 1797 mahsulot x 3 kalit so'z har pozitsiya uchun;
+    #   TO'G'RILIK — birinchi MOS KELGAN mahsulot qaytardi, va u
+    #       ko'pincha noto'g'ri edi: "Кабель силовой" pozitsiyasiga
+    #       "GNT-10703-60" biriktirilgandi.
+    # Endi AYNAN mos kelgan ATAMA topiladi va mahsulot o'shandan olinadi.
+    atama_mahsulot: Dict[str, str] = dict(juft)
+    # Uzun atama aniqroq: "IP камеры" "камер" dan ustun bo'lsin.
+    atamalar = sorted(atama_mahsulot, key=len, reverse=True)
+
+    def _matn_mahsulot(poz_nomi: str) -> Optional[str]:
+        blob = matching._norm(poz_nomi or "")
+        for t in atamalar:
+            if matching._hits(t, blob):
+                return atama_mahsulot[t]
+        return None
 
     matched = []
-    xom = []
     for c in cand:
-        hits = [(p, _product_matches(c, p)) for p in prods]
-        hits = [(p, how) for p, how in hits if how]
-        if hits:
-            xom.append((c, hits))
-
-    # MOS POZITSIYALARNI BIR SO'ROVDA olamiz — dalil shu.
-    poz = kodlash.pozitsiya_moslik(
-        company_id_of(request),
-        [c["id"] for c, h in xom if any(how == "kod" for _, how in h)])
-
-    for c, hits in xom:
         # BALL DALILGA QARAB. Ilgari `category` mosligi 100 berardi va
         # bu eng katta soxta-moslik manbai edi (o'lchangan: 206 dan 131
         # tasi shu yo'ldan; "Andijon GES transformatori" -> "Kondensator"
@@ -2636,23 +2700,35 @@ def catalog_match(body: CatalogMatchIn, request: Request):
         # ham uchraydi va buni matn darajasida ajratib bo'lmaydi
         # (o'lchandi: qo'shimcha uzunligi to'g'ri va xato holatlarni
         # ajratmaydi).
-        kod_bor = any(how == "kod" for _, how in hits)
+        kod_bor = c["id"] in kod_ids
         p_list = poz.get(c["id"], []) if kod_bor else []
+        if kod_bor:
+            positions = [{"pozitsiya": x["pozitsiya"], "mahsulot": x["mahsulot"],
+                          "aniq": x["aniq"], "kod": x["good_code"]}
+                         for x in p_list[:6]]
+            n_poz = len(p_list)
+        else:
+            nomlar = matn_poz.get(c["id"], [])
+            positions = [{"pozitsiya": nm, "mahsulot": _matn_mahsulot(nm),
+                          "aniq": False, "kod": None} for nm in nomlar[:6]]
+            n_poz = len(nomlar)
+
         item = _shape_tender(c)
         item["catalog"] = {
+            # kod — rasmiy tasniflagich, inson tasdiqlagan   -> 100
+            # nom — matn mosligi, morfologik jihatdan mo'rt  ->  60
+            # Nom uchun 100 BERILMAYDI: "monitor" so'zi "monitoringi"
+            # ichida ham uchraydi va buni matn darajasida ajratib
+            # bo'lmaydi (o'lchandi: qo'shimcha uzunligi to'g'ri va xato
+            # holatlarni ajratmaydi).
             "score": 100 if kod_bor else 60,
             "by": "kod" if kod_bor else "nom",
             # DALIL — tenderning QAYSI pozitsiyasi mos kelgani.
             # Mahsulot nomi emas: bir kodni bir necha mahsulot baham
             # ko'rishi mumkin va u holda mahsulot nomi taxmin bo'ladi.
-            "positions": [{"pozitsiya": x["pozitsiya"], "mahsulot": x["mahsulot"],
-                           "aniq": x["aniq"], "kod": x["good_code"]}
-                          for x in p_list[:6]],
-            "position_count": len(p_list),
-            # Eski maydon — mos mahsulotlar ro'yxati (moslik yo'nalishi
-            # bo'yicha), interfeysning eski qismi shunga tayanadi.
-            "products": ([x["mahsulot"] for x in p_list][:5] if kod_bor
-                         else [p["name"] for p, _ in hits][:5]),
+            "positions": positions,
+            "position_count": n_poz,
+            "products": [x["mahsulot"] for x in positions if x["mahsulot"]][:5],
         }
         matched.append(item)
 
@@ -2660,7 +2736,11 @@ def catalog_match(body: CatalogMatchIn, request: Request):
     matched.sort(key=lambda it: (-it["catalog"]["score"], it["close_at"] or "9999"))
     total = len(matched)
     page = matched[body.offset: body.offset + body.limit]
-    return {"total": total, "limit": body.limit, "offset": body.offset, "items": page}
+    return {"total": total, "limit": body.limit, "offset": body.offset,
+            "items": page, "holat": kodlash.holat(cid),
+            # Atama chegarasi ishga tushgan bo'lsa JIMGINA kesmaymiz —
+            # foydalanuvchi qamrov to'liq emasligini bilishi kerak.
+            "atama_kesildi": kesilgan}
 
 
 @app.get("/catalog/new-count")
@@ -2671,6 +2751,11 @@ def catalog_new_count(request: Request):
     prods = db.query(queries.CATALOG_LIST_SQL, {"company_id": company_id})
     if not prods:
         return {"new": 0, "total": 0}
+    if len(prods) > CATALOG_INLINE_MATCH_LIMIT:
+        # Birinchi sahifa ochilishida 1 797 x 528 matn solishtirishni ishga
+        # tushirmaymiz. Bu badge yordamchi signal; katalogning o'zi undan
+        # ustun va darhol ko'rinishi kerak.
+        return {"new": 0, "total": 0, "deferred": True}
     last_seen = db.scalar(queries.CATALOG_STATE_GET_SQL,
                           {"company_id": company_id})
     cand = _catalog_candidates()

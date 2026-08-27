@@ -430,6 +430,8 @@ export const en: Dict = {
 
   // ── Catalogue ─────────────────────────────────────────────────────────
   'cat.lead': 'What do you sell? “Matches” finds tenders based on what you enter here.',
+  'cat.count': 'Catalog: {n} items',
+  'cat.matchesDeferred': 'For a large catalog, match counts are not calculated while opening the list.',
   'cat.import': 'Import',
   'cat.addProduct': 'Add product',
   'cat.empty': 'Catalogue is empty',

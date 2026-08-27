@@ -62,7 +62,22 @@ def _hits(term: Optional[str], blob: str) -> bool:
     signal bo'lib qoldi: birlamchi yo'l — `good_code` (tilga bog'liq
     emas, qamrovi 100%). `product_matches()` ga qarang.
     """
-    for v in translit.variants(term or ""):
+    return hits_variants(translit.variants(term or ""), blob)
+
+
+def hits_variants(variants: List[str], blob: str) -> bool:
+    """`_hits` ning OLDINDAN hisoblangan variantlar bilan ishlaydigan shakli.
+
+    NEGA AJRATILDI: `translit.variants()` qimmat, va u HAR nomzod uchun
+    QAYTA hisoblanardi. Katalog 1797 qatorga o'sgach bu quyidagini
+    berdi (o'lchangan):
+
+        bildirishnoma ballashi: 10 nomzod = 67 s -> 528 nomzod = 59 DAQIQA
+
+    Ya'ni soatlik ETL ning bildirishnoma qadami hech qachon tugamasdi.
+    Variantlarni bir marta hisoblab, keyin faqat qidirish kerak.
+    """
+    for v in variants:
         if v and re.search(r"\b" + re.escape(v), blob):
             return True
     return False

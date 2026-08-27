@@ -324,7 +324,9 @@ export interface Product {
   currency: Nullable<string>
   stock_qty: Nullable<number>
   stock_unit: Nullable<string>
-  match_count: number
+  /** Katta katalogda ro'yxatni tez ochish uchun null — hisob keyinga qoldirilgan. */
+  match_count: Nullable<number>
+  match_count_deferred?: boolean
   notify: boolean
 }
 
