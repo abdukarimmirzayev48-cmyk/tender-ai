@@ -168,6 +168,18 @@ for _a, _b in _TENG:
 # manbai bo'lgan ("Bemor monitori" -> "Axborot xavfsizligi
 # monitoringi"). Qo'shimchalar ro'yxatiga `ing` qo'shilsa SHU SINOV
 # yiqiladi — bu ataylab.
+#
+# BU RO'YXAT TO'LIQ EMAS va to'liq bo'lishi ham mumkin emas.
+# `atama._QOSHIMCHALAR` dan `ing` ni chiqarish — QO'LDA tanlangan
+# istisno, ya'ni `TERM_GROUPS` bilan bir sinf: boshqa soha kelganda
+# yangi soxta juftlik chiqadi ("прокат"/"прокатка",
+# "montaj"/"montajchi" kabi).
+#
+# STANDART: yangi soxta juftlik topilganda —
+#   1. uni SHU ro'yxatga qo'shing (sinov darhol yiqiladi);
+#   2. `atama._QOSHIMCHALAR` ni shunga qarab tuzating;
+#   3. sinov yashillansin.
+# Ro'yxat o'sishi KUTILADI, bu nuqson emas.
 _FARQ = [
     ("monitor", "monitoring"),
     ("kamera", "kabel"),
