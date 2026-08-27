@@ -256,6 +256,45 @@ ham izoh KODNI aks ettirmaydi.
 
 Oddiy izoh — uchinchi variant emas.
 
+### 12a. O'LCHOV KECHIKTIRILSA, QARZ FOIZ BILAN O'SADI
+
+12-sinfning vaqt bo'yicha ko'rinishi. Alohida yozilgan, chunki uni
+bitta izohda emas, **oylar davomida** ko'rish mumkin.
+
+> Pilot 2026-07 da kelishilgan. `review_pilot` 30 qator qo'shilgan,
+> `requirement_review_open` 3 seans ochilgan — va **bittasi ham
+> tugatilmagan**. O'shandan beri ustiga qurilgan qatlamlar: talab
+> ajratish, kodlash, malaka tekshiruvi, yo'naltirish navbati.
+> Har biri sinovlari bilan, har biri ishlaydi, va **hech biri inson
+> qaroriga tegmagan**: `reviewed_by = 0`, `inson_qaror = 0`,
+> `v_requirement_labeled = 0`.
+
+**QOIDA:** o'lchov kechiktirilganda uning ustiga qurilgan qatlamlar
+soni o'sadi, va **har qatlam o'lchovni qimmatroq qiladi**. Chunki
+endi o'lchov faqat "model haqmi" ni emas, "qaysi qatlam aybdor" ni
+ham ajratishi kerak.
+
+Nega bu sodir bo'ladi — sabab ma'naviy emas, amaliy: **qurish
+natijasi darhol ko'rinadi, o'lchash esa noqulay haqiqat chiqarishi
+mumkin.** Shuning uchun "keyingi navbatda o'lchaymiz" har safar
+oqilona tuyuladi.
+
+**Savol:** oxirgi INSON qarori qachon yozilgan? O'shandan beri
+nechta qatlam qo'shildi?
+
+**Tekshiruv:** inson halqasining hisoblagichini quvurga qo'ying
+(`reviewed_by IS NOT NULL` soni) va u NOL bo'lsa yangi qatlam
+qo'shishdan oldin shu raqamni ko'rsating. Nol qolgan hisoblagich —
+"qurishni to'xtat" signali, "keyinroq" emas.
+
+**QARAMA-QARSHI QOIDA:** bitta o'lchov ikkita boshqa narsani
+isbotlay olmaydi. Yorliqlash naqsh ajratgichining ANIQLIGINI
+o'lchaydi ("0.75 haqiqatan 75% ga to'g'ri keladimi"). U
+`ISHONCH_CHEGARA` ni isbotlamaydi — chunki `confidence` uchta
+qiymat oladi (`0.40 / 0.75 / 1.00`) va 0.85 chegarasi aslida
+`WHERE manba_turi = 'reyestr'` ning raqam kiyimidagi shakli.
+Isbotlanadigan chegara YO'Q. Maqsadni almashtirmang.
+
 ---
 
 ## Skaner yozish standarti
