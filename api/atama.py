@@ -214,3 +214,77 @@ def xarid_naqshi() -> "re.Pattern[str]":
     """
     hamma = sorted({p for gr in GURUH_PREFIKS.values() for p in gr})
     return re.compile("(" + "|".join(hamma) + ")", re.I)
+
+
+# =====================================================================
+# 3. KANONIK SHAKL — bir tushuncha, BITTA kalit
+# =====================================================================
+#
+# NEGA KERAK: `catalog_code_rule` kaliti XOM MATN bo'lsa, qoida
+# jadvali uch-alifbo muammosini MA'LUMOT darajasida takrorlaydi:
+#
+#     "Коммутаторы"   -> 26.30     qoida #1
+#     "Kommutatorlar" -> 26.30     qoida #2   <- bir xil narsa
+#     "kommutator"    -> ?          qoida #3
+#
+# Bu loyihada o'sha sinf allaqachon TO'RT marta chiqdi (modul
+# boshidagi ro'yxat + `TERM_GROUPS`). Kalit normallashtirilgan
+# bo'lsa, o'zbek-lotin katalog kelganda qoidalar ALLAQACHON mos
+# keladi va muammo qaytmaydi.
+#
+# `variantlar()` DAN FARQI: u qidirish uchun BARCHA shakllarni
+# beradi (ko'plik), `normal()` esa taqqoslash uchun BITTA vakil
+# qiymat qaytaradi.
+# ---------------------------------------------------------------------
+
+#: Olib tashlanadigan qo'shimchalar — LOTIN ko'chirmasida.
+#: O'zbekcha ko'plik/kelishik va ruscha ko'plik/kelishik oxirlari.
+#:
+#: `ing` ATAYLAB YO'Q: "monitor" va "monitoring" BOSHQA tushuncha va
+#: aynan shu juftlik soxta moslik manbai bo'lgan
+#: ("Bemor monitori" -> "Axborot xavfsizligi monitoringi").
+_QOSHIMCHALAR = (
+    # o'zbekcha
+    "laridan", "larida", "lariga", "larini", "lardagi", "lardan",
+    "larga", "lari", "lar", "ning", "niki", "dagi", "dan", "ga", "ni",
+    # ruscha (lotin ko'chirmasida)
+    "ami", "yah", "ov", "om", "ax", "y", "i", "a", "e", "u",
+)
+
+#: O'zak shundan qisqa bo'lib qolmasin. 4 dan past bo'lsa "dori" ->
+#: "dor" bo'lib, bog'liq bo'lmagan so'zlar birlashib ketardi.
+_MIN_OZAK = 4
+
+_NOHARF = re.compile(r"[^0-9a-z\s]+")
+
+
+def normal(matn: str) -> str:
+    """Atamaning KANONIK shakli — qoida kaliti sifatida ishlatiladi.
+
+    Uch qadam:
+      1. LOTIN ko'chirmasi (`translit.to_lat`) — alifbo birlashadi;
+      2. harf va raqamdan boshqasi olib tashlanadi;
+      3. qo'shimchalar TAKRORIY qisqartiriladi.
+
+    3-qadam takroriy bo'lishi SHART: "kameralar" -> "kamera" -> "kamer",
+    "камеры" -> "kamery" -> "kamer". Bir marta qisqartirilsa ular
+    "kamera" va "kamer" bo'lib, teng chiqmasdi.
+
+    O'lchangan (`_tests/atama_test.py`):
+        TENG chiqishi kerak  9/9   (Коммутаторы = Kommutatorlar = kommutator)
+        FARQ chiqishi kerak  8/8   (monitor != monitoring, stol != stolb)
+    """
+    s = _NOHARF.sub(" ", translit.to_lat((matn or "").lower()))
+    out: List[str] = []
+    for w in s.split():
+        ozgardi = True
+        while ozgardi:
+            ozgardi = False
+            for q in sorted(_QOSHIMCHALAR, key=len, reverse=True):
+                if w.endswith(q) and len(w) - len(q) >= _MIN_OZAK:
+                    w = w[:-len(q)]
+                    ozgardi = True
+                    break
+        if w:
+            out.append(w)
+    return " ".join(out)

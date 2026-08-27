@@ -138,6 +138,64 @@ for yol, nom in [("api/ai_chat.py", "ai_chat"),
           "atama modulidan o'qilsin")
 
 
+# =====================================================================
+# KANONIK SHAKL — `atama.normal()`
+#
+# NEGA QULFLANADI: bu `catalog_code_rule` ning KALITI. Buzilsa qoida
+# jadvali uch-alifbo muammosini MA'LUMOT darajasida takrorlaydi —
+# "Коммутаторы" va "Kommutatorlar" ikki alohida qoida bo'lib qolardi
+# va o'zbek-lotin katalog kelganda hammasi qaytadan qo'lda kiritilardi.
+# =====================================================================
+print("\n[normal] kanonik shakl")
+
+_TENG = [
+    ("Коммутаторы", "Kommutatorlar"),      # ru ko'plik <-> uz ko'plik
+    ("Коммутаторы", "kommutator"),         # ko'plik <-> birlik
+    ("КОММУТАТОР", "kommutator"),          # registr
+    ("IP камеры", "IP kameralar"),         # ko'p so'zli
+    ("камера", "kamera"),                  # alifbo
+    ("Мониторы", "monitorlar"),
+    ("Мониторы", "монитор"),
+    ("Датчики", "datchik"),
+    ("Терминалы", "terminallar"),
+]
+for _a, _b in _TENG:
+    check("normal: %r == %r" % (_a, _b),
+          atama.normal(_a) == atama.normal(_b),
+          "%r != %r" % (atama.normal(_a), atama.normal(_b)))
+
+# `monitor`/`monitoring` juftligi ENG MUHIMI: aynan u soxta moslik
+# manbai bo'lgan ("Bemor monitori" -> "Axborot xavfsizligi
+# monitoringi"). Qo'shimchalar ro'yxatiga `ing` qo'shilsa SHU SINOV
+# yiqiladi — bu ataylab.
+_FARQ = [
+    ("monitor", "monitoring"),
+    ("kamera", "kabel"),
+    ("stol", "stolb"),                     # "stol" c "столб" (ustun)
+    ("коммутатор", "компьютер"),
+    ("камера", "камин"),
+    ("nasos", "naushnik"),
+    ("dori", "doska"),
+    ("server", "servis"),
+]
+for _a, _b in _FARQ:
+    check("normal: %r != %r" % (_a, _b),
+          atama.normal(_a) != atama.normal(_b),
+          "ikkalasi ham %r" % (atama.normal(_a),))
+
+check("normal: qisqa so'z butun qoladi", atama.normal("dori") == "dori",
+      atama.normal("dori"))
+check("normal: bo'sh kirish -> bo'sh", atama.normal("") == "")
+check("normal: None -> bo'sh", atama.normal(None) == "")
+
+# Kanonik shaklni QAYTA normallash o'zgartirmasin — aks holda kalit
+# qayerda hisoblanganiga qarab farq qilardi.
+for _s in ["Коммутаторы", "IP камеры", "monitoring", "dori vositalari"]:
+    check("normal idempotent: %r" % (_s,),
+          atama.normal(atama.normal(_s)) == atama.normal(_s),
+          "%r -> %r" % (atama.normal(_s), atama.normal(atama.normal(_s))))
+
+
 print("\n" + "=" * 58)
 print(f"NATIJA: {PASS}/{PASS + FAIL} o'tdi")
 sys.exit(1 if FAIL else 0)

@@ -54,6 +54,7 @@ Manba ma'lumoti ham mukammal emas: 21.31 (farmatsevtika) kodi ostida
 "Стол психолога" uchraydi — xaridor pozitsiyani noto'g'ri kodlagan.
 Inson tasdig'i aynan shuni ushlaydi.
 """
+import re
 from typing import Any, Dict, List, Optional, Sequence
 
 from api import categories as C
@@ -538,6 +539,242 @@ def pozitsiya_moslik(company_id: int,
                       if eng["totalcost_item"] is not None else None),
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# DALIL — "bu kod ostida HAQIQATAN nima bor?"
+#
+# BU MODULNING ENG MUHIM QISMI, taklif algoritmi emas.
+#
+# Kod nomi begona tilda bo'lishi mumkin, lekin POZITSIYALAR tanish.
+# Qo'lda ko'rib chiqqanda qaror aynan shundan chiqdi:
+#
+#     26.40  Камера видеонаблюдения   9 ochiq
+#            poz: Камера видеонаблюдения, Микрофон, Аудио спикерфон   -> HA
+#     26.51  Кульман                 26 ochiq
+#            poz: Дефектоскоп, Термопара, Анализатор воздуха          -> YO'Q
+#
+# 26.51 uch barobar ko'p tender va'da qiladi va shunga qaramay 3
+# soniyada rad etiladi — chunki pozitsiyalar ko'rinib turibdi.
+#
+# Bu til muammosini AYLANIB O'TADI: tarjima qilmaydi, brokerga o'z
+# sohasidagi tovar nomlarini ko'rsatadi.
+# ---------------------------------------------------------------------------
+SQL_DALIL = """
+SELECT substring(g.good_code from 1 for %(uzunlik)s) AS kod,
+       g.name AS pozitsiya,
+       count(*)                                        AS n_pozitsiya,
+       count(DISTINCT t.id) FILTER (
+           WHERE t.status = 'open'
+             AND (t.close_at IS NULL OR t.close_at > now()))  AS n_ochiq
+FROM tender_good g
+JOIN tender t ON t.id = g.tender_id
+WHERE g.good_code IS NOT NULL
+  AND g.name IS NOT NULL
+  AND substring(g.good_code from 1 for %(uzunlik)s) = ANY(%(kodlar)s)
+GROUP BY 1, 2
+ORDER BY 1, 4 DESC, 3 DESC
+"""
+
+
+def dalil(kodlar: Sequence[str], limit: int = 6) -> Dict[str, Dict[str, Any]]:
+    """Kod -> o'sha kod ostidagi HAQIQIY pozitsiyalar va ochiq tender soni.
+
+    `kodlar` bir xil uzunlikda bo'lishi kutiladi (5 yoki 8) — aralash
+    kelsa har uzunlik uchun alohida so'rov ketadi.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for uzunlik in sorted({len(k) for k in kodlar if k}):
+        qism = [k for k in kodlar if len(k) == uzunlik]
+        for r in db.query(SQL_DALIL, {"kodlar": qism, "uzunlik": uzunlik}):
+            d = out.setdefault(r["kod"], {"pozitsiyalar": [], "n_ochiq": 0,
+                                          "n_pozitsiya": 0})
+            d["n_pozitsiya"] += r["n_pozitsiya"]
+            d["n_ochiq"] = max(d["n_ochiq"], r["n_ochiq"] or 0)
+            if len(d["pozitsiyalar"]) < limit:
+                d["pozitsiyalar"].append({"nom": r["pozitsiya"],
+                                          "n_ochiq": r["n_ochiq"] or 0})
+    for k in kodlar:
+        out.setdefault(k, {"pozitsiyalar": [], "n_ochiq": 0, "n_pozitsiya": 0})
+    return out
+
+
+#: Navbatda bir marta ko'rsatiladigan atamalar soni. Chegara bor,
+#: chunki har atama uchun taklif hisoblanadi (embedding + SQL).
+NAVBAT_LIMIT = 40
+
+#: Korpusda talabni o'lchash uchun eng qisqa o'zak. Undan qisqasi
+#: deyarli hamma narsaga mos keladi.
+_TALAB_MIN = 5
+
+#: Tur nomining eng katta uzunligi. Undan uzunlari SPETSIFIKATSIYA
+#: ("Диаметр 66 мм; рабочее давление", "ODF kross Пластик 4 port") —
+#: ular mahsulot TURI emas, tavsifi, va navbatni to'ldirib haqiqiy
+#: turlarni pastga suradi. `queries.MAX_TERM_LEN` bilan bir xil sabab.
+_TUR_MAX_LEN = 30
+
+
+def _talab(atama_matni: str) -> Dict[str, int]:
+    """Atama korpusda UMUMAN uchraydimi — qaror qiymatini oldindan o'lchash.
+
+    Qaytadi: {"jami": pozitsiya soni, "ochiq": ochiq tender soni}
+
+    NEGA KERAK: kod berish qarori faqat TALAB bo'lganda ma'noli.
+    O'lchandi — "HDMI кабели" 42 mahsulot, korpusda 0 pozitsiya;
+    "Домофоны" 61 mahsulot, korpusda 0. Ularga kod berish soxta
+    moslikdan boshqa narsa qo'shmaydi.
+
+    ANIQLIK CHEGARASI — bu O'LCHOV EMAS, YUQORI CHEGARA.
+    O'zak qisqartirilgani uchun begona so'zlar ham sanaladi:
+
+        "Контроль доступа"      -> o'zak "контр"      -> "Контргайка стальная"
+        "Проектное оборудование" -> o'zak "оборудован" -> har qanday uskuna
+
+    Ya'ni MUSBAT raqamga qat'iy ishonib bo'lmaydi. NOL esa ishonchli:
+    bo'sh o'zak ham hech narsa topmagan bo'lsa, korpusda haqiqatan
+    yo'q. Shuning uchun bu qiymat FAQAT ikki ishda ishlatiladi:
+      1. nol/nolmas ajratish (ishonchli);
+      2. taxminiy tartiblash (ishonchsiz, lekin tasodifiydan yaxshi).
+    Undan "shu atama N ta tender ochadi" degan XULOSA chiqarilmaydi.
+    """
+    sozlar = [w for w in re.split(r"[\s,\-/]+", atama_matni or "")
+              if len(w) >= _TALAB_MIN]
+    if not sozlar:
+        return {"jami": 0, "ochiq": 0}
+    # Eng uzun so'z eng aniq — u bo'yicha o'lchaymiz.
+    w = translit.norm_text(sorted(sozlar, key=len, reverse=True)[0])
+    # O'ZAK bo'yicha: ko'plik/kelishik farqi o'lchovni nolga tushirmasin.
+    ozak = w[:max(_TALAB_MIN, len(w) - 2)]
+    r = db.query_one(
+        "SELECT count(*) AS jami, "
+        "       count(DISTINCT t.id) FILTER ("
+        "           WHERE t.status='open' "
+        "             AND (t.close_at IS NULL OR t.close_at > now())) AS ochiq "
+        "FROM tender_good g JOIN tender t ON t.id = g.tender_id "
+        f"WHERE {translit.sql_fold('g.name')} LIKE %(p)s",
+        {"p": f"%{ozak}%"}) or {}
+    return {"jami": r.get("jami") or 0, "ochiq": r.get("ochiq") or 0}
+
+
+def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
+           level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
+    """KO'RIB CHIQISH NAVBATI — kodsiz atamalar, taklif va DALIL bilan.
+
+    Qaytadi: {"atamalar": [...], "qolgan": N}
+
+    Har element:
+        kalit       `atama.normal()` — qoida kaliti (shu bilan saqlanadi)
+        atama       ko'rsatish uchun ASL matn
+        n_mahsulot  shu kalitga tegishli mahsulot soni
+        takliflar   [{code, name_ru, n_ochiq, pozitsiyalar}]
+
+    ATAMALAR `atama.normal()` BO'YICHA GURUHLANADI. Xom matn bo'lsa
+    "Коммутаторы" va "Kommutatorlar" ikki alohida qator bo'lib
+    chiqardi va bir ishni ikki marta qildirardi.
+
+    KO'P MAHSULOTLI ATAMA OLDINDA: bitta qaror qancha ko'p mahsulotni
+    qoplasa, shuncha arzon. O'lchangan (1797 qatorli katalog): eng ko'p
+    11 naqsh 960 mahsulotni qopladi.
+    """
+    from api import atama as _atama
+
+    prods = db.query(
+        "SELECT id, name, keywords FROM catalog_product "
+        "WHERE company_id = %(c)s "
+        "  AND NOT EXISTS (SELECT 1 FROM v_catalog_code_active v "
+        "                   WHERE v.product_id = catalog_product.id "
+        "                     AND v.company_id = catalog_product.company_id)",
+        {"c": company_id})
+
+    # kalit -> {asl matn, mahsulot soni}
+    guruh: Dict[str, Dict[str, Any]] = {}
+    for p in prods:
+        kws = list(p["keywords"] or [])
+        # TUR — ko'rsatkich sifatida ikkinchi kalit so'z (katalog
+        # importlarida odatda mahsulot turi), bo'lmasa birinchisi,
+        # u ham bo'lmasa nomi.
+        xom = ((kws[1] if len(kws) >= 2 else (kws[0] if kws else p["name"]))
+               or "").strip()
+        # SPETSIFIKATSIYA TUR EMAS. "Диаметр 66 мм; рабочее давление",
+        # "ODF kross Пластик 4 port" — bular mahsulot tavsifi va ular
+        # navbatni to'ldirib, haqiqiy turlarni pastga suradi.
+        if len(xom) > _TUR_MAX_LEN or not xom:
+            continue
+        kalit = _atama.normal(xom)
+        if not kalit:
+            continue
+        g = guruh.setdefault(kalit, {"atama": xom, "n_mahsulot": 0})
+        g["n_mahsulot"] += 1
+
+    # --- KORPUSDAGI TALAB o'lchanadi ---
+    #
+    # NAVBAT MAHSULOT SONI BO'YICHA EMAS. O'lchandi: "Турникеты" 39 ta
+    # mahsulot, korpusda esa 3 ta pozitsiya (1 ochiq); "HDMI кабели"
+    # 42 mahsulot, korpusda 0; "Домофоны" 61 mahsulot, korpusda 0.
+    #
+    # Bunday atamaga kod berish NOTO'G'RI bo'lardi — talab yo'q,
+    # ya'ni har qanday kod faqat soxta moslik qo'shadi. Kodsiz qolishi
+    # TO'G'RI natija.
+    #
+    # Shuning uchun tartib "bitta qaror qancha OCHIQ TENDER ochadi"
+    # bo'yicha. Talabsiz atamalar oxirida turadi va ular uchun taklif
+    # UMUMAN hisoblanmaydi (embedding chaqiruvi tejaladi).
+    for kalit, g in guruh.items():
+        g["korpus"] = _talab(g["atama"])
+
+    # FOYDA = TALAB x QAMROV. Ikkalasi ham kerak:
+    #   faqat talab   -> bitta mahsulotli spetsifikatsiya yuqoriga chiqadi
+    #   faqat qamrov  -> "Турникеты" (39 mahsulot, korpusda 3 pozitsiya)
+    # Bitta qaror qancha mahsulotni qamrab, qancha ochiq tender ochsa,
+    # shuncha qimmatli.
+    for _k, g in guruh.items():
+        g["foyda"] = g["korpus"]["ochiq"] * g["n_mahsulot"]
+
+    tartib = sorted(guruh.items(),
+                    key=lambda kv: (-kv[1]["foyda"],
+                                    -kv[1]["korpus"]["ochiq"],
+                                    -kv[1]["n_mahsulot"]))
+    tanlangan = [(k, g) for k, g in tartib if g["foyda"] > 0][:limit]
+    talabsiz = [(k, g) for k, g in tartib if g["foyda"] == 0]
+
+    # Takliflar va DALIL — FAQAT talabi bor atamalar uchun
+    natija: List[Dict[str, Any]] = []
+    barcha_kod: List[str] = []
+    for _kalit, g in tanlangan:
+        t = takliflar({"name": g["atama"], "keywords": []},
+                      level=level, limit=3)
+        g["_t"] = t
+        barcha_kod.extend(x["code"] for x in t)
+    dalillar = dalil(sorted(set(barcha_kod)))
+
+    for kalit, g in tanlangan:
+        natija.append({
+            "kalit": kalit,
+            "atama": g["atama"],
+            "n_mahsulot": g["n_mahsulot"],
+            # Qaror NIMA ochishi — oldindan ko'rinadi.
+            "korpus_ochiq": g["korpus"]["ochiq"],
+            "korpus_jami": g["korpus"]["jami"],
+            "takliflar": [{
+                "code": x["code"],
+                "name_ru": x["name_ru"],
+                "n_tender_open": x["n_tender_open"],
+                # DALIL — qarorning asosi. Kod nomi begona bo'lishi
+                # mumkin, pozitsiyalar esa tanish.
+                "pozitsiyalar": dalillar.get(x["code"], {}).get("pozitsiyalar", []),
+            } for x in g["_t"]],
+        })
+    return {
+        "atamalar": natija,
+        "qolgan": max(0, len([1 for _k, g in tartib if g["korpus"]["jami"] > 0])
+                      - len(tanlangan)),
+        # TALABSIZ atamalar JIMGINA yo'qolmaydi — ular "hali ko'rilmagan"
+        # emas, "ko'rish SHART EMAS". Interfeys buni ayirishi kerak.
+        "talabsiz": [{"kalit": k, "atama": g["atama"],
+                      "n_mahsulot": g["n_mahsulot"]}
+                     for k, g in talabsiz[:20]],
+        "talabsiz_jami": len(talabsiz),
+    }
 
 
 def kodsiz_mahsulotlar(company_id: int) -> List[Dict[str, Any]]:
