@@ -1,8 +1,17 @@
 # ===== Maxfiy — HECH QACHON push qilinmaydi =====
+# Chiziqchasiz naqsh HAR QANDAY chuqurlikda mos keladi: `.env` ham,
+# `frontend/.env` ham, `api/.env` ham shu bitta qator bilan yopiladi.
 .env
-*/.env
+# ngrok tunnel ta'rifi - ichida tunnel PAROLI (traffic policy basic-auth) bor.
+ngrok.yml
+# Asboblar yasaydigan variantlar: Vite `.env.local` va `.env.production` ni
+# o'zi o'qiydi, ba'zi muharrirlar `.env.bak` qoldiradi. Ular `.env` naqshiga
+# TUSHMAYDI — shuning uchun alohida yoziladi.
+.env.*
+# Namunalar SIR EMAS va push qilinadi. Istisnolar `.env.*` dan KEYIN turishi
+# SHART: git naqshlarni tartib bo'yicha qo'llaydi, oxirgi moslik g'olib.
 !.env.example
-!*/.env.example
+!.env*.example
 
 # ===== Python =====
 .venv/
@@ -27,3 +36,11 @@ etl_cron.log
 .idea/
 .vscode/
 *.swp
+*.dump
+_pgvector/
+
+# ETL operatsion holati — kodga aloqasi yo'q, mashinaga xos
+.etl_embed_otkazish.json
+
+# TypeScript inkremental qurish keshi — mashinaga xos, kodga aloqasi yo'q
+*.tsbuildinfo

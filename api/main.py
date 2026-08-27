@@ -21,23 +21,25 @@ Endpointlar:
 import json
 import os
 import re
+import secrets
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi import (Cookie, Depends, FastAPI, File, Header, HTTPException,
+                     Query, Request, Response, UploadFile)
 from fastapi.responses import (JSONResponse, RedirectResponse,
                                Response as FileResponse, StreamingResponse)
 from pydantic import BaseModel, field_validator
 
 load_dotenv()  # .env ni import paytida yuklaymiz (pool DSN'ni ko'rishi uchun)
 
-from api import (ai, ai_gonogo, ai_match, compliance, db, importer,  # noqa: E402
-                 matching, notify, pricing, queries, stock,
-                 telegram)  # (load_dotenv dan keyin shart)
+from api import (ai, ai_chat, ai_docs, ai_gonogo, ai_match, auth,  # noqa: E402
+                 compliance, db, erp_status, erp_stock, i18n, importer,
+                 kodlash, matching, notify, pricing, queries, stock, telegram)
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +200,21 @@ class NotifySettingsIn(BaseModel):
     # --- Telegram kanali (emaildan MUSTAQIL yoqiladi) ---
     telegram_enabled: Optional[bool] = None
     telegram_chat_id: Optional[str] = None
+    # --- Xabar tili: 'uz' | 'ru' | 'en' ---
+    # Interfeys tili almashtirilganda frontend AYNAN shu maydonni yuboradi
+    # (boshqa maydonlarsiz — `exclude_unset` qolganini tegmasdan qoldiradi).
+    # Xabarni server yuboradi, shuning uchun tanlov bazada turishi shart.
+    lang: Optional[str] = None
+
+    @field_validator("lang")
+    @classmethod
+    def _til_kodi(cls, v):
+        """Noma'lum til XATO BERMAYDI — o'zbekchaga keltiriladi.
+
+        Sabab: til yumshoq afzallik. Buzuq kod tufayli sozlamani umuman
+        saqlab bo'lmay qolish, xabar bir tilda kelishidan ko'ra yomonroq.
+        """
+        return i18n.norm_lang(v) if v is not None else v
 
     @field_validator("min_score")
     @classmethod
@@ -292,8 +309,174 @@ class MatchIn(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_pool()
+    # Embedding modelini FON IPIDA isitamiz: yuklanish ~17 s, keyingi
+    # so'rovlar 19-54 ms. Isitmasak birinchi chat savoli 17 soniya
+    # kutardi. Fon ipida bo'lgani uchun server darhol javob beradi.
+    # `.env` da EMBED_PRELOAD=0 bilan o'chiriladi (~470 MB tejaladi).
+    ai_chat.preload_embedder()
     yield
     db.close_pool()
+
+
+# ---------------------------------------------------------------------------
+# KIMLIK DARVOZASI (auth-2)
+#
+# Endpointlar BITTA joyda yopiladi — har bir funksiyaga `Depends()`
+# qo'shib chiqilmaydi. Sabab:
+#   - bu yerda 60 dan ortiq endpoint bor va ularning imzolari xilma-xil
+#     (`Query(...)`, `File(...)`, `Header(...)`); har biriga qo'lda parametr
+#     qo'shish paytida BIR NECHTASI e'tibordan chetda qolishi aniq —
+#     ERP tomonida aynan shunday bo'lgan edi;
+#   - darvoza YOPIQ HOLATDA boshlanadi: yangi endpoint qo'shilsa u
+#     avtomatik himoyalanadi. Ro'yxatga tushmagan narsa yopiq.
+#
+# OCHIQ qolganlar sanoqli va sababi yozilgan.
+PUBLIC_PATHS = {
+    # Interfeys login OLDIDAN holatni ko'rsatadi (baza tirikmi).
+    "/health",
+    # Kirishning o'zi.
+    "/auth/login",
+    # Swagger — ishlab chiqishda kerak; javob bermaydi, faqat sxema.
+    "/docs", "/openapi.json", "/redoc", "/docs/oauth2-redirect",
+    # BO'SH shablonlar (import uchun namuna fayl). Ularni brauzerdagi
+    # `<a href>` yuklab oladi va u sarlavha yubora olmaydi. Ichida
+    # kompaniya ma'lumoti YO'Q — faqat ustun sarlavhalari.
+    "/catalog/import/template", "/company/documents/template",
+}
+
+# Fayl yuklab olish ATAYLAB ochiq: uni brauzerdagi `<a href>` chaqiradi va
+# u sarlavha (`Authorization`) yubora olmaydi. Fayllar davlat portalida
+# ham ochiq — bu kompaniya siri emas, tender e'lonining ilovasi.
+PUBLIC_PREFIXES = ("/documents/",)
+
+# ERP ning SERVICE kaliti FAQAT shu endpointlarni ochadi. Kalit "hamma
+# eshikning kaliti" bo'lmasligi kerak: ERP tender-ai dan uchta narsani
+# oladi (cheklist qoidasi, hujjat shabloni/parseri, xabar yuborish) va
+# tenderning o'zini o'qiydi. Katalog, qidiruvlar, sozlamalar — unga
+# kerak emas va ochilmaydi ham.
+#
+# Bu yerda YO'LNING SHABLONI yoziladi (`/tenders/{tender_id}`), aniq
+# manzil emas: bog'liqlik marshrutlashdan KEYIN ishlaydi, ya'ni qaysi
+# marshrut tanlangani ma'lum.
+SERVICE_PATHS = {
+    ("GET", "/tenders/{tender_id}"),
+    ("GET", "/tenders/{tender_id}/pricing"),
+    # Ombor moslashuvi: ERP tenderning qaysi pozitsiyasiga qaysi mahsulot
+    # mos kelishini shu yerdan oladi va REZERV TAKLIF qiladi (odam
+    # tasdiqlaydi). Qoidalar bu yerda — cheklist bilan bir xil sabab.
+    ("GET", "/tenders/{tender_id}/stock-check"),
+    ("POST", "/tenders/{tender_id}/compliance"),
+    ("GET", "/company/document-types"),
+    ("POST", "/company/documents/parse"),
+    ("POST", "/notify/send"),
+}
+
+
+# --- COOKIE va CSRF (auth-4) -------------------------------------------------
+# Sessiya tokeni `localStorage` da EMAS, `HttpOnly` cookie'da: XSS bo'lsa
+# ham sahifadagi JavaScript uni o'qiy olmaydi.
+#
+# Buning narxi CSRF (cookie'ni brauzer har so'rovga o'zi qo'shadi). Ikki
+# qatlam: `SameSite=Lax` va `X-CSRF-Token` sarlavhasi — qiymati SESSIYADAGI
+# bilan solishtiriladi.
+#
+# ERP ning SERVICE kaliti bunga ARALASHMAYDI: u cookie emas, alohida
+# sarlavha va uni brauzer avtomatik qo'shmaydi — ya'ni CSRF xavfi yo'q.
+SESSION_COOKIE = "tai_session"
+CSRF_COOKIE = "tai_csrf"
+CSRF_HEADER = "x-csrf-token"
+
+COOKIE_SECURE = os.environ.get("AUTH_COOKIE_SECURE", "1") not in ("0", "false", "")
+
+#: CSRF faqat o'zgartiruvchi metodlar uchun.
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+#: CHIQISH — istisno. Begona sayt bizni "chiqarib yuborishi" zarar
+#: keltirmaydi (eng yomoni qaytadan kirasiz), ammo CSRF tokeni eskirgan
+#: foydalanuvchining CHIQA OLMAY qolishi — keltiradi: u sessiyani
+#: tugatolmay, tokeni muddati tugagunicha tirik qolardi.
+CSRF_EXEMPT = {"/auth/logout"}
+
+
+def _set_auth_cookies(response: Response, token: str, csrf: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, secure=COOKIE_SECURE,
+        samesite="lax", max_age=auth.SESSION_DAYS * 86400, path="/")
+    response.set_cookie(
+        CSRF_COOKIE, csrf, httponly=False, secure=COOKIE_SECURE,
+        samesite="lax", max_age=auth.SESSION_DAYS * 86400, path="/")
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    for name in (SESSION_COOKIE, CSRF_COOKIE):
+        response.delete_cookie(name, path="/", samesite="lax",
+                               secure=COOKIE_SECURE)
+
+
+def _bearer(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip()
+
+
+def gate(request: Request,
+         authorization: Optional[str] = Header(None),
+         x_service_key: Optional[str] = Header(None),
+         tai_session: Optional[str] = Cookie(None)) -> None:
+    """Har bir so'rovdan oldin ishlaydi (`app = FastAPI(dependencies=[...])`).
+
+    IKKI yo'l bilan kirish mumkin:
+      1. KOMPANIYA sessiyasi — brauzerdan (`Authorization: Bearer ...`);
+      2. SERVICE kaliti — ERP dan (`X-Service-Key`), odam nomidan emas.
+
+    Kimligi `request.state` ga yoziladi: endpointga kerak bo'lsa oladi."""
+    path = request.url.path
+    if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
+        return
+    if request.method == "OPTIONS":        # CORS preflight — CORS o'zi javob beradi
+        return
+
+    if auth.verify_service(x_service_key):
+        route = request.scope.get("route")
+        template = getattr(route, "path", path)
+        if (request.method, template) not in SERVICE_PATHS:
+            # Kalit to'g'ri, lekin bu eshik unga ochilmagan. 403 (401 emas):
+            # kimligi ma'lum, huquqi yetmaydi.
+            raise HTTPException(
+                status_code=403,
+                detail="Service kaliti bu endpoint uchun ruxsat bermaydi.")
+        request.state.account = None
+        request.state.service = True
+        return
+
+    # OSHKORA sarlavha USTUN, cookie — zaxira. `Authorization: Bearer`
+    # brauzer uchun emas (skript, sinov); u ATAYLAB qo'yiladi, cookie esa
+    # avtomatik qo'shiladi — ikkalasi uchrashganda oshkora niyat yutadi.
+    bearer = _bearer(authorization)
+    token, from_cookie = (bearer, False) if bearer else (tai_session, True)
+    if not token:
+        raise HTTPException(status_code=401, detail="Kirilmagan.")
+    try:
+        account = auth.verify(token)
+    except auth.AuthError as e:
+        raise HTTPException(status_code=e.code, detail=str(e))
+
+    # CSRF FAQAT cookie uchun: Bearer da token ataylab qo'yiladi, ya'ni
+    # "begona sayt bizning nomimizdan" holati yuzaga kelmaydi.
+    if (from_cookie and request.method in UNSAFE_METHODS
+            and path not in CSRF_EXEMPT):
+        sent = request.headers.get(CSRF_HEADER)
+        if not sent or not secrets.compare_digest(sent, account.get("csrf") or ""):
+            # 403 (401 emas): kim ekani ma'lum, so'rovning manbai shubhali.
+            raise HTTPException(
+                status_code=403,
+                detail="CSRF tokeni mos kelmadi — sahifani yangilang.")
+
+    request.state.account = account
+    request.state.service = False
 
 
 app = FastAPI(
@@ -301,6 +484,7 @@ app = FastAPI(
     version="0.1.0",
     description="O'zbekiston davlat xaridlari agregatori — backend API (3-bosqich).",
     lifespan=lifespan,
+    dependencies=[Depends(gate)],
 )
 
 # CORS — .env dagi CORS_ORIGINS bo'sh bo'lmasa yoqiladi (frontend ulanganда)
@@ -358,7 +542,9 @@ def _shape_tender(r: dict) -> dict:
             "name_uz": r.get("region_name_uz"),
             "path": r.get("area_path"),
         },
-        "company": {"id": r.get("company_id"), "name": r.get("company_name")},
+        # BUYURTMACHI tashkiloti (manba platformadan) — bizning ijarachimiz
+        # emas. Ustun `buyer_org_id` deb nomlangan, javob shakli o'zgarmadi.
+        "company": {"id": r.get("buyer_org_id"), "name": r.get("company_name")},
         "lot_count": r.get("lot_count"),
         "good_count": r.get("good_count"),
         "goods_preview": r.get("goods_preview") or [],
@@ -470,6 +656,241 @@ def _iso(v):
 # ---------------------------------------------------------------------------
 # Endpointlar
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# KIMLIK (auth) — KOMPANIYA hisobi.
+#
+# Tender-AI ga KOMPANIYA kiradi. Hodim hisoblari BU YERDA EMAS: odam —
+# ERP ning tushunchasi va u yerda o'z kimlik moduli bor
+# (`erp.app_user`, ERP `api/auth.py`). Ikkala tomon mustaqil tekshiradi,
+# bir-biriga token uchun murojaat qilmaydi.
+#
+# Auth-1 da teskarisi qilingan edi (hodimlar shu yerda, ERP HTTP orqali
+# tekshirardi); tuzatish sababi `api/auth.py` boshida yozilgan.
+#
+# DIQQAT: tender-ai ning boshqa endpointlari hozircha OCHIQ qoladi
+# (auth-2). Bu ongli chegara: interfeysga login qo'shish alohida ish va u
+# ERP'ni himoyalashni kechiktirmasligi kerak.
+# ---------------------------------------------------------------------------
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class AccountIn(BaseModel):
+    """Kompaniya hisobi. `password` faqat almashtirishda."""
+    company_name: Optional[str] = None
+    password: Optional[str] = None
+    #: JORIY parol — almashtirishda MAJBURIY (auth-6).
+    current_password: Optional[str] = None
+    email: Optional[str] = None
+    active: bool = True
+
+
+
+# --- PROKSI ORQASIDA MANZIL (auth-5 davomi) ---------------------------------
+# `X-Forwarded-For` ga ODATDA ISHONILMAYDI: uni mijozning o'zi yozib
+# yuborishi mumkin, ya'ni parol tanlashdan himoyaning IP cheklovini
+# bir qator matn bilan chetlab o'tish mumkin bo'lardi.
+#
+# Lekin ERP proksi (nginx/IIS) orqasiga qo'yilsa, `request.client` HAR
+# DOIM proksining o'zini ko'rsatadi va hamma so'rov bitta manzildan
+# kelayotgandek bo'ladi — IP kesimi ishlamay qoladi.
+#
+# Yechim — SOZLAMA, kod emas: `TRUST_PROXY=1`. Default O'CHIQ, ya'ni
+# to'g'ridan-to'g'ri ishlayotgan o'rnatma xavfsiz holatda qoladi.
+#
+# NEGA OXIRGI manzil: sarlavha `mijoz, proksi1, proksi2` ko'rinishida
+# bo'ladi va BOSHIDAGI qiymatlarni mijoz o'zi yozib yuborishi mumkin.
+# Oxirgisini esa bizga eng yaqin (ishonchli) proksi qo'yadi — u
+# haqiqatan ko'rgan manzil. Shuning uchun ro'yxatning oxiridan olinadi.
+#
+# DIQQAT: ikki yoki undan ko'p proksi bo'lsa bu joy qayta ko'rib
+# chiqilishi kerak (o'shanda oxirgisi ichki proksi manzili bo'ladi).
+TRUST_PROXY = (os.environ.get("TRUST_PROXY", "0").strip().lower()
+               in ("1", "true", "yes", "on"))
+
+
+def client_ip(request: Request) -> Optional[str]:
+    """So'rov kelgan manzil. `TRUST_PROXY` o'chiq bo'lsa — faqat
+    to'g'ridan-to'g'ri ulanish manzili."""
+    if TRUST_PROXY:
+        xff = request.headers.get("X-Forwarded-For") or ""
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
+    return request.client.host if request.client else None
+
+
+def _auth(fn, *a, **kw):
+    """AuthError -> HTTP kodi (400/401/403/404/409/429/503).
+
+    429 da `Retry-After` sarlavhasi ham qo'shiladi — bu standart yo'l
+    bilan "qachon qayta urinish mumkin" degan savolga javob beradi va
+    brauzerdan tashqari mijozlar ham tushunadi."""
+    try:
+        return fn(*a, **kw)
+    except auth.AuthError as e:
+        h = ({"Retry-After": str(int(getattr(e, "retry_after", 60)))}
+             if e.code == 429 else None)
+        raise HTTPException(status_code=e.code, detail=str(e), headers=h)
+
+
+def _token(authorization: Optional[str]) -> str:
+    """`Authorization: Bearer <token>` dan tokenni ajratadi."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Token yo'q.")
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Token formati noto'g'ri.")
+    return parts[1].strip()
+
+
+def current_account(request: Request) -> Dict[str, Any]:
+    """Kirgan hisob. Kimlikni DARVOZA (`gate`) allaqachon tekshirgan —
+    bu yerda faqat natijasi olinadi, ikkinchi SQL so'rov qilinmaydi."""
+    return getattr(request.state, "account", None) or {}
+
+
+#: ERP `X-Service-Key` bilan kelganda so'rov QAYSI kompaniya nomidan
+#: bajarilishi. Bo'sh bo'lsa — yagona FAOL hisob (bittadan ko'p bo'lsa xato).
+ERP_COMPANY_ID = os.environ.get("ERP_COMPANY_ID", "").strip()
+
+def company_id_of(request: Request) -> int:
+    """So'rov QAYSI kompaniya nomidan bajarilyapti (J1.6).
+
+    Ikki yo'l bor va ikkalasi ham `gate()` da tekshirilgan:
+      * KOMPANIYA sessiyasi — hisob `request.state.account` da;
+      * SERVICE kaliti (ERP) — odam nomidan emas, shuning uchun hisob YO'Q.
+
+    ERP holatida kompaniya `.env` dagi `ERP_COMPANY_ID` dan olinadi. U
+    ko'rsatilmagan bo'lsa yagona FAOL hisob ishlatiladi; faol hisob bir
+    nechta bo'lsa — ANIQ xato, chunki taxmin qilish bu yerda ma'lumotni
+    boshqa ijarachiga berib yuborish demakdir.
+    """
+    acc = getattr(request.state, "account", None)
+    if acc and acc.get("id"):
+        return int(acc["id"])
+
+    if ERP_COMPANY_ID.isdigit():
+        return int(ERP_COMPANY_ID)
+
+    # Mantiq `api/auth.py` da — bildirishnoma tsikli ham shuni ishlatadi.
+    try:
+        return auth.sole_company_id()
+    except auth.AuthError as e:
+        raise HTTPException(status_code=e.code, detail=str(e)) from e
+
+
+@app.post("/auth/login")
+def auth_login(body: LoginIn, request: Request, response: Response,
+               user_agent: Optional[str] = Header(None)):
+    """KOMPANIYA hisobi bilan kirish.
+
+    Sessiya tokeni JAVOB TANASIDA QAYTMAYDI — u `HttpOnly` cookie'ga
+    qo'yiladi (auth-4). Javobda faqat hisob va CSRF tokeni.
+
+    Urinishlar JURNALGA yoziladi va ko'p xatodan keyin 429 qaytadi
+    (auth-5). Manzil `client_ip()` orqali olinadi: `X-Forwarded-For` ga
+    faqat `TRUST_PROXY=1` bo'lganda ishoniladi (sababi o'sha funksiya
+    ustidagi izohda)."""
+    res = _auth(auth.login, body.username, body.password,
+                user_agent=user_agent, ip=client_ip(request))
+    _set_auth_cookies(response, res["token"], res["csrf"])
+    response.headers["Cache-Control"] = "no-store"
+    return {"account": res["account"], "csrf": res["csrf"],
+            "expires_at": res["expires_at"]}
+
+
+@app.post("/auth/logout")
+def auth_logout(response: Response,
+                authorization: Optional[str] = Header(None),
+                tai_session: Optional[str] = Cookie(None)):
+    """Chiqish. Cookie'lar HAR HOLDA tozalanadi — yaroqsiz token
+    brauzerda osilib qolmasin."""
+    ok = False
+    try:
+        ok = _auth(auth.logout, tai_session or _token(authorization))
+    except HTTPException:
+        pass
+    _clear_auth_cookies(response)
+    return {"ok": ok}
+
+
+@app.get("/auth/me")
+def auth_me(request: Request, response: Response):
+    """Kim kirgan. Javobda CSRF tokeni ham bor: sahifa yangilanganda uni
+    login'siz tiklaydi.
+
+    ERP bu endpointga TAYANMAYDI: hodimlar ERP ning o'zida
+    (`erp.app_user`) va u kimlikni mustaqil tekshiradi.
+
+    Kimlikni DARVOZA allaqachon tekshirgan (`gate`) — bu yerda faqat
+    natijasi olinadi."""
+    response.headers["Cache-Control"] = "no-store"
+    return getattr(request.state, "account", None) or {}
+
+
+@app.get("/auth/attempts")
+def auth_attempts(hours: int = Query(24, ge=1, le=720),
+                  limit: int = Query(100, ge=1, le=1000),
+                  only_failed: bool = True):
+    """Kirish urinishlari — "kim, qayerdan va qachon urindi".
+
+    Kirgan hisob uchun ochiq: tender-ai da ROL YO'Q va hisob bitta —
+    ya'ni bu ro'yxatni ko'rayotgan odam allaqachon o'sha kompaniya.
+    Darvoza (`gate`) kimlikni tekshirgan."""
+    return _auth(auth.attempts, hours, limit, only_failed)
+
+
+@app.get("/auth/account")
+def auth_account(request: Request):
+    """Hisob ma'lumotlari. Rol yo'q — kompaniya hisobi bitta darajali."""
+    return getattr(request.state, "account", None) or {}
+
+
+@app.put("/auth/account")
+def auth_update_account(body: AccountIn, request: Request):
+    a = getattr(request.state, "account", None) or {}
+    return _auth(auth.update_account, a["id"], body.model_dump())
+
+
+@app.put("/auth/password")
+def auth_set_password(body: AccountIn, request: Request,
+                      authorization: Optional[str] = Header(None),
+                      tai_session: Optional[str] = Cookie(None)):
+    """Kompaniya O'Z parolini almashtiradi. Boshqa hisobniki emas: hisoblar
+    ro'yxati serverda, `create_company.py` orqali boshqariladi.
+
+    JORIY parol MAJBURIY (auth-6): ochiq qolgan kompyuter yoki
+    o'g'irlangan sessiya bilan begona odam parolni o'zgartirib, hisobni
+    butunlay egallab olmasin. Almashtirgandan keyin BOSHQA sessiyalar
+    o'chadi — aks holda o'g'irlangan token ishlayveradi va butun amal
+    ma'nosiz bo'lardi."""
+    a = getattr(request.state, "account", None) or {}
+    if not body.password:
+        raise HTTPException(status_code=400, detail="Yangi parol berilmagan.")
+    if not body.current_password:
+        raise HTTPException(status_code=400, detail="Joriy parolni kiriting.")
+    return _auth(auth.set_password, a["id"], body.password,
+                 current=body.current_password,
+                 # Tartib DARVOZA bilan bir xil bo'lishi SHART: u ham
+                 # oshkora sarlavhani ustun qo'yadi. Aks holda ikkalasi
+                 # ham kelganda "qaysi sessiya qoladi" degan savolga
+                 # ikki joyda ikki xil javob chiqardi va parolni
+                 # almashtirgan odam o'zi tizimdan chiqib qolardi.
+                 keep_token=(_token_opt(authorization) or tai_session))
+
+
+def _token_opt(authorization: Optional[str]) -> Optional[str]:
+    """Sarlavhadagi token, bo'lmasa `None`. `_token()` dan farqi: bu
+    yerda tokenning yo'qligi xato emas — kimlikni DARVOZA allaqachon
+    tekshirgan, token esa faqat "qaysi sessiyani qoldirish" uchun."""
+    try:
+        return _token(authorization)
+    except HTTPException:
+        return None
+
+
 @app.get("/health")
 def health():
     """Baza ulanishini tekshiradi."""
@@ -514,12 +935,16 @@ def list_tenders(
     }
 
 
-@app.get("/tenders/{tender_id}")
-def get_tender(tender_id: int):
-    """Bitta tender to'liq — lotlar va har lotda tovarlar bilan."""
+def build_tender_detail(tender_id: int) -> Optional[dict]:
+    """Tenderning to'liq ko'rinishi: lotlar, tovarlar, pozitsiyalar, tafsilot,
+    AI xulosasi va hujjatlar. Tender yo'q bo'lsa `None`.
+
+    ENDPOINTDAN AJRATILGAN (ai-chat): shu ma'lumotni AI-Chat ning `get_tender`
+    tool'i ham oladi (`api/ai_chat.py`). Mantiq bir joyda tursin — HTTP qatlami
+    (404) esa endpointda qoladi."""
     row = db.query_one(queries.tender_by_id_sql(), {"id": tender_id})
     if not row:
-        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+        return None
 
     tender = _shape_tender(row)
 
@@ -611,6 +1036,15 @@ def get_tender(tender_id: int):
     return tender
 
 
+@app.get("/tenders/{tender_id}")
+def get_tender(tender_id: int):
+    """Bitta tender to'liq — lotlar va har lotda tovarlar bilan."""
+    tender = build_tender_detail(tender_id)
+    if tender is None:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+    return tender
+
+
 def _tender_bor_yoki_404(tender_id: int) -> None:
     """Yo'q tender uchun 404. Bo'sh ro'yxat "hujjat yo'q" degani, "tender yo'q"
     degani EMAS — ikkalasini bir xil javob bilan qaytarsak, mijoz noto'g'ri
@@ -621,12 +1055,42 @@ def _tender_bor_yoki_404(tender_id: int) -> None:
         raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
 
 
+def _tirik_yoki_409(row: dict, tender_id: int) -> None:
+    """Yopilgan tenderда AI tahlilini BOSHLAMAYDI.
+
+    Nega 404 emas: tender bor, lekin unga endi taklif berib bo'lmaydi —
+    "topilmadi" degan javob noto'g'ri bo'lardi.
+
+    Nega model chaqirilishidan OLDIN: tahlil pul turadi. Muddati o'tgan
+    tender bo'yicha xulosa esa foydasiz — foydalanuvchi u bilan hech nima
+    qila olmaydi. Ro'yxat filtrlari buni allaqachon yashiradi, ammo bu
+    endpointга to'g'ridan-to'g'ri havola, eski kartochka yoki ERP so'rovi
+    bilan ham kelish mumkin (reja_ai_chat.md §16.2).
+    """
+    reason = matching.closed_reason(row)
+    if reason:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Tender {tender_id} — {reason}. AI tahlili qilinmadi.")
+
+
 @app.get("/tenders/{tender_id}/documents")
 def tender_documents(tender_id: int):
     """Faqat hujjatlar ro'yxati (yuklab olish havolalari bilan)."""
     _tender_bor_yoki_404(tender_id)
     rows = db.query(queries.TENDER_DOCUMENTS_SQL, {"id": tender_id})
     return [_shape_document(r, tender_id) for r in rows]
+
+
+@app.get("/tenders/{tender_id}/erp-status")
+def tender_erp_status(tender_id: int):
+    """Shu tender ERP da ishga olinganmi va kim tomonidan.
+
+    ERP GA HTTP SO'ROV YO'Q — `erp.v_tender_status` view i o'qiladi
+    (`api/erp_status.py` dagi izohga qarang). ERP o'rnatilmagan bo'lsa
+    bo'sh ro'yxat qaytadi va interfeys blokni ko'rsatmaydi."""
+    return {"ready": erp_status.ready(),
+            "opportunities": erp_status.for_tender(tender_id)}
 
 
 @app.get("/documents/{tender_id}/download")
@@ -669,9 +1133,28 @@ def download_document(tender_id: int, ref: str):
 
 
 @app.get("/stats")
-def stats(status: str = Query("open", description="Qaysi status bo'yicha statistika (default open).")):
-    """Dashboard umumiy ko'rsatkichlari. Valyutalar ALOHIDA (UZS/USD aralashtirilmaydi)."""
-    p = {"status": status}
+def stats(
+    status: str = Query("open", description="Qaysi status bo'yicha statistika (default open)."),
+    region: Optional[str] = Query(
+        None, description="Viloyat kodi (level=1). Berilsa tuman/shahar kesimi qaytadi."),
+):
+    """Viloyat, tanlanganda esa tuman/shahar kesimidagi statistika.
+
+    `region` bo'sh bo'lsa respublika bo'yicha faqat level=1 hududlar
+    qaytadi. Viloyat kodi berilsa barcha ko'rsatkichlar shu viloyat bilan
+    cheklanadi va `by_region` tuman/shaharlarni beradi. Viloyat darajasida
+    qolgan tenderlar NULL nom bilan qaytadi — frontend ularni alohida
+    "tuman/shahar ko'rsatilmagan" guruhi deb ko'rsatadi.
+    """
+    selected = None
+    if region:
+        selected = db.query_one(queries.STATS_REGION_SQL, {"region": region})
+        if not selected or selected.get("level") != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Statistika uchun level=1 viloyat kodini yuboring.")
+
+    p = {"status": status, "region": region}
     open_count = db.scalar(queries.STATS_OPEN_COUNT_SQL, p) or 0
 
     by_currency = [
@@ -681,13 +1164,26 @@ def stats(status: str = Query("open", description="Qaysi status bo'yicha statist
         for r in db.query(queries.STATS_BY_CURRENCY_SQL, p)
     ]
 
-    by_region = [
-        {"area_id": r["area_id"], "name": r["name"], "tender_count": r["tender_count"]}
-        for r in db.query(queries.STATS_BY_REGION_SQL, p)
-    ]
+    region_sql = (queries.STATS_BY_LOCALITY_SQL if selected
+                  else queries.STATS_BY_PROVINCE_SQL)
+    by_region = [{
+        "area_id": r["area_id"],
+        "name": r["name"],
+        "tender_count": r["tender_count"],
+        # Valyutalar qo'shilmaydi: 1 USD + 1 UZS ma'nosiz. Har bir hudud
+        # ichida summa valyuta bo'yicha alohida qaytadi.
+        "totals_by_currency": [{
+            "currency": item.get("currency"),
+            "total_value": _num(item.get("total_value")),
+        } for item in (r.get("totals_by_currency") or [])],
+    } for r in db.query(region_sql, p)]
 
     return {
         "status": status,
+        "scope": "localities" if selected else "provinces",
+        "selected_region": ({"area_id": selected["area_id"],
+                             "name": selected["name"]}
+                            if selected else None),
         "count": open_count,
         "by_currency": by_currency,
         "by_region": by_region,
@@ -736,11 +1232,39 @@ def freshness():
         "median_hours": round(float(det["median_hours"]), 1) if det.get("median_hours") is not None else None,
         "within_1h_pct": round(100 * det["within_1h"] / n) if n else None,
     }
+    # KORPUS — semantik qidiruv qancha tenderni ko'radi.
+    #
+    # "TUGADI" DEB YOZILMAYDI. Korpus o'sib turadi, ya'ni yagona
+    # to'g'ri holat "quvib yetdi" (`vektorsiz = 0`) yoki "N ta
+    # orqada". Ko'rsatkich `tugadi` desa, odam ish bitgan deb
+    # o'ylardi va navbat yana o'sganini payqamasdi.
+    corpus = None
+    try:
+        c = db.query_one(queries.CORPUS_STATS_SQL) or {}
+        vektorsiz = int(c.get("vektorsiz") or 0)
+        # SOVUQ START. Bo'laklash endigina yurgan bo'lsa "oxirgi 24
+        # soat" butun korpusni qamrab oladi va `new_24h` SUR'AT
+        # EMAS — bir martalik to'ldirish. Aynan shu xato bugun
+        # `review_speed()` da tuzatilgan edi va bu yerda QAYTDI.
+        yosh = float(c.get("yosh_kun") or 0)
+        corpus = {
+            "chunks": int(c.get("jami") or 0),
+            "unvectorized": vektorsiz,
+            "tenders": int(c.get("tenderlar") or 0),
+            "new_24h": int(c.get("sutkalik_yangi") or 0),
+            "growth_reliable": yosh >= 2.0,
+            # QUVIB YETDI — "tugadi" emas.
+            "caught_up": vektorsiz == 0,
+        }
+    except Exception:                                       # noqa: BLE001
+        corpus = None       # ko'rsatkich asosiy javobni buzmasin
+
     return {
         "overall_age_sec": overall_age,
         "any_error": any_error,
         "platforms": platforms,
         "detection": detection,
+        "corpus": corpus,
     }
 
 
@@ -758,6 +1282,7 @@ def freshness():
 @app.post("/tenders/{tender_id}/ai-match")
 def ai_match_tender(
     tender_id: int,
+    request: Request,
     refresh: bool = Query(False, description="Keshni chetlab o'tib qayta tahlil qilish."),
 ):
     """Tender foydalanuvchi katalogiga mos kelishini AI orqali baholaydi.
@@ -768,39 +1293,117 @@ def ai_match_tender(
     row = db.query_one(queries.AI_TENDER_SQL, {"id": tender_id})
     if not row:
         raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+    _tirik_yoki_409(row, tender_id)
 
-    products = db.query(queries.CATALOG_LIST_SQL)
-    profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL))
+    products = db.query(queries.CATALOG_LIST_SQL, {"company_id": company_id})
+    profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL,
+                                          {"company_id": company_id}))
 
-    text = ai_match.build_input(row, products, profile)
+    # Biriktirilgan hujjatlar MATNI — tahlilning asosiy manbai. `doc_meta`
+    # javobga ham tushadi: foydalanuvchi tahlil qaysi fayllarga tayanganini
+    # va nimasi o'qilmaganini ko'rsin (TZ: "qora quti bo'lmasin").
+    doc_text, doc_meta = ai_docs.context(tender_id)
+    docs = ai_docs.prompt_block(doc_text, doc_meta)
+
+    text = ai_match.build_input(row, products, profile, docs)
     h = ai_match.content_hash(text)
 
-    cached = db.query_one(queries.AI_CACHED_SQL, {"id": tender_id, "kind": ai_match.KIND})
+    company_id = current_account(request)["id"]
+    cached = db.query_one(queries.AI_CACHED_SQL,
+                          {"id": tender_id, "kind": ai_match.KIND,
+                           "company_id": company_id})
     if cached and cached["content_hash"] == h and not refresh:
         return {**cached["result"], "cached": True,
                 "model": cached.get("model"),
-                "generated_at": _iso(cached.get("created_at"))}
+                "generated_at": _iso(cached.get("created_at")),
+                "documents": doc_meta}
 
     try:
-        out = ai_match.analyze(row, products, profile)
+        out = ai_match.analyze(row, products, profile, docs=docs)
     except ai.AIUnavailable as e:
         # Kalit yo'q / chaqiruv muvaffaqiyatsiz — 503, chunki bu vaqtinchalik
         # va foydalanuvchi aybi emas. Frontend buni tushunarli ko'rsatadi.
         raise HTTPException(status_code=503, detail=str(e)) from e
 
     saved = db.execute_returning(queries.AI_UPSERT_SQL, {
-        "tender_id": tender_id, "kind": ai_match.KIND, "content_hash": h,
+        "tender_id": tender_id, "kind": ai_match.KIND, "company_id": company_id,
+        "content_hash": h,
         "result": json.dumps(out["result"], ensure_ascii=False),
         "model": out["model"],
         "input_tokens": out["input_tokens"], "output_tokens": out["output_tokens"],
     })
     return {**out["result"], "cached": False, "model": out["model"],
-            "generated_at": _iso(saved["created_at"]) if saved else None}
+            "generated_at": _iso(saved["created_at"]) if saved else None,
+            "documents": doc_meta}
+
+
+def gonogo_cached(tender_id: int, company_id: int,
+                  refresh: bool = False) -> Dict[str, Any]:
+    """Go/No-Go natijasi, kesh bilan. Tender yo'q bo'lsa `LookupError`.
+
+    ENDPOINTDAN AJRATILGAN (ai-chat): AI-Chat ning `run_gonogo` tool'i shu
+    funksiyani chaqiradi (`api/ai_chat.py`) — kesh mantiqi ikki joyda
+    bo'lmasligi uchun. `ai.AIUnavailable` yuqoriga ochiq o'tadi: uni HTTP
+    qatlami 503 ga, chat qatlami esa tool xatosiga aylantiradi."""
+    row = db.query_one(queries.AI_TENDER_SQL, {"id": tender_id})
+    if not row:
+        raise LookupError(f"Tender {tender_id} topilmadi.")
+    _tirik_yoki_409(row, tender_id)
+    # Tender shartlari `ai_gonogo.build_input()` uchun ichma-ich shaklda kerak
+    row["detail"] = {"anno": row.get("anno"),
+                     "method_marks": row.get("method_marks"),
+                     "offer_period": row.get("offer_period")}
+
+    products = db.query(queries.CATALOG_LIST_SQL, {"company_id": company_id})
+    profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL,
+                                          {"company_id": company_id}))
+
+    doc_text, doc_meta = ai_docs.context(tender_id)
+    docs = ai_docs.prompt_block(doc_text, doc_meta)
+
+    # J3 — TUZILGAN TALABLAR. Bo'sh bo'lsa blok umuman qo'shilmaydi,
+    # ya'ni "talablar yo'q" degan yolg'on taassurot bo'lmaydi.
+    #
+    # DIQQAT: bu `content_hash` ni O'ZGARTIRADI, ya'ni mavjud keshlar
+    # bir marta yangilanadi. Bu ATAYLAB: eski tahlil talablarni
+    # ko'rmagan, uni "hali ham to'g'ri" deb ko'rsatish xato bo'lardi.
+    from api import requirement as _req
+    talablar = _req.prompt_block(tender_id, company_id)
+
+    text = ai_gonogo.build_input(row, products, profile, docs=docs,
+                                 talablar=talablar)
+    h = ai_gonogo.content_hash(text)
+
+    cached = db.query_one(queries.AI_CACHED_SQL,
+                          {"id": tender_id, "kind": ai_gonogo.KIND,
+                           "company_id": company_id})
+    if cached and cached["content_hash"] == h and not refresh:
+        return {**ai_gonogo.normalize(cached["result"]), "cached": True,
+                "model": cached.get("model"),
+                "generated_at": _iso(cached.get("created_at")),
+                "criteria_labels": ai_gonogo.CRITERIA,
+                "documents": doc_meta}
+
+    out = ai_gonogo.analyze(row, products, profile, docs=docs,
+                            talablar=talablar)
+
+    saved = db.execute_returning(queries.AI_UPSERT_SQL, {
+        "tender_id": tender_id, "kind": ai_gonogo.KIND, "company_id": company_id,
+        "content_hash": h,
+        "result": json.dumps(out["result"], ensure_ascii=False),
+        "model": out["model"],
+        "input_tokens": out["input_tokens"], "output_tokens": out["output_tokens"],
+    })
+    return {**out["result"], "cached": False, "model": out["model"],
+            "generated_at": _iso(saved["created_at"]) if saved else None,
+            "criteria_labels": ai_gonogo.CRITERIA,
+            "documents": doc_meta}
 
 
 @app.post("/tenders/{tender_id}/ai-gonogo")
 def ai_gonogo_tender(
     tender_id: int,
+    request: Request,
     refresh: bool = Query(False, description="Keshni chetlab o'tib qayta tahlil qilish."),
 ):
     """GO / REVIEW / NO-GO tavsiyasi — 11 mezon bo'yicha.
@@ -812,41 +1415,13 @@ def ai_gonogo_tender(
     Ma'lumot yetishmagan mezon `malumot_yoq` bo'lib qaytadi va qaror `review`
     ga tushadi — model bo'sh joyni taxmin bilan to'ldirmaydi.
     """
-    row = db.query_one(queries.AI_TENDER_SQL, {"id": tender_id})
-    if not row:
-        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
-    # Tender shartlari `ai_gonogo.build_input()` uchun ichma-ich shaklda kerak
-    row["detail"] = {"anno": row.get("anno"),
-                     "method_marks": row.get("method_marks"),
-                     "offer_period": row.get("offer_period")}
-
-    products = db.query(queries.CATALOG_LIST_SQL)
-    profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL))
-
-    text = ai_gonogo.build_input(row, products, profile)
-    h = ai_gonogo.content_hash(text)
-
-    cached = db.query_one(queries.AI_CACHED_SQL, {"id": tender_id, "kind": ai_gonogo.KIND})
-    if cached and cached["content_hash"] == h and not refresh:
-        return {**ai_gonogo.normalize(cached["result"]), "cached": True,
-                "model": cached.get("model"),
-                "generated_at": _iso(cached.get("created_at")),
-                "criteria_labels": ai_gonogo.CRITERIA}
-
     try:
-        out = ai_gonogo.analyze(row, products, profile)
+        return gonogo_cached(tender_id, current_account(request)["id"],
+                             refresh=refresh)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except ai.AIUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
-
-    saved = db.execute_returning(queries.AI_UPSERT_SQL, {
-        "tender_id": tender_id, "kind": ai_gonogo.KIND, "content_hash": h,
-        "result": json.dumps(out["result"], ensure_ascii=False),
-        "model": out["model"],
-        "input_tokens": out["input_tokens"], "output_tokens": out["output_tokens"],
-    })
-    return {**out["result"], "cached": False, "model": out["model"],
-            "generated_at": _iso(saved["created_at"]) if saved else None,
-            "criteria_labels": ai_gonogo.CRITERIA}
 
 
 # ---------------------------------------------------------------------------
@@ -929,6 +1504,7 @@ MAX_IMPORT_MB = 5
 
 @app.post("/catalog/import")
 def catalog_import(
+    request: Request,
     file: UploadFile = File(..., description="Excel (.xlsx) yoki CSV fayl."),
     dry_run: bool = Query(True, description="TRUE — faqat tekshirish, bazaga yozilmaydi."),
 ):
@@ -939,7 +1515,8 @@ def catalog_import(
         raise HTTPException(status_code=413,
                             detail=f"Fayl {MAX_IMPORT_MB} MB dan katta.")
     try:
-        return importer.import_catalog(data, file.filename or "", dry_run=dry_run)
+        return importer.import_catalog(data, file.filename or "",
+                                       company_id_of(request), dry_run=dry_run)
     except importer.ImportFormatError as e:
         # 422 — fayl formatiga oid xato (qatorga emas, butun faylga tegishli)
         raise HTTPException(status_code=422, detail=str(e))
@@ -959,10 +1536,10 @@ def catalog_import_template(fmt: str = Query("xlsx", pattern="^(xlsx|csv)$")):
 
 
 @app.get("/tenders/{tender_id}/stock-check")
-def tender_stock_check(tender_id: int):
+def tender_stock_check(tender_id: int, request: Request):
     """TZ P0-6 — mos pozitsiyalar bo'yicha ombor qoldig'i. Yetishmayotganlar
     ALOHIDA `shortages` ro'yxatida. Qoldiq eskirgan bo'lsa `preliminary: true`."""
-    res = stock.check_tender_stock(tender_id)
+    res = stock.check_tender_stock(tender_id, company_id_of(request))
     if res is None:
         raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
     return res
@@ -975,36 +1552,43 @@ def tender_stock_check(tender_id: int):
 # faqat ma'lumot yig'adi, uni chaqiradi va saqlaydi.
 # ---------------------------------------------------------------------------
 @app.get("/pricing/settings")
-def get_pricing_settings():
+def get_pricing_settings(request: Request):
     """Odatiy parametrlar (har doim mavjud — patch id=1 ni yaratib qo'ygan)."""
-    return _shape_pricing_settings(db.query_one(queries.PRICING_SETTINGS_GET_SQL))
+    return _shape_pricing_settings(db.query_one(
+        queries.PRICING_SETTINGS_GET_SQL,
+        {"company_id": company_id_of(request)}))
 
 
 @app.put("/pricing/settings")
-def put_pricing_settings(s: PricingSettingsIn):
+def put_pricing_settings(s: PricingSettingsIn, request: Request):
     """Odatiy parametrlarni saqlaydi — yangi tenderda boshlang'ich qiymat.
 
     QISMAN yuborish mumkin: faqat kelgan maydonlar o'zgaradi. Ilgari model
     maydonlariga standart qiymat berilgani uchun `{"markup_percent": 22}`
     yuborilsa logistika va zaxira JIMGINA nolga qaytardi.
     """
-    cur = db.query_one(queries.PRICING_SETTINGS_GET_SQL) or {}
+    company_id = company_id_of(request)
+    cur = db.query_one(queries.PRICING_SETTINGS_GET_SQL,
+                       {"company_id": company_id}) or {}
     patch = s.model_dump(exclude_unset=True)
     merged = {k: patch.get(k, cur.get(k)) for k in
               ("markup_percent", "risk_reserve_percent", "risk_reserve_fixed",
                "logistics_percent", "logistics_fixed", "vat_percent", "currency")}
-    row = db.execute_returning(queries.PRICING_SETTINGS_UPSERT_SQL, merged)
+    row = db.execute_returning(queries.PRICING_SETTINGS_UPSERT_SQL,
+                               {**merged, "company_id": company_id})
     return _shape_pricing_settings(row)
 
 
 @app.get("/tenders/{tender_id}/pricing")
-def get_tender_pricing(tender_id: int):
+def get_tender_pricing(tender_id: int, request: Request):
     """Saqlangan smeta (yo'q bo'lsa null — 404 EMAS, chunki hisoblamaganlik
     xato emas; `/profile` bilan bir xil uslub). TENDERNING O'ZI yo'q bo'lsa
     esa bu boshqa hol — 404."""
     _tender_bor_yoki_404(tender_id)
     return _shape_tender_pricing(
-        db.query_one(queries.TENDER_PRICING_GET_SQL, {"id": tender_id}))
+        db.query_one(queries.TENDER_PRICING_GET_SQL,
+                     {"id": tender_id,
+                      "company_id": company_id_of(request)}))
 
 
 @app.post("/tenders/{tender_id}/pricing")
@@ -1020,8 +1604,11 @@ def post_tender_pricing(tender_id: int, body: PricingIn):
     if not t:
         raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
 
-    settings = db.query_one(queries.PRICING_SETTINGS_GET_SQL)
-    profile = db.query_one(queries.PROFILE_GET_SQL)
+    company_id = company_id_of(request)
+    settings = db.query_one(queries.PRICING_SETTINGS_GET_SQL,
+                            {"company_id": company_id})
+    profile = db.query_one(queries.PROFILE_GET_SQL,
+                           {"company_id": company_id})
     goods = db.query(queries.TENDER_GOODS_SQL, {"id": tender_id})
 
     inp = pricing.build_inputs(settings, t, goods, profile, saved=None,
@@ -1039,6 +1626,7 @@ def post_tender_pricing(tender_id: int, body: PricingIn):
 
     saved = db.execute_returning(queries.TENDER_PRICING_UPSERT_SQL, {
         "tender_id": tender_id,
+        "company_id": company_id,
         "inputs": json.dumps(inp, ensure_ascii=False),
         "result": json.dumps(result, ensure_ascii=False),
         "manual_price": inp.get("manual_price"),
@@ -1063,42 +1651,446 @@ def company_document_types():
 
 
 @app.get("/company/documents")
-def company_documents():
+def company_documents(request: Request):
     """Kompaniya hujjatlari + har birining muddat holati."""
-    return [compliance.shape_document(r) for r in db.query(compliance.DOCS_LIST_SQL)]
+    rows = db.query(compliance.DOCS_LIST_SQL,
+                    {"company_id": company_id_of(request)})
+    return [compliance.shape_document(r) for r in rows]
 
 
 @app.post("/company/documents", status_code=201)
-def create_company_document(d: CompanyDocumentIn):
-    row = db.execute_returning(compliance.DOC_INSERT_SQL, d.model_dump())
+def create_company_document(d: CompanyDocumentIn, request: Request):
+    row = db.execute_returning(compliance.DOC_INSERT_SQL,
+                               {**d.model_dump(),
+                                "company_id": company_id_of(request)})
     return compliance.shape_document(row)
 
 
 @app.put("/company/documents/{doc_id}")
-def update_company_document(doc_id: int, d: CompanyDocumentIn):
+def update_company_document(doc_id: int, d: CompanyDocumentIn,
+                            request: Request):
+    # `company_id` WHERE bandida: begona hujjat id si bilan tahrirlash
+    # mumkin emas — javob 404 (IDOR himoyasi).
     row = db.execute_returning(compliance.DOC_UPDATE_SQL,
-                               {**d.model_dump(), "id": doc_id})
+                               {**d.model_dump(), "id": doc_id,
+                                "company_id": company_id_of(request)})
     if not row:
         raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
     return compliance.shape_document(row)
 
 
+@app.get("/company/documents/template")
+def company_documents_template(fmt: str = Query("xlsx", pattern="^(xlsx|csv)$")):
+    """HUJJATLAR SHABLONI — talab etiladigan hujjatlar ro'yxati bilan
+    OLDINDAN TO'LDIRILGAN fayl.
+
+    Broker uni yuklab oladi, raqam va sanalarni yozadi va
+    `POST /company/documents/import` orqali qaytarib yuklaydi. Ro'yxat
+    `compliance.DOC_TYPES` dan olinadi — cheklist tekshiradigan turlar bilan
+    AYNAN bir xil."""
+    if fmt == "csv":
+        return FileResponse(
+            content=compliance.template_csv(), media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="hujjatlar_shablon.csv"'})
+    return FileResponse(
+        content=compliance.template_xlsx(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="hujjatlar_shablon.xlsx"'})
+
+
+@app.post("/company/documents/import")
+def company_documents_import(
+    request: Request,
+    file: UploadFile = File(..., description="To'ldirilgan shablon (.xlsx / .csv)."),
+    dry_run: bool = Query(True, description="TRUE — faqat tekshirish, bazaga yozilmaydi."),
+):
+    """To'ldirilgan shablonni yuklaydi. Katalog importi bilan bir xil
+    shartnoma: xato BITTA QATORNI to'xtatadi, importni emas; `dry_run=true`
+    (default) bazaga umuman tegmaydi."""
+    data = file.file.read()
+    if len(data) > MAX_IMPORT_MB * 1024 * 1024:
+        raise HTTPException(status_code=413,
+                            detail=f"Fayl {MAX_IMPORT_MB} MB dan katta.")
+    try:
+        return compliance.import_documents(data, file.filename or "",
+                                           company_id_of(request),
+                                           dry_run=dry_run)
+    except importer.ImportFormatError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/company/documents/parse")
+def company_documents_parse(
+    file: UploadFile = File(..., description="To'ldirilgan shablon (.xlsx / .csv)."),
+):
+    """SHABLON PARSERI XIZMAT SIFATIDA — faylni o'qiydi va tekshiradi,
+    BAZAGA UMUMAN TEGMAYDI.
+
+    `POST /company/documents/import` dan farqi: natija SHU KOMPANIYA
+    hujjatlariga yozilmaydi, chaqiruvchiga qaytariladi. ERP (alohida loyiha)
+    mijoz korxonalarning hujjatlarini o'z bazasiga yozadi, lekin shablon va
+    uning qoidalari — sarlavhalarni tanish, sana formatlari, hujjat turini
+    aniqlash — SHU YERDA qoladi va ikkinchi marta yozilmaydi.
+
+    Javobdagi `rows` — tozalangan qatorlar (sanalar ISO satr ko'rinishida),
+    chaqiruvchi ularni o'zi saqlaydi."""
+    data = file.file.read()
+    if len(data) > MAX_IMPORT_MB * 1024 * 1024:
+        raise HTTPException(status_code=413,
+                            detail=f"Fayl {MAX_IMPORT_MB} MB dan katta.")
+    try:
+        ok, report = compliance.parse_document_file(data, file.filename or "")
+    except importer.ImportFormatError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {**report, "rows": compliance.rows_json(ok)}
+
+
 @app.delete("/company/documents/{doc_id}", status_code=204)
-def delete_company_document(doc_id: int):
-    row = db.execute_returning(compliance.DOC_DELETE_SQL, {"id": doc_id})
+def delete_company_document(doc_id: int, request: Request):
+    row = db.execute_returning(compliance.DOC_DELETE_SQL,
+                               {"id": doc_id,
+                                "company_id": company_id_of(request)})
     if not row:
         raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
     return None
 
 
 @app.get("/tenders/{tender_id}/compliance")
-def tender_compliance(tender_id: int):
+def tender_compliance(tender_id: int, request: Request):
     """Majburiy hujjatlar ro'yxati + har biri uchun "bazada bor / yo'q" va
-    muddat holati. Tenderда talab topilmasa buni OCHIQ aytadi."""
+    muddat holati. Tenderда talab topilmasa buni OCHIQ aytadi.
+
+    Hujjatlar manbasi — SHU kompaniyaning bazasi (`company_document`)."""
     if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
                         {"id": tender_id}):
         raise HTTPException(status_code=404, detail="Tender topilmadi.")
-    return compliance.check(tender_id)
+    return compliance.check(tender_id, company_id=company_id_of(request))
+
+
+class ComplianceDocsIn(BaseModel):
+    """Tashqi tizim (ERP) yuboradigan hujjatlar. Maydonlari
+    `company_document` bilan bir xil; `documents=None` bo'lsa shu
+    kompaniyaning bazasi ishlatiladi."""
+    documents: Optional[List[Dict[str, Any]]] = None
+
+
+@app.post("/tenders/{tender_id}/compliance")
+def tender_compliance_for(tender_id: int, body: ComplianceDocsIn):
+    """CHEKLIST XIZMAT SIFATIDA — qoidalar shu yerda, hujjatlar chaqiruvchida.
+
+    ERP alohida loyiha va mijoz korxonalarning hujjatlarini o'zi saqlaydi.
+    Qoidalar esa (DOC_TYPES, tender matnidan talabni aniqlash) shu modulda,
+    1400 qator — ularning IKKINCHI NUSXASI bo'lmasligi kerak. Shuning uchun
+    ERP hujjatlarni YUBORADI, javobda tayyor cheklist oladi.
+
+    Bu yerda erp sxemasi haqida hech narsa bilinmaydi: kirish — oddiy
+    ro'yxat, bog'liqlik bir tomonlama."""
+    if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
+                        {"id": tender_id}):
+        raise HTTPException(status_code=404, detail="Tender topilmadi.")
+    res = compliance.check(tender_id, docs=body.documents)
+    res["doc_source"] = "external" if body.documents is not None else "company"
+    return res
+
+
+# ---------------------------------------------------------------------------
+# J3 — TALABLAR va ularni TASDIQLASH
+#
+# NEGA TASDIQLASH KERAK: ajratilgan talab AI natijasi, ya'ni xato
+# bo'lishi mumkin. Uni to'g'ridan-to'g'ri `compliance` ga ulash AI
+# xatosini QAROR QATLAMIGA jimgina o'tkazadi — natijada ARVOH BLOCKER
+# ("kafolat sharti bajarilmagan", holbuki shart qo'yilmagan).
+# Broker bunday ogohlantirishni bir-ikki marta ko'rgach BUTUN
+# cheklistga ishonishni to'xtatadi.
+# ---------------------------------------------------------------------------
+
+@app.get("/requirements/queue")
+def requirements_queue(request: Request, limit: int = 100):
+    """Ko'rib chiqish navbati — kutayotgan talabi bor tenderlar.
+
+    Muddati YAQIN tenderlar birinchi: ular bo'yicha qaror tezroq
+    kerak. Tenderning hamma talablari ko'rib chiqilgach u navbatdan
+    CHIQIB KETADI.
+    """
+    from api import requirement
+    cid = company_id_of(request)
+    return {"queue": requirement.review_queue(cid, min(max(limit, 1), 500))}
+
+
+@app.get("/tenders/{tender_id}/requirements")
+def tender_requirements(tender_id: int, request: Request):
+    """Tender talablari — ko'rib chiqish holati bilan."""
+    from api import requirement
+    if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
+                        {"id": tender_id}):
+        raise HTTPException(status_code=404, detail="Tender topilmadi.")
+    cid = company_id_of(request)
+    items = requirement.review_items(tender_id, cid)
+    # VAQT O'LCHOVI: tender ochilgan payt shu yerda yoziladi.
+    # Faqat KUTAYOTGAN talab bo'lsa — ko'rilgan tenderni qayta ochish
+    # yangi o'lchov boshlamasin.
+    if any(x["review_status"] == "pending" for x in items):
+        requirement.review_ochildi(tender_id, cid)
+    return {
+        "tender_id": tender_id,
+        # YOPIQ rejimda interfeys model javobini YASHIRADI — anchoring
+        # ga qarshi. Rejim SERVERDAN keladi: mijoz uni o'zgartira
+        # olmasligi kerak, aks holda o'lchov ishonchsiz bo'lardi.
+        "rejim": requirement.pilot_rejim(tender_id, cid),
+        "summary": requirement.summary(tender_id, cid),
+        "items": items,
+    }
+
+
+@app.get("/requirements/doc-types")
+def requirement_doc_types():
+    """Yorliq lug'ati — `compliance.DOC_TYPES` + 'yoq' / 'boshqa'.
+
+    Interfeys shu ro'yxatdan tanlaydi. Erkin matn EMAS: moslashtiruv
+    ground truth i CHEKLI lug'atga tayanishi kerak, aks holda uni
+    keyin normallashtirish alohida ish bo'lib qoladi.
+    """
+    from api import requirement
+    return {"doc_types": requirement.doc_type_options()}
+
+
+@app.get("/requirements/labeled")
+def requirements_labeled(request: Request, limit: int = 1000):
+    """Inson yorliqlagan to'plam — moslashtiruv va J6 uchun."""
+    from api import requirement
+    return {"items": requirement.labeled(company_id_of(request),
+                                         min(max(limit, 1), 5000))}
+
+
+class ReviewIn(BaseModel):
+    """Bitta talabning ko'rib chiqish natijasi."""
+    status: str                                  # approved|rejected|corrected
+    corrected_value: Optional[str] = None
+    note: Optional[str] = None
+    #: `compliance.DOC_TYPES` kodi yoki 'yoq' / 'boshqa'.
+    #: Berilmasa eskisi QOLADI — tasodifan o'chib ketmasin.
+    doc_type: Optional[str] = None
+    #: YOPIQ rejimda inson model javobini KO'RMASDAN yozgan qiymat.
+    #: Bir marta yozilgach o'zgarmaydi (server tomonda `COALESCE`).
+    blind_value: Optional[str] = None
+
+
+@app.post("/requirements/{req_id}/review")
+def requirement_review(req_id: int, body: ReviewIn, request: Request):
+    """Talabni tasdiqlash / rad etish / tuzatish.
+
+    `company_id` SESSIYADAN va SQL SHARTIDA — boshqa kompaniyaning
+    talabini o'zgartirib bo'lmaydi (IDOR himoyasi).
+    """
+    from api import requirement
+    cid = company_id_of(request)
+    try:
+        row = requirement.review_set(
+            req_id, cid, body.status,
+            corrected=body.corrected_value, note=body.note, by=cid,
+            doc_type=body.doc_type, blind_value=body.blind_value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not row:
+        # Yo'q, yoki BOSHQA kompaniyaniki — ikkalasida ham 404.
+        # Farqni aytish "bu id mavjud" degan ma'lumot sizdirardi.
+        raise HTTPException(status_code=404, detail="Talab topilmadi.")
+    qolgan = db.scalar(
+        "SELECT count(*) FROM tender_requirement "
+        "WHERE company_id=%(c)s AND tender_id=%(t)s "
+        "AND review_status='pending'",
+        {"c": cid, "t": row["tender_id"]})
+    if not qolgan:
+        # OXIRGI talab belgilandi — vaqtni yopamiz.
+        #
+        # `reviewed_by IS NOT NULL` — INSON HAQIQATAN ko'rgan qator.
+        #
+        # Ilgari `review_status <> 'pending'` edi va u REYESTR
+        # pozitsiyalarini ham sanardi: ular avto-tasdiqlanadi
+        # (`approved`, `reviewed_by IS NULL`). O'lchandi: pilot
+        # tenderlarida `<> pending` = 29, `reviewed_by` = 0.
+        #
+        # Natijada `n_reviewed` shishar va `sekund_talabga` SHUNCHA
+        # kam chiqardi — inson haqiqiydan TEZROQ ko'rinardi va
+        # "har talabni inson tasdiqlaydi" modeli amalga oshadi
+        # degan xato xulosa chiqardi.
+        #
+        # `v_review_disagreement` dagi bilan BIR XIL chalkashlik
+        # (§16.67): `reviewed` va `not pending` bir narsa emas.
+        korilgan = db.scalar(
+            "SELECT count(*) FROM tender_requirement "
+            "WHERE company_id=%(c)s AND tender_id=%(t)s "
+            "AND reviewed_by IS NOT NULL",
+            {"c": cid, "t": row["tender_id"]}) or 0
+        requirement.review_tugadi(row["tender_id"], cid, int(korilgan))
+    return {**row, "qolgan_kutayotgan": int(qolgan or 0)}
+
+
+# ---------------------------------------------------------------------------
+# MALAKA TEKSHIRUVI — deterministik, MODEL CHAQIRILMAYDI
+#
+# `ai-gonogo` DAN FARQI: u 11 mezonni PULLIK modelga nasr sifatida
+# beradi va bitta tender ~$0.03 turadi. Bu esa `tender_requirement`
+# (turlangan) bilan `company_profile` (turlangan) ni SQL da
+# solishtiradi — o'lchandi: 200 tender 0.5 s, 2 ms/tender, 0 chaqiruv.
+# ---------------------------------------------------------------------------
+@app.get("/tenders/{tender_id}/qualification")
+def tender_qualification(tender_id: int, request: Request):
+    """Kompaniya shu tenderga malakalimi. Bepul va takrorlanadigan.
+
+    Natija `is_sample` bayrog'ini OLIB YURADI: profil sinov
+    qiymatlari bilan to'ldirilgan bo'lsa, undan statistik xulosa
+    chiqarilmaydi.
+    """
+    from api import qualification
+    cid = company_id_of(request)
+    try:
+        return qualification.check(tender_id, cid)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+# ---------------------------------------------------------------------------
+# BROKERGA YO'NALTIRISH
+#
+# CHEGARA: `erp.*` ga YOZILMAYDI (auth_test.py qulflaydi). Navbat shu
+# tomonda turadi, ERP esa `erp.v_tender_status` orqali o'z holatini
+# aytadi.
+# ---------------------------------------------------------------------------
+@app.get("/routing/queue")
+def routing_queue(request: Request,
+                  holat: Optional[str] = Query(None),
+                  limit: int = Query(100, ge=1, le=500)):
+    """Brokerga ko'rsatiladigan navbat — FAQAT ochiq tenderlar."""
+    from api import routing
+    cid = company_id_of(request)
+    try:
+        items = routing.navbat(cid, holat=holat, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"items": items, "jami": len(items),
+            "moslik": routing.moslik(cid)}
+
+
+@app.post("/routing/refresh")
+def routing_refresh(request: Request,
+                    barchasi: bool = Query(False),
+                    limit: int = Query(500, ge=1, le=2000)):
+    """Navbatni qayta baholaydi. MODEL CHAQIRILMAYDI.
+
+    MUSBAT TASDIQ: nechta baholandi VA nechtasi navbatga tushdi —
+    ikkalasi ham qaytariladi. "Xato chiqmadi" yetarli emas.
+    """
+    from api import routing
+    return routing.yonaltir_hammasi(company_id_of(request),
+                                    limit=limit, barchasi=barchasi)
+
+
+@app.post("/routing/{routing_id}/open")
+def routing_open(routing_id: int, request: Request,
+                 broker: Optional[str] = Query(None)):
+    """Broker ochdi — vaqt o'lchovi shu yerdan boshlanadi."""
+    from api import routing
+    row = routing.ochildi(routing_id, company_id_of(request), broker)
+    if not row:
+        # Yo'q, boshqa kompaniyaniki, yoki ALLAQACHON YOPILGAN.
+        raise HTTPException(status_code=404,
+                            detail="Yozuv topilmadi yoki allaqachon yopilgan.")
+    return row
+
+
+class RoutingDecisionIn(BaseModel):
+    #: 'olindi' | 'rad' | 'kutilsin'
+    qaror: str
+    izoh: Optional[str] = None
+    broker: Optional[str] = None
+
+
+@app.post("/routing/{routing_id}/decision")
+def routing_decision(routing_id: int, body: RoutingDecisionIn,
+                     request: Request):
+    """Broker qarori. AI qarori TEGILMAYDI — u dalil bo'lib qoladi.
+
+    Ikkisi ALOHIDA ustunda: aralashtirilsa "model necha foizda haq
+    edi" degan savolga javob qolmasdi.
+    """
+    from api import routing
+    cid = company_id_of(request)
+    try:
+        row = routing.qaror(routing_id, cid, body.qaror,
+                            izoh=body.izoh, broker=body.broker)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not row:
+        raise HTTPException(status_code=404, detail="Yozuv topilmadi.")
+    return row
+
+
+class ReviewBulkIn(BaseModel):
+    status: str                                  # approved|rejected
+
+
+@app.post("/tenders/{tender_id}/requirements/review-all")
+def requirements_review_all(tender_id: int, body: ReviewBulkIn,
+                            request: Request):
+    """Tenderning BARCHA kutayotgan talablarini bir holatga o'tkazadi.
+
+    Ommaviy TUZATISH yo'q: har qiymat alohida yoziladi.
+    """
+    from api import requirement
+    cid = company_id_of(request)
+    try:
+        n = requirement.review_bulk(tender_id, cid, body.status, by=cid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if n:
+        requirement.review_tugadi(tender_id, cid, n)
+    return {"tender_id": tender_id, "ozgardi": n, "status": body.status}
+
+
+@app.post("/requirements/pilot")
+def requirements_pilot_create(request: Request):
+    """Pilot to'plamini quradi: 30 tender (muddat + tasodif + summa).
+
+    NAMUNA ARALASH: navbat muddat bo'yicha saralangan va bu ish
+    jarayoni uchun to'g'ri, lekin NAMUNA uchun qiyshiq — tez
+    yopiladigan tenderlar ma'lum turdagi bo'lishi mumkin.
+
+    Birinchi 10 tasi YOPIQ rejimda: model javobi yashiriladi, inson
+    avval o'zi hujjatdan o'qiydi. Bu ANCHORING ga qarshi va
+    kelishmovchilik darajasini o'lchash imkonini beradi.
+    """
+    from api import requirement
+    return requirement.pilot_yarat(company_id_of(request))
+
+
+@app.get("/requirements/pilot")
+def requirements_pilot_list(request: Request):
+    """Pilot to'plami — holati va o'lchangan vaqti bilan."""
+    from api import requirement
+    cid = company_id_of(request)
+    items = requirement.pilot_royxat(cid)
+    return {
+        "items": items,
+        "tugagan": sum(1 for x in items if x["finished_at"]),
+        "jami": len(items),
+        "kelishmovchilik": db.query("""
+            SELECT ishonch_darajasi, jami, rad_etilgan, tuzatilgan,
+                   tasdiqlangan, kelishmovchilik_foiz
+            FROM v_review_disagreement WHERE company_id = %(c)s""",
+            {"c": cid}),
+    }
+
+
+@app.get("/requirements/speed")
+def requirements_speed(request: Request):
+    """Ko'rib chiqish tezligi — pilot natijasi.
+
+    "Har talabni inson tasdiqlaydi" modeli ishlaydimi degan savolning
+    javobi shu raqamda: mediana vaqt x navbatdagi tenderlar soni.
+    """
+    from api import requirement
+    return requirement.review_speed(company_id_of(request))
 
 
 # ---------------------------------------------------------------------------
@@ -1109,38 +2101,97 @@ def tender_compliance(tender_id: int):
 # boshqaradi va sinov xabarini yuboradi.
 # ---------------------------------------------------------------------------
 @app.get("/notify/settings")
-def get_notify_settings():
+def get_notify_settings(request: Request):
     """`smtp_password_set` / `telegram_token_set` — sirlar .env da bormi
     (sirlarning O'ZI hech qachon qaytmaydi)."""
-    return notify.get_settings()
+    return notify.get_settings(company_id_of(request))
 
 
 @app.put("/notify/settings")
-def put_notify_settings(s: NotifySettingsIn):
+def put_notify_settings(s: NotifySettingsIn, request: Request):
     """Sozlamalarni saqlaydi. QISMAN yuborish mumkin — yuborilmagan maydon
     o'zgarmaydi (`exclude_unset`)."""
     try:
-        return notify.save_settings(s.model_dump(exclude_unset=True))
+        return notify.save_settings(s.model_dump(exclude_unset=True),
+                                    company_id_of(request))
     except notify.NotifyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/notify/test")
-def notify_test():
+def notify_test(request: Request):
     """Sinov xabari. `notify_sent` ga YOZMAYDI — haqiqiy bildirishnomalarga
     ta'sir qilmaydi."""
     try:
-        return notify.send_test()
+        return notify.send_test(company_id=company_id_of(request))
     except notify.NotifyError as e:
         # Sozlama/SMTP xatosi — foydalanuvchi tuzatishi mumkin -> 400
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class NotifySendIn(BaseModel):
+    """Tashqi tizim (ERP) yuboradigan xabar.
+
+    QABUL QILUVCHI YO'Q: manzil qabul qilinmaydi va xabar FAQAT shu
+    o'rnatmaning sozlangan manzillariga ketadi (bildirishnoma sozlamasidagi
+    email va yoqilgan Telegram obunachilari). Shu tufayli endpoint ochiq
+    relay bo'la olmaydi."""
+    subject: str
+    text: str
+    html: Optional[str] = None
+    channels: List[str] = ["telegram", "email"]
+
+
+@app.post("/notify/send")
+def notify_send(body: NotifySendIn, request: Request):
+    """XABAR YUBORISH XIZMAT SIFATIDA.
+
+    NEGA KERAK: ERP alohida loyiha, lekin transport (SMTP rekvizitlari va
+    Telegram bot tokeni) SHU o'rnatmada. Sirlarni ikkinchi loyihaga
+    ko'chirish o'rniga ERP tayyor matnni yuboradi va u shu yerdan ketadi —
+    token bitta joyda qoladi, obunachilar ro'yxati ham.
+
+    Kanal ishlamasa (masalan SMTP sozlanmagan) — xato butun so'rovni
+    yiqitmaydi: natijada har kanal alohida hisobot beradi."""
+    out: Dict[str, Any] = {"email": None, "telegram": None}
+    cid = company_id_of(request)
+    st = notify.get_settings(cid)
+
+    if "email" in body.channels:
+        try:
+            # KOMPANIYA UZATILADI: `recipient()` busiz
+            # `sole_company_id()` ga tushardi va ikkinchi faol
+            # hisob bo'lsa xato berardi.
+            to = notify.recipient(st, cid)
+            notify.send(st, to, body.subject, body.text,
+                        body.html or f"<pre>{body.text}</pre>")
+            out["email"] = {"sent": True, "to": to}
+        except notify.NotifyError as e:
+            out["email"] = {"sent": False, "error": str(e)}
+
+    if "telegram" in body.channels:
+        chats, errors = [], []
+        try:
+            for sub in notify.require_subscribers(cid):
+                try:
+                    telegram.send_message(sub["chat_id"], body.text)
+                    chats.append(sub["chat_id"])
+                except Exception as e:          # noqa: BLE001
+                    errors.append({"chat_id": sub["chat_id"], "error": str(e)})
+            out["telegram"] = {"sent": bool(chats), "chats": chats, "errors": errors}
+        except notify.NotifyError as e:
+            out["telegram"] = {"sent": False, "chats": [], "error": str(e)}
+
+    ok = any(c and c.get("sent") for c in out.values())
+    return {"ok": ok, **out}
+
+
 @app.post("/notify/run")
-def notify_run(dry_run: bool = Query(True, description="Yubormasdan ko'rish.")):
+def notify_run(request: Request,
+               dry_run: bool = Query(True, description="Yubormasdan ko'rish.")):
     """Bildirishnoma tsiklini qo'lda yurgizadi (standart: dry-run)."""
     try:
-        res = notify.run(dry_run=dry_run)
+        res = notify.run(dry_run=dry_run, company_id=company_id_of(request))
     except notify.NotifyError as e:
         raise HTTPException(status_code=400, detail=str(e))
     # Xabar tanasi (text/html) javobda kerak emas — faqat xulosa
@@ -1167,17 +2218,17 @@ def telegram_bot_info():
 
 
 @app.get("/notify/telegram/subscribers")
-def telegram_subscribers():
+def telegram_subscribers(request: Request):
     """Obunachilar ro'yxati — botga /start bosgan har bir suhbat.
 
     BO'SH ro'yxat XATO EMAS: shunchaki hali hech kim /start bosmagan.
     """
-    return {"subscribers": notify.subscribers(),
+    return {"subscribers": notify.subscribers(company_id_of(request)),
             "ready": notify.subscribers_ready()}
 
 
 @app.post("/notify/telegram/link")
-def telegram_link_create():
+def telegram_link_create(request: Request):
     """Telegramni ulash uchun BIR MARTALIK havola yaratadi.
 
     Foydalanuvchi shu havolani bosadi -> Telegram botni ochadi -> "Start"
@@ -1186,13 +2237,13 @@ def telegram_link_create():
     BO'LMAYDI.
     """
     try:
-        return notify.create_link()
+        return notify.create_link(company_id_of(request))
     except notify.NotifyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/notify/telegram/link/{token}")
-def telegram_link_status(token: str):
+def telegram_link_status(token: str, request: Request):
     """Havola ishlatildimi. Interfeys havolani ochgach shuni qisqa oraliqda
     so'rab turadi va ulanish yakunlanishi bilan ro'yxatni yangilaydi.
 
@@ -1204,7 +2255,9 @@ def telegram_link_status(token: str):
         notify.consume_links()
     except notify.NotifyError:
         pass          # holatni baribir qaytaramiz (quyida `found: false` bo'ladi)
-    return {**notify.link_status(token), "subscribers": notify.subscribers()}
+    company_id = company_id_of(request)
+    return {**notify.link_status(token, company_id),
+            "subscribers": notify.subscribers(company_id)}
 
 
 class SubscriberIn(BaseModel):
@@ -1214,35 +2267,51 @@ class SubscriberIn(BaseModel):
 
 
 @app.put("/notify/telegram/subscribers/{chat_id}")
-def telegram_subscriber_update(chat_id: str, body: SubscriberIn):
+def telegram_subscriber_update(chat_id: str, body: SubscriberIn, request: Request):
     """Obunachiga xabar ketishini yoqadi/o'chiradi."""
+    company_id = company_id_of(request)
     row = db.execute_returning(notify.SUB_SET_ENABLED_SQL,
-                               {"chat_id": chat_id, "enabled": body.enabled})
+                               {"chat_id": chat_id, "enabled": body.enabled,
+                                "company_id": company_id})
     if not row:
         raise HTTPException(status_code=404, detail="Obunachi topilmadi.")
-    return {"subscribers": notify.subscribers()}
+    # KOMPANIYA UZATILADI: so'rov `company_id` bilan chegaralangan,
+    # lekin QAYTARILADIGAN ro'yxat kompaniyasiz olinardi va
+    # `sole_company_id()` ga tushardi.
+    return {"subscribers": notify.subscribers(company_id)}
 
 
 @app.delete("/notify/telegram/subscribers/{chat_id}")
-def telegram_subscriber_delete(chat_id: str):
+def telegram_subscriber_delete(chat_id: str, request: Request):
     """Obunachini ro'yxatdan o'chiradi.
 
     DIQQAT: u botga QAYTA /start yozsa yana qo'shiladi. Butunlay to'xtatish
     uchun `enabled=false` qo'ying — o'chirish faqat ro'yxatni tozalaydi.
     """
-    row = db.execute_returning(notify.SUB_DELETE_SQL, {"chat_id": chat_id})
+    company_id = company_id_of(request)
+    row = db.execute_returning(notify.SUB_DELETE_SQL,
+                               {"chat_id": chat_id,
+                                "company_id": company_id})
     if not row:
         raise HTTPException(status_code=404, detail="Obunachi topilmadi.")
-    return {"subscribers": notify.subscribers()}
+    # KOMPANIYA UZATILADI: so'rov `company_id` bilan chegaralangan,
+    # lekin QAYTARILADIGAN ro'yxat kompaniyasiz olinardi va
+    # `sole_company_id()` ga tushardi.
+    return {"subscribers": notify.subscribers(company_id)}
 
 
 @app.post("/notify/telegram/test")
-def telegram_test(chat_id: Optional[str] = Query(
+def telegram_test(request: Request, chat_id: Optional[str] = Query(
         None, description="Faqat shu obunachiga. Bo'sh — barchasiga.")):
     """Telegram sinov xabari. `notify_sent` ga YOZMAYDI va `telegram_enabled`
-    ni talab qilmaydi — yoqishdan OLDIN tekshirish uchun."""
+    ni talab qilmaydi — yoqishdan OLDIN tekshirish uchun.
+
+    Xabar PLATFORMA TILIDA ketadi (sozlamadagi `lang`) — haqiqiy
+    bildirishnoma bilan bir xil.
+    """
     try:
-        return notify.send_telegram_test(chat_id=chat_id)
+        return notify.send_telegram_test(chat_id=chat_id,
+                                         company_id=company_id_of(request))
     except notify.NotifyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1359,9 +2428,10 @@ def _count_matches(candidates: list, prof: dict) -> int:
 
 
 @app.get("/searches")
-def list_searches():
+def list_searches(request: Request):
     """Barcha saqlangan qidiruvlar + har birida mos ochiq tenderlar soni."""
-    rows = db.query(queries.SEARCHES_LIST_SQL)
+    rows = db.query(queries.SEARCHES_LIST_SQL,
+                    {"company_id": company_id_of(request)})
     if not rows:
         return []
     # Nomzodlarni BIR MARTA olamiz, keyin har qidiruv bo'yicha skorlaymiz
@@ -1373,23 +2443,28 @@ def list_searches():
 
 
 @app.post("/searches", status_code=201)
-def create_search(s: SavedSearchIn):
-    row = db.execute_returning(queries.SEARCH_INSERT_SQL, s.model_dump())
+def create_search(s: SavedSearchIn, request: Request):
+    row = db.execute_returning(queries.SEARCH_INSERT_SQL,
+                               {**s.model_dump(),
+                                "company_id": company_id_of(request)})
     return _shape_search(row)
 
 
 @app.put("/searches/{search_id}")
-def update_search(search_id: int, s: SavedSearchIn):
+def update_search(search_id: int, s: SavedSearchIn, request: Request):
     row = db.execute_returning(queries.SEARCH_UPDATE_SQL,
-                               {**s.model_dump(), "id": search_id})
+                               {**s.model_dump(), "id": search_id,
+                                "company_id": company_id_of(request)})
     if not row:
         raise HTTPException(status_code=404, detail="Qidiruv topilmadi.")
     return _shape_search(row)
 
 
 @app.delete("/searches/{search_id}", status_code=204)
-def delete_search(search_id: int):
-    row = db.execute_returning(queries.SEARCH_DELETE_SQL, {"id": search_id})
+def delete_search(search_id: int, request: Request):
+    row = db.execute_returning(queries.SEARCH_DELETE_SQL,
+                               {"id": search_id,
+                                "company_id": company_id_of(request)})
     if not row:
         raise HTTPException(status_code=404, detail="Qidiruv topilmadi.")
     return None
@@ -1408,6 +2483,11 @@ def _shape_product(r: dict) -> dict:
         "stock_qty": _num(r.get("stock_qty")),
         "stock_unit": r.get("stock_unit"),
         "stock_updated_at": _iso(r.get("stock_updated_at")),
+        # ERP ombori yoqilganda: `stock_qty` = MAVJUD (qoldiq - rezerv),
+        # quyidagi ikkitasi esa tushuntirish uchun ("10 bor, 8 band").
+        # ERP yo'q bo'lsa ular `None` va interfeys ularni ko'rsatmaydi.
+        "stock_physical": _num(r.get("stock_physical")),
+        "stock_reserved": _num(r.get("stock_reserved")),
         "cost_price": _num(r.get("cost_price")),
     }
 
@@ -1458,23 +2538,10 @@ _DOC_TEXT_REASON = {
 }
 
 
-def _product_matches(cand: dict, product: dict) -> Optional[str]:
-    """Tender mahsulotga mos keladimi? -> 'category' | 'name' | None.
-    Kategoriya kuchli signal (roll-up: parent tanlansa ichkilar ham),
-    nom/kalit so'z esa qo'shimcha."""
-    cat = product.get("category_code")
-    if cat:
-        for code in (cand.get("category_codes") or []):
-            if code == cat or code.startswith(cat + "/"):
-                return "category"
-    terms = [product["name"]] + (product.get("keywords") or [])
-    blob = matching._norm(f"{cand.get('name') or ''} {cand.get('goods_blob') or ''}")
-    for t in terms:
-        # _hits — alifbodan qat'i nazar: katalogda "nasos" bo'lsa "Насос"
-        # tovarli tender ham mos keladi (api/translit.py)
-        if t and matching._hits(t, blob):
-            return "name"
-    return None
+#: Qoidaning O'ZI `api/matching.py` da — uni `etl_doc_text.py --catalog` ham
+#: ishlatadi (hujjat qamrovi). Ikki nusxa bo'lmasligi uchun bu yerda faqat
+#: taxallus qoldi (reja_ai_chat.md §15.3.1).
+_product_matches = matching.product_matches
 
 
 def _catalog_candidates(region=None, currency=None, products=None):
@@ -1485,65 +2552,111 @@ def _catalog_candidates(region=None, currency=None, products=None):
 
 
 @app.get("/catalog")
-def list_catalog():
+def list_catalog(request: Request):
     """Katalog mahsulotlari + har birida mos ochiq tenderlar soni."""
-    prods = db.query(queries.CATALOG_LIST_SQL)
+    prods = db.query(queries.CATALOG_LIST_SQL,
+                     {"company_id": company_id_of(request)})
     if not prods:
         return []
+    # QOLDIQNING EGASI — ERP (5B-1). Ro'yxatdagi `stock_qty` ERP jurnalidan
+    # hisoblangan qoldiq bilan almashtiriladi; ERP o'rnatilmagan bo'lsa
+    # Excel importidan qolgan surat qoladi. `api/erp_stock.py`.
+    stock_source = erp_stock.apply_to_products(prods)
     cand = _catalog_candidates()
     out = []
     for p in prods:
         cnt = sum(1 for c in cand if _product_matches(c, p))
-        out.append({**_shape_product(p), "match_count": cnt})
+        # Raqam qayerdan kelgani har qatorда ko'rinadi: interfeys "ombor
+        # jurnalidan" yoki "importdan" deb ochiq aytadi.
+        out.append({**_shape_product(p), "match_count": cnt,
+                    "stock_source": stock_source})
     return out
 
 
 @app.post("/catalog", status_code=201)
-def create_product(p: CatalogItemIn):
-    row = db.execute_returning(queries.CATALOG_INSERT_SQL, p.model_dump())
+def create_product(p: CatalogItemIn, request: Request):
+    row = db.execute_returning(queries.CATALOG_INSERT_SQL,
+                               {**p.model_dump(),
+                                "company_id": company_id_of(request)})
     return _shape_product(row)
 
 
 @app.put("/catalog/{product_id}")
-def update_product(product_id: int, p: CatalogItemIn):
+def update_product(product_id: int, p: CatalogItemIn, request: Request):
+    # `company_id` WHERE bandida ham bor: begona id ni taxmin qilib
+    # tahrirlash mumkin emas — javob 404 bo'ladi (IDOR himoyasi).
     row = db.execute_returning(queries.CATALOG_UPDATE_SQL,
-                               {**p.model_dump(), "id": product_id})
+                               {**p.model_dump(), "id": product_id,
+                                "company_id": company_id_of(request)})
     if not row:
         raise HTTPException(status_code=404, detail="Mahsulot topilmadi.")
     return _shape_product(row)
 
 
 @app.delete("/catalog/{product_id}", status_code=204)
-def delete_product(product_id: int):
-    row = db.execute_returning(queries.CATALOG_DELETE_SQL, {"id": product_id})
+def delete_product(product_id: int, request: Request):
+    row = db.execute_returning(queries.CATALOG_DELETE_SQL,
+                               {"id": product_id,
+                                "company_id": company_id_of(request)})
     if not row:
         raise HTTPException(status_code=404, detail="Mahsulot topilmadi.")
     return None
 
 
 @app.post("/catalog/match")
-def catalog_match(body: CatalogMatchIn):
+def catalog_match(body: CatalogMatchIn, request: Request):
     """Katalogga mos ochiq tenderlar. Kategoriya = asosiy relevantlik,
     nom = qo'shimcha. Har tenderда qaysi mahsulot(lar) mos kelgani ko'rsatiladi."""
-    prods = db.query(queries.CATALOG_LIST_SQL)
+    prods = db.query(queries.CATALOG_LIST_SQL,
+                     {"company_id": company_id_of(request)})
     cand = _catalog_candidates(region=body.region, currency=body.currency,
                                products=body.products + body.services)
 
     matched = []
+    xom = []
     for c in cand:
         hits = [(p, _product_matches(c, p)) for p in prods]
         hits = [(p, how) for p, how in hits if how]
-        if not hits:
-            continue
+        if hits:
+            xom.append((c, hits))
+
+    # MOS POZITSIYALARNI BIR SO'ROVDA olamiz — dalil shu.
+    poz = kodlash.pozitsiya_moslik(
+        company_id_of(request),
+        [c["id"] for c, h in xom if any(how == "kod" for _, how in h)])
+
+    for c, hits in xom:
+        # BALL DALILGA QARAB. Ilgari `category` mosligi 100 berardi va
+        # bu eng katta soxta-moslik manbai edi (o'lchangan: 206 dan 131
+        # tasi shu yo'ldan; "Andijon GES transformatori" -> "Kondensator"
+        # 100 ball). Endi:
+        #   kod — rasmiy tasniflagich, inson tasdiqlagan   -> 100
+        #   nom — matn mosligi, morfologik jihatdan mo'rt  ->  60
+        # Nom uchun 100 BERILMAYDI: "monitor" so'zi "monitoringi" ichida
+        # ham uchraydi va buni matn darajasida ajratib bo'lmaydi
+        # (o'lchandi: qo'shimcha uzunligi to'g'ri va xato holatlarni
+        # ajratmaydi).
+        kod_bor = any(how == "kod" for _, how in hits)
+        p_list = poz.get(c["id"], []) if kod_bor else []
         item = _shape_tender(c)
         item["catalog"] = {
-            "score": 100 if any(how == "category" for _, how in hits) else 70,
-            "products": [p["name"] for p, _ in hits][:5],
-            "by": "category" if any(how == "category" for _, how in hits) else "name",
+            "score": 100 if kod_bor else 60,
+            "by": "kod" if kod_bor else "nom",
+            # DALIL — tenderning QAYSI pozitsiyasi mos kelgani.
+            # Mahsulot nomi emas: bir kodni bir necha mahsulot baham
+            # ko'rishi mumkin va u holda mahsulot nomi taxmin bo'ladi.
+            "positions": [{"pozitsiya": x["pozitsiya"], "mahsulot": x["mahsulot"],
+                           "aniq": x["aniq"], "kod": x["good_code"]}
+                          for x in p_list[:6]],
+            "position_count": len(p_list),
+            # Eski maydon — mos mahsulotlar ro'yxati (moslik yo'nalishi
+            # bo'yicha), interfeysning eski qismi shunga tayanadi.
+            "products": ([x["mahsulot"] for x in p_list][:5] if kod_bor
+                         else [p["name"] for p, _ in hits][:5]),
         }
         matched.append(item)
 
-    # Kategoriya mosligi yuqori, keyin deadline yaqin
+    # Kod mosligi yuqori, keyin deadline yaqin
     matched.sort(key=lambda it: (-it["catalog"]["score"], it["close_at"] or "9999"))
     total = len(matched)
     page = matched[body.offset: body.offset + body.limit]
@@ -1551,13 +2664,15 @@ def catalog_match(body: CatalogMatchIn):
 
 
 @app.get("/catalog/new-count")
-def catalog_new_count():
+def catalog_new_count(request: Request):
     """Xabarnoma belgisi: katalogga mos VA oxirgi ko'rilgandan keyin e'lon
     qilingan ochiq tenderlar soni (ilova-ichi 'N yangi')."""
-    prods = db.query(queries.CATALOG_LIST_SQL)
+    company_id = company_id_of(request)
+    prods = db.query(queries.CATALOG_LIST_SQL, {"company_id": company_id})
     if not prods:
         return {"new": 0, "total": 0}
-    last_seen = db.scalar(queries.CATALOG_STATE_GET_SQL)
+    last_seen = db.scalar(queries.CATALOG_STATE_GET_SQL,
+                          {"company_id": company_id})
     cand = _catalog_candidates()
     total = new = 0
     for c in cand:
@@ -1571,22 +2686,153 @@ def catalog_new_count():
 
 
 @app.post("/catalog/seen", status_code=204)
-def catalog_seen():
+def catalog_seen(request: Request):
     """Katalog moslarini 'ko'rildi' deb belgilaydi (yangi-belgisi tozalanadi)."""
-    db.execute_returning(queries.CATALOG_SEEN_SQL)
+    db.execute_returning(queries.CATALOG_SEEN_SQL,
+                         {"company_id": company_id_of(request)})
     return None
 
 
+# ---------------------------------------------------------------------------
+# KOD-ASOSLI MOSLASHTIRISH — `api/kodlash.py`
+#
+# Matn bo'yicha moslashtirish TILGA BOG'LIQ va shu sababli yiqiladi:
+# korpus rus/kirillda, foydalanuvchi o'zbek-lotinda yozadi. Rasmiy
+# tasniflagich (`tender_good.good_code`) esa tilga bog'liq emas va
+# qamrovi 100%.
+#
+# Oqim: taklif -> INSON tasdig'i -> moslik. Tasdiqlanmagan taklif
+# hech qachon moslikka aylanmaydi (`v_catalog_code_active`).
+# ---------------------------------------------------------------------------
+@app.get("/catalog/{product_id}/kod-takliflar")
+def kod_takliflar(product_id: int, request: Request, limit: int = 6):
+    """Mahsulot uchun nomzod kodlar (tasdiqlash ekrani uchun).
+
+    IKKI DARAJA qaytadi va bu ATAYLAB:
+
+      `keng` (5 belgi, masalan `28.25`) — guruh. Ko'proq tender topadi,
+             lekin begonasini ham olib keladi.
+      `aniq` (8 belgi, masalan `28.25.13`) — sinf. Kamroq, lekin toza.
+
+    NEGA TANLOVNI ODAMGA BERAMIZ: o'lchangan holat — "Tibbiy muzlatgich"
+    uchun `28.25` guruhi "sanoat sovutish VA VENTILYATSIYA uskunalari"ni
+    qamraydi, shuning uchun lokomotiv ta'miri tenderidagi "Калорифер"
+    ham mos chiqadi. `28.25.13` (Чиллер, issiqlik nasosi) esa buni
+    ajratadi. Qaysi kenglik to'g'ri ekanini FAQAT broker biladi —
+    tizim taxmin qilmasligi kerak.
+
+    Har taklifda `n_tender_open` bor: tasdiqlash NIMAGA olib kelishini
+    inson OLDINDAN ko'radi. Ball ko'rsatilmaydi — u RRF yig'indisi,
+    foiz emas.
+    """
+    cid = company_id_of(request)
+    p = db.query_one(
+        "SELECT id, name, category_code, keywords FROM catalog_product "
+        "WHERE id = %(id)s AND company_id = %(c)s", {"id": product_id, "c": cid})
+    if not p:
+        raise HTTPException(404, "Mahsulot topilmadi.")
+
+    keng = kodlash.takliflar(dict(p), level=5, limit=limit)
+    aniq = kodlash.takliflar(dict(p), level=8, limit=limit)
+    kodlash.taklif_yoz(cid, product_id, keng + aniq)
+
+    # Inson allaqachon qaror qilganlarini belgilab qaytaramiz.
+    qaror = {r["code"]: r for r in db.query(
+        "SELECT code, tasdiqlandi, rad_etildi FROM catalog_product_code "
+        "WHERE product_id = %(p)s AND company_id = %(c)s",
+        {"p": product_id, "c": cid})}
+    for x in keng + aniq:
+        q = qaror.get(x["code"]) or {}
+        x["tasdiqlandi"] = _iso(q.get("tasdiqlandi"))
+        x["rad_etildi"] = _iso(q.get("rad_etildi"))
+    return {"product_id": product_id, "keng": keng, "aniq": aniq,
+            # Eski maydon — birinchi versiyaga tayangan chaqiruvchilar uchun.
+            "takliflar": keng}
+
+
+class KodQarorIn(BaseModel):
+    code: str
+
+
+@app.post("/catalog/{product_id}/kod-tasdiq", status_code=204)
+def kod_tasdiq(product_id: int, body: KodQarorIn, request: Request):
+    """Inson kodni TASDIQLAYDI. Kim tasdiqlagani yozib boriladi."""
+    acc = current_account(request)
+    kim = (acc.get("username") or "").strip()
+    if not kim:
+        # SERVICE kaliti (ERP) odam emas — tasdiq qo'ya olmaydi.
+        raise HTTPException(403, "Tasdiqni faqat kirgan foydalanuvchi qo'ya oladi.")
+    if not kodlash.tasdiqla(company_id_of(request), product_id, body.code, kim):
+        raise HTTPException(404, "Bog'lanish topilmadi.")
+    return None
+
+
+@app.post("/catalog/{product_id}/kod-rad", status_code=204)
+def kod_rad(product_id: int, body: KodQarorIn, request: Request):
+    """Inson taklifni RAD etadi (qator qoladi — takror taklif chiqmasin)."""
+    if not kodlash.rad_et(company_id_of(request), product_id, body.code):
+        raise HTTPException(404, "Bog'lanish topilmadi.")
+    return None
+
+
+@app.get("/catalog/kodlash-holati")
+def kodlash_holati(request: Request):
+    """Katalogning nechta mahsuloti kodlangan.
+
+    `kodsiz` — moslashtirishda QATNASHMAYDIGAN mahsulotlar. Interfeys
+    buni ANIQ ko'rsatishi shart: "moslik topilmadi" va "katalog hali
+    kodlanmagan" butunlay boshqa holatlar.
+    """
+    cid = company_id_of(request)
+    h = kodlash.holat(cid)
+    h["kodsiz_mahsulotlar"] = kodlash.kodsiz_mahsulotlar(cid)
+    return h
+
+
+@app.get("/match/kod")
+def match_kod(request: Request, limit: int = 200, only_open: bool = True):
+    """Tasdiqlangan kodlar bo'yicha mos tenderlar (POZITSIYA darajasida).
+
+    Har qatorda: nechta pozitsiya mos keldi, qaysi mahsulot va qaysi
+    pozitsiya — ya'ni sabab ko'rinadi, "qora quti" emas.
+    """
+    cid = company_id_of(request)
+    rows = kodlash.moslik(cid, only_open=only_open, limit=limit)
+    if not rows:
+        # BO'SH NATIJANING SABABI AYTILADI. Aks holda foydalanuvchi
+        # "mos tender yo'q" deb o'ylaydi, aslida katalog kodlanmagan.
+        return {"items": [], "holat": kodlash.holat(cid)}
+    tid = [r["tender_id"] for r in rows]
+    tlar = {t["id"]: t for t in db.query(
+        queries.match_candidates_sql("WHERE t.id = ANY(%(ids)s)", cap=len(tid) + 1),
+        {"ids": tid})}
+    items = []
+    for r in rows:
+        t = tlar.get(r["tender_id"])
+        if not t:
+            continue
+        items.append({**_shape_tender(t), "kod_moslik": {
+            "pozitsiya": r["mos_pozitsiya"],
+            "summa": float(r["mos_summa"]) if r["mos_summa"] is not None else None,
+            "mahsulotlar": r["mahsulotlar"],
+            "pozitsiyalar": (r["pozitsiyalar"] or [])[:6],
+            "kodlar": r["kodlar"],
+        }})
+    return {"items": items, "holat": kodlash.holat(cid)}
+
+
 @app.get("/profile")
-def get_profile():
+def get_profile(request: Request):
     """Faol kompaniya profili (yo'q bo'lsa null)."""
-    return _shape_profile(db.query_one(queries.PROFILE_GET_SQL))
+    return _shape_profile(db.query_one(
+        queries.PROFILE_GET_SQL, {"company_id": company_id_of(request)}))
 
 
 @app.put("/profile")
-def put_profile(p: ProfileIn):
+def put_profile(p: ProfileIn, request: Request):
     """Profilni saqlaydi (bitta faol profil — bor bo'lsa yangilanadi)."""
     row = db.execute_returning(queries.PROFILE_UPSERT_SQL, {
+        "company_id": company_id_of(request),
         "contact_name": p.contact_name,
         "email": p.email,
         "phone": p.phone,
@@ -1647,3 +2893,139 @@ def match(body: MatchIn):
         "candidate_cap": MATCH_CAP,
         "items": page,
     }
+
+
+# ---------------------------------------------------------------------------
+# AI-CHAT (J4) — RAG + tool-calling
+#
+# Mantiq `api/ai_chat.py` da. Bu yerda faqat HTTP qatlami: kimlik, oqim va
+# xatoni HTTP kodiga aylantirish.
+#
+# `company_id` SESSIYADAN olinadi va `ChatContext` ga qo'yiladi — model
+# uni argument sifatida BERA OLMAYDI. Bu prompt injection'ga qarshi
+# yagona ARXITEKTURAVIY himoya (reja_ai_chat.md §8, 3-qatlam).
+#
+# PUBLIC_PATHS ga QO'SHILMAYDI — barchasi `gate()` orqali o'tadi.
+# ---------------------------------------------------------------------------
+class ChatIn(BaseModel):
+    """Chat so'rovi.
+
+    `company_id` ATAYLAB YO'Q — u sessiyadan olinadi. Agar bu yerda
+    bo'lsa, foydalanuvchi (yoki hujjat ichidagi injection orqali model)
+    boshqa kompaniyaning ma'lumotini so'rab olishi mumkin bo'lardi.
+    """
+    message: str
+    session_id: Optional[str] = None
+    tender_id: Optional[int] = None
+    lang: Optional[str] = None
+
+    @field_validator("message")
+    @classmethod
+    def _bosh_emas(cls, v):
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Savol bo'sh bo'lmasligi kerak.")
+        if len(v) > 8000:
+            raise ValueError("Savol juda uzun (8000 belgidan ko'p).")
+        return v
+
+
+def _chat_tayyor() -> None:
+    """Sxema qo'llanganmi. Qo'llanmagan bo'lsa ANIQ xato — 500 emas."""
+    if not ai_chat.schema_ready():
+        raise HTTPException(
+            status_code=503,
+            detail=("AI-Chat sxemasi qo'llanmagan. Bajaring: "
+                    "psql -d xtxarid -f schema_patch_ai_chat.sql"))
+
+
+@app.post("/chat")
+async def chat(body: ChatIn, request: Request):
+    """AI-Chat — javob SSE oqimi bilan qaytadi.
+
+    Hodisalar: `meta` · `token` · `tool` · `citation` · `done` · `error`.
+    Batafsil: `api/ai_chat.stream_chat()`.
+
+    OQIM NEGA: tahlil 10-60 soniya davom etishi mumkin (hujjat qidiruvi,
+    tool chaqiruvlari). Oddiy javobda foydalanuvchi bo'sh ekranga
+    qarab turardi va nima bo'layotganini bilmasdi.
+    """
+    _chat_tayyor()
+    company_id = company_id_of(request)
+
+    if body.session_id:
+        try:
+            s = ai_chat.load_session(body.session_id, company_id)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+    else:
+        sid = ai_chat.create_session(company_id, body.tender_id,
+                                     body.message[:120],
+                                     i18n.norm_lang(body.lang))
+        s = {"id": sid, "tender_id": body.tender_id,
+             "lang": i18n.norm_lang(body.lang)}
+
+    ctx = ai_chat.ChatContext(
+        company_id=company_id,          # <-- SESSIYADAN, modeldan EMAS
+        session_id=str(s["id"]),
+        lang=s.get("lang") or i18n.DEFAULT_LANG,
+        tender_id=s.get("tender_id"),
+    )
+    profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL,
+                                          {"company_id": company_id}))
+
+    return StreamingResponse(
+        ai_chat.stream_chat(str(s["id"]), body.message, ctx, profile),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # Proksi (nginx) oqimni BUFERLAMASIN — aks holda javob
+            # oxirigacha ko'rinmaydi va oqimning ma'nosi yo'qoladi.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/chat/sessions")
+def chat_sessions(request: Request,
+                  limit: int = Query(50, ge=1, le=200)):
+    """Suhbatlar ro'yxati (arxivlanmaganlar, oxirgi faollik bo'yicha)."""
+    _chat_tayyor()
+    return ai_chat.list_sessions(company_id_of(request), limit=limit)
+
+
+@app.get("/chat/sessions/{session_id}")
+def chat_history(session_id: str, request: Request):
+    """Bitta suhbat tarixi + iqtiboslar.
+
+    Xatoli javoblar ham qaytadi (`error` maydoni bilan) — "jimgina
+    o'tkazib yuborilmaydi" tamoyili: foydalanuvchi nima bo'lganini ko'rsin.
+    """
+    _chat_tayyor()
+    company_id = company_id_of(request)
+    try:
+        s = ai_chat.load_session(session_id, company_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {"session": s, "messages": ai_chat.messages(session_id)}
+
+
+@app.delete("/chat/sessions/{session_id}", status_code=204)
+def chat_archive(session_id: str, request: Request):
+    """Suhbatni arxivlaydi. O'CHIRMAYDI — jurnal (`chat_tool_call`) va
+    xarajat hisobi (`ai_usage`) tekshirish uchun kerak bo'lishi mumkin."""
+    _chat_tayyor()
+    if not ai_chat.archive_session(session_id, company_id_of(request)):
+        raise HTTPException(status_code=404, detail="Suhbat topilmadi.")
+    return None
+
+
+@app.get("/chat/usage")
+def chat_usage(request: Request):
+    """Joriy oydagi AI sarfi va limit.
+
+    Interfeys buni ko'rsatadi: chat HAR SAVOLDA pul sarflaydi va
+    foydalanuvchi qancha qolganini bilishi kerak (reja §9).
+    """
+    _chat_tayyor()
+    return ai_chat.spend(company_id_of(request))

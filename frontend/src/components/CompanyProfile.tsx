@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '@/api'
 import { Label, TagField } from './CatalogView'
+import { useT } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -85,6 +86,7 @@ interface CompanyProfileProps {
 export default function CompanyProfile({
   section = 'profile', onSaved, onProgress,
 }: CompanyProfileProps) {
+  const t = useT()
   const [p, setP] = useState<FormState | null>(null)
   const [regions, setRegions] = useState<Region[]>([])
   const [saving, setSaving] = useState(false)
@@ -127,9 +129,11 @@ export default function CompanyProfile({
         min_cost: num(cur.min_cost),
         max_cost: num(cur.max_cost),
       })
-      setMsg({ ok: true, text: 'Saqlandi' })
+      setMsg({ ok: true, text: t('cp.saved') })
       onSaved?.(saved)
-    } catch (e) { setMsg({ ok: false, text: 'Xatolik: ' + (e as Error).message }) }
+    } catch (e) {
+      setMsg({ ok: false, text: t('common.errorWith', { msg: (e as Error).message }) })
+    }
     finally { setSaving(false) }
   }
 
@@ -138,27 +142,28 @@ export default function CompanyProfile({
       {/* ---------- PROFIL: aloqa ma'lumotlari ---------- */}
       {section === 'profile' && (
         <>
-          <Group title="Foydalanuvchi">
+          <Group title={t('cp.gUser')}>
             <div className="grid gap-3 sm:grid-cols-2">
-              <Label text="Ism">
+              <Label text={t('cp.fName')}>
                 <Input value={p.contact_name} onChange={set('contact_name')}
-                  placeholder="Temur Ibragimov" />
+                  placeholder={t('cp.fNamePh')} />
               </Label>
-              <Label text="Lavozim">
-                <Input value={p.position} onChange={set('position')} placeholder="Direktor" />
+              <Label text={t('cp.fPosition')}>
+                <Input value={p.position} onChange={set('position')}
+                  placeholder={t('cp.fPositionPh')} />
               </Label>
-              <Label text="Email">
+              <Label text={t('cp.fEmail')}>
                 <Input type="email" value={p.email} onChange={set('email')}
-                  placeholder="ism@kompaniya.uz" />
+                  placeholder={t('cp.fEmailPh')} />
               </Label>
-              <Label text="Telefon">
+              <Label text={t('cp.fPhone')}>
                 <Input type="tel" value={p.phone} onChange={set('phone')}
                   placeholder="+998 90 123 45 67" />
               </Label>
             </div>
           </Group>
-          <p className="mt-3 text-[12px] text-muted-foreground">
-            Bildirishnoma manzili bo‘sh bo‘lsa xabar shu emailga ketadi.
+          <p className="mt-3 text-caption text-muted-foreground">
+            {t('cp.emailNote')}
           </p>
         </>
       )}
@@ -166,26 +171,26 @@ export default function CompanyProfile({
       {/* ---------- KOMPANIYA: kim siz va nima qila olasiz ---------- */}
       {section === 'company' && (
         <>
-          <Group title="Faoliyat">
+          <Group title={t('cp.gActivity')}>
             <div className="grid gap-3 sm:grid-cols-[1fr_2fr]">
-              <Label text="Kompaniya nomi">
-                <Input value={p.name} onChange={set('name')} placeholder="“Alfa Med” MChJ" />
+              <Label text={t('cp.fCompany')}>
+                <Input value={p.name} onChange={set('name')} placeholder={t('cp.fCompanyPh')} />
               </Label>
-              <Label text="Faoliyatingiz">
+              <Label text={t('cp.fAbout')}>
                 <Input value={p.about} onChange={set('about')}
-                  placeholder="Tibbiy uskunalar yetkazib berish va montaj" />
+                  placeholder={t('cp.fAboutPh')} />
               </Label>
             </div>
           </Group>
 
-          <Group n="3" title="Sertifikat va litsenziyalar">
+          <Group n="3" title={t('cp.gCerts')}>
             <Tags value={p.certificates} onChange={(v) => setP({ ...cur, certificates: v })}
-              placeholder="ISO 9001… (Enter)" />
+              placeholder={t('cp.gCertsPh')} />
           </Group>
 
-          <Group n="9" title="Xavfsizlik ruxsatnomalari">
+          <Group n="9" title={t('cp.gClear')}>
             <Tags value={p.clearances} onChange={(v) => setP({ ...cur, clearances: v })}
-              placeholder="davlat siri ruxsati… (Enter)" />
+              placeholder={t('cp.gClearPh')} />
           </Group>
         </>
       )}
@@ -193,14 +198,13 @@ export default function CompanyProfile({
       {/* ---------- SALOHIYAT: qanchani va qayerda uddalaysiz ---------- */}
       {section === 'capacity' && (
         <>
-          <Group n="4" title="Moliyaviy salohiyat">
+          <Group n="4" title={t('cp.gFinance')}>
             <div className="grid gap-3 sm:grid-cols-[2fr_1fr]">
-              <Label text="Eng katta shartnoma"
-                note="Qidiruv byudjeti emas — real bajarish qobiliyati.">
+              <Label text={t('cp.fMaxContract')} note={t('cp.fMaxContractNote')}>
                 <Input className="tabular" type="number" min="0" value={p.max_contract_value}
                   onChange={set('max_contract_value')} placeholder="500000000" />
               </Label>
-              <Label text="Valyuta">
+              <Label text={t('cp.fCurrency')}>
                 <Select value={p.max_contract_currency || 'UZS'}
                   onValueChange={(v) => setP({ ...cur, max_contract_currency: v })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
@@ -213,40 +217,40 @@ export default function CompanyProfile({
             </div>
           </Group>
 
-          <Group n="5,6" title="Tajriba va muddat">
+          <Group n="5,6" title={t('cp.gExp')}>
             <div className="grid gap-3 sm:grid-cols-2">
-              <Label text="Tajriba (yil)">
+              <Label text={t('cp.fExpYears')}>
                 <Input className="tabular" type="number" min="0" value={p.experience_years}
                   onChange={set('experience_years')} placeholder="5" />
               </Label>
-              <Label text="Bajarish muddati (kun)">
+              <Label text={t('cp.fLeadTime')}>
                 <Input className="tabular" type="number" min="0" value={p.lead_time_days}
                   onChange={set('lead_time_days')} placeholder="30" />
               </Label>
             </div>
           </Group>
 
-          <Group n="8" title="Resurs">
+          <Group n="8" title={t('cp.gResource')}>
             <div className="grid gap-3 sm:grid-cols-[1fr_2fr]">
-              <Label text="Xodimlar soni">
+              <Label text={t('cp.fEmployees')}>
                 <Input className="tabular" type="number" min="0" value={p.employees}
                   onChange={set('employees')} placeholder="25" />
               </Label>
-              <Label text="Texnika va brigadalar">
+              <Label text={t('cp.fCapacityNote')}>
                 <Input value={p.capacity_note} onChange={set('capacity_note')}
-                  placeholder="2 ta montaj brigadasi, o‘z ombori" />
+                  placeholder={t('cp.fCapacityNotePh')} />
               </Label>
             </div>
           </Group>
 
-          <Group n="7" title="Hududlar">
+          <Group n="7" title={t('cp.gRegions')}>
             <div className="flex flex-wrap gap-1.5">
               {regions.map((r) => {
                 const on = p.regions.includes(r.area_id)
                 return (
                   <button key={r.area_id} type="button"
                     className={cn(
-                      'rounded-full border px-3 py-1 text-[12.5px] transition-colors',
+                      'rounded-full border px-3 py-1 text-caption transition-colors',
                       on
                         ? 'border-primary bg-secondary font-semibold text-primary'
                         : 'border-border bg-card hover:bg-accent',
@@ -261,7 +265,7 @@ export default function CompanyProfile({
                 )
               })}
             </div>
-            <span className="mt-1.5 block text-[11px] text-muted-foreground">Bo‘sh — cheklovsiz.</span>
+            <span className="mt-1.5 block text-micro text-muted-foreground">{t('cp.regionsHint')}</span>
           </Group>
         </>
       )}
@@ -269,17 +273,17 @@ export default function CompanyProfile({
       {/* ---------- TENDER MEZONLARI: qaysi tenderni olasiz ---------- */}
       {section === 'criteria' && (
         <>
-          <Group n="10,11" title="Summa va foyda">
+          <Group n="10,11" title={t('cp.gAmount')}>
             <div className="grid gap-3 sm:grid-cols-3">
-              <Label text="Eng kam summa">
+              <Label text={t('cp.fMinCost')}>
                 <Input className="tabular" type="number" min="0" value={p.min_cost}
                   onChange={set('min_cost')} placeholder="10000000" />
               </Label>
-              <Label text="Eng ko‘p summa">
+              <Label text={t('cp.fMaxCost')}>
                 <Input className="tabular" type="number" min="0" value={p.max_cost}
                   onChange={set('max_cost')} placeholder="800000000" />
               </Label>
-              <Label text="Minimal foyda (%)">
+              <Label text={t('cp.fMinMargin')}>
                 <Input className="tabular" type="number" min="0" max="100" step="0.5"
                   value={p.min_margin_percent} onChange={set('min_margin_percent')}
                   placeholder="15" />
@@ -287,19 +291,19 @@ export default function CompanyProfile({
             </div>
           </Group>
 
-          <Group n="1" title="O‘z cheklovlaringiz">
+          <Group n="1" title={t('cp.gConstraints')}>
             <Input value={p.constraints_note} onChange={set('constraints_note')}
-              placeholder="avans talab qilamiz; kafolat 12 oydan oshmaydi" />
+              placeholder={t('cp.gConstraintsPh')} />
           </Group>
         </>
       )}
 
       <div className="mt-5 flex items-center gap-3 border-t pt-4">
         <Button onClick={save} disabled={saving}>
-          {saving ? 'Saqlanmoqda…' : 'Saqlash'}
+          {saving ? t('common.saving') : t('common.save')}
         </Button>
         {msg && (
-          <span className={cn('text-[13px]', msg.ok ? 'text-ok' : 'text-urgent')}>{msg.text}</span>
+          <span className={cn('text-body', msg.ok ? 'text-ok-strong' : 'text-urgent-strong')}>{msg.text}</span>
         )}
       </div>
     </div>
@@ -311,12 +315,13 @@ function Group({ n, title, children }: {
   title: string
   children: React.ReactNode
 }) {
+  const t = useT()
   return (
     <div className="border-b border-border-soft py-3 last:border-0">
-      <div className="mb-2 flex items-center gap-2 text-[11px] font-bold text-muted-foreground">
+      <div className="mb-2 flex items-center gap-2 text-micro font-semibold text-muted-foreground">
         {n && (
-          <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-secondary px-1.5 text-[11px] text-primary"
-            title="Go/No-Go mezoni">{n}</span>
+          <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-secondary px-1.5 text-micro text-primary"
+            title={t('cp.criterionTitle')}>{n}</span>
         )}
         {title}
       </div>

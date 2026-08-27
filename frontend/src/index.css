@@ -1,121 +1,180 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
 
+/* Shrift: IBM Plex Sans — YAGONA oila, butun ilovada. `wght.css` —
+   o'zgaruvchan og'irlik o'qi, hamma subsetlar bilan; brauzer
+   `unicode-range` bo'yicha FAQAT kerakligini yuklaydi (ruscha
+   ko'rsatilganda kirill, aks holda yo'q). */
+@import '@fontsource-variable/ibm-plex-sans/wght.css';
+
 /* =============================================================================
-   TENDER AI — Tailwind v4 + Vengeance UI (shadcn registry) mavzusi
+   TENDER AI — dizayn tokenlari
    -----------------------------------------------------------------------------
-   RANGLAR O'ZGARMADI. Bu yerdagi qiymatlar avvalgi qo'lda yozilgan
-   `styles.css` :root palitrasidan bir xil ko'chirildi — migratsiya
-   KO'RINISHNI emas, QURILISH USULINI o'zgartiradi.
+   Bu fayl ilovaning YAGONA manbasi: rang, o'lcham, shrift va harakat.
+   Komponentlarda `text-[13px]` kabi o'zboshimcha qiymatlar YOZILMAYDI —
+   faqat shu yerdagi pog'onalar (`text-body`, `text-caption`, ...).
 
-     --accent #2b5cc4  -> --primary
-     --bg     #f6f7fb  -> --background
-     --surface#ffffff  -> --card / --popover
-     --text   #1a2233  -> --foreground
-     --muted  #7a8397  -> --muted-foreground
-     --urgent #dc2626  -> --destructive
-     --ok     #16a34a  -> --ok (qo'shimcha token)
-     --soon   #d97706  -> --soon (qo'shimcha token)
-
-   Vengeance UI komponentlari `bg-primary`, `text-muted-foreground`,
-   `ring-ring` kabi shadcn tokenlarini kutadi — shuning uchun nomlar
-   shadcn konvensiyasida, qiymatlar esa bizniki.
+   NEGA: avval 14 xil o'zboshimcha shrift o'lchami ishlatilgan edi (13, 12.5,
+   12, 11.5, 11 px — bir-biridan yarim piksel farq bilan). Bunday "pog'onasiz"
+   tipografika ilovani yig'ma va tasodifiy ko'rsatadi.
    ============================================================================= */
 
 @custom-variant dark (&:is(.dark *));
 
-:root {
-  --radius: 0.625rem;
+/* ---- RANG TIZIMI -----------------------------------------------------------
+   Hamma rang OKLCH da qurilgan: har ROL uchun yorug'lik (L) qat'iy, ottenka (H)
+   o'zgaradi. Shu sababli hech bir holat boshqasidan "balandroq" chiqmaydi.
 
-  --background: #f6f7fb;
-  --foreground: #1a2233;
+   NEGA QAYTA QURILDI: avvalgi qiymatlar Tailwind'ning standart palitrasidan
+   olingan edi (#16a34a = green-600, #dc2626 = red-600, #d97706 = amber-600,
+   #dcfce7 = green-100 ...). Ular bir-biri bilan hech qanday aloqasi yo'q,
+   alohida-alohida tanlangan ranglar edi — o'lchab ko'rilganda:
+
+       ok      L 0.627  C 0.170
+       soon    L 0.666  C 0.157
+       urgent  L 0.577  C 0.215     <- eng quyuq VA eng to'yingan
+
+   ya'ni qizil ikkalasidan ham kuchli, sariq esa eng och. Yumshoq fonlarda
+   farq yanada yomon edi: urgent-soft C=0.013, soon-soft C=0.058 — bir xil
+   rolda, lekin to'rt baravar boshqa kuchda.
+
+   DIQQAT IYERARXIYASI — asosiy g'oya.
+   Uchta bir xil baland "svetofor" rangi o'rniga, to'yinganlik SHOSHILINCHLIK
+   bilan o'sadi. Ro'yxatdagi qatorlarning aksariyati "muddat yetarli" holatida
+   va ular deyarli rangsiz turadi; haqiqatan bugun tugaydigani esa yolg'iz
+   o'zi ko'zga tashlanadi. Avval har qator bir xil baqirar, natijada
+   ta'kidlash o'z ma'nosini yo'qotardi.
+
+       ok      C 0.016 / 0.072 / 0.105   (fon / matn / to'ldirish)
+       soon    C 0.040 / 0.098 / 0.128
+       urgent  C 0.055 / 0.140 / 0.180
+
+   Neytral ranglar ham brend ottenkasidan (H 263) juda past C bilan olingan —
+   kulrangi ilovaning ko'ki bilan bitta oilada.
+
+   HAMMA JUFTLIK O'LCHANGAN: matn 4.5:1 dan, nuqta/to'ldirish 3:1 dan past
+   emas — yorug'da ham, qorong'ida ham.
+   ---------------------------------------------------------------------------- */
+
+:root {
+  --radius: 0.5rem;
+
+  --background: #f6f8fc;
+  --foreground: #1d2434;
 
   --card: #ffffff;
-  --card-foreground: #1a2233;
+  --card-foreground: #1d2434;
   --popover: #ffffff;
-  --popover-foreground: #1a2233;
+  --popover-foreground: #1d2434;
 
-  --primary: #2b5cc4;
+  --primary: #335eb7;
   --primary-foreground: #ffffff;
 
-  --secondary: #edf1fa;
-  --secondary-foreground: #2b5cc4;
+  --secondary: #e6efff;
+  --secondary-foreground: #335eb7;
 
-  --muted: #f8f9fd;
-  --muted-foreground: #7a8397;
+  --muted: #f3f6fb;
+  --muted-foreground: #616978;
 
-  --accent: #edf1fa;
-  --accent-foreground: #2b5cc4;
+  --accent: #e6efff;
+  --accent-foreground: #335eb7;
 
-  --destructive: #dc2626;
+  /* Xavfli amal tugmasi — `urgent-strong` bilan bir xil quyuqlikda, oq
+     matn 8.3:1. Rozetkadagi qizil bilan bitta oilada. */
+  --destructive: #902828;
   --destructive-foreground: #ffffff;
 
-  --border: #e6e9f0;
-  --input: #e6e9f0;
-  --ring: #2b5cc4;
+  --border: #e1e5ed;
+  --border-soft: #eceff5;
+  --input: #ced4de;
+  --ring: #335eb7;
 
-  /* Loyihaga xos qo'shimcha holatlar — shadcn'da bunday token yo'q, lekin
-     muddat/holat rangi butun ilovada ishlatiladi (deadline, status, moslik). */
-  --ok: #16a34a;
-  --ok-soft: #dcfce7;
-  --soon: #d97706;
-  --soon-soft: #fef3c7;
-  --urgent: #dc2626;
-  --urgent-soft: #fef2f2;
-  --border-soft: #eef1f6;
+  /* Holat: `-soft` = sirt, `-strong` = MATN (4.5:1+), tayanchsiz = nuqta/to'ldirish */
+  --ok: #419368;
+  --ok-strong: #2b5f43;
+  --ok-soft: #ebf7f0;
+  --soon: #ae7200;
+  --soon-strong: #714900;
+  --soon-soft: #fff2e1;
+  --urgent: #d74745;
+  --urgent-strong: #902828;
+  --urgent-soft: #fff0ee;
 
-  /* Recharts seriyalari (StatsView). Asosiy rangdan boshlanadi. */
-  --chart-1: #2b5cc4;
-  --chart-2: #16a34a;
-  --chart-3: #d97706;
-  --chart-4: #7c3aed;
-  --chart-5: #0891b2;
+  /* Grafik seriyalari — QAT'IY TARTIBDA, hech qachon aylantirilmaydi.
+     Birinchisi brend ko'ki: grafikning asosiy seriyasi ilovaning o'zi bilan
+     bog'lanadi. Rang ko'rish buzilishi (deutan/protan/tritan) va fon bilan
+     kontrast bo'yicha tekshirilgan; qizil ATAYIN yo'q — u holat rangi va
+     seriya sifatida "xavf" deb o'qilardi. */
+  --chart-1: #335fbc;
+  --chart-2: #b57a00;
+  --chart-3: #872b78;
+  --chart-4: #218f56;
 
-  --sidebar: #ffffff;
-  --sidebar-foreground: #1a2233;
-  --sidebar-primary: #2b5cc4;
+  --sidebar: #fafcff;
+  --sidebar-foreground: #1d2434;
+  --sidebar-primary: #335eb7;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #edf1fa;
-  --sidebar-accent-foreground: #2b5cc4;
-  --sidebar-border: #e6e9f0;
-  --sidebar-ring: #2b5cc4;
+  --sidebar-accent: #e6efff;
+  --sidebar-accent-foreground: #335eb7;
+  --sidebar-border: #e1e5ed;
+  --sidebar-ring: #335eb7;
 }
 
-/* Qorong'i mavzu hozircha YOQILMAGAN (ilovada almashtirgich yo'q), lekin
-   Vengeance UI komponentlari `.dark` variantiga tayanadi — tokenlar bo'lmasa
-   ular qorong'i rejimda o'qib bo'lmas holga kelardi. */
+/* Qorong'i mavzu qadamlari ALOHIDA tanlangan — yorug'ining avtomatik
+   ag'darilishi emas. Qorong'i fonda bir xil ottenka boshqacha o'qiladi:
+   to'yinganlik oshiriladi, yorug'lik esa fon bilan farqni saqlaydi. */
 .dark {
-  --background: #0f1420;
-  --foreground: #e8ebf2;
-  --card: #151b2b;
-  --card-foreground: #e8ebf2;
-  --popover: #151b2b;
-  --popover-foreground: #e8ebf2;
-  --primary: #5b87e8;
-  --primary-foreground: #0f1420;
-  --secondary: #1e2740;
-  --secondary-foreground: #cdd7ef;
-  --muted: #1a2233;
-  --muted-foreground: #98a2ba;
-  --accent: #1e2740;
-  --accent-foreground: #cdd7ef;
-  --destructive: #f87171;
-  --destructive-foreground: #0f1420;
-  --border: #253049;
-  --input: #253049;
-  --ring: #5b87e8;
-  --ok: #4ade80;
-  --ok-soft: #14331f;
-  --soon: #fbbf24;
-  --soon-soft: #33260c;
-  --urgent: #f87171;
-  --urgent-soft: #331616;
-  --border-soft: #1e2740;
-  --sidebar: #131926;
-  --sidebar-foreground: #e8ebf2;
-  --sidebar-accent: #1e2740;
-  --sidebar-accent-foreground: #cdd7ef;
-  --sidebar-border: #253049;
+  --background: #11151e;
+  --foreground: #e6eaf0;
+
+  --card: #1a202a;
+  --card-foreground: #e6eaf0;
+  --popover: #1a202a;
+  --popover-foreground: #e6eaf0;
+
+  --primary: #79a3f6;
+  --primary-foreground: #11151e;
+
+  --secondary: #293346;
+  --secondary-foreground: #cddcf8;
+
+  --muted: #242933;
+  --muted-foreground: #a0a8b6;
+
+  --accent: #293346;
+  --accent-foreground: #cddcf8;
+
+  --destructive: #f67972;
+  --destructive-foreground: #11151e;
+
+  --border: #2f3642;
+  --border-soft: #262b36;
+  --input: #3b4352;
+  --ring: #79a3f6;
+
+  --ok: #5abb88;
+  --ok-strong: #91dab0;
+  --ok-soft: #1b2a21;
+  --soon: #d9952a;
+  --soon-strong: #f5bb6f;
+  --soon-soft: #332209;
+  --urgent: #f67972;
+  --urgent-strong: #ffb0a8;
+  --urgent-soft: #3f1816;
+
+  --chart-1: #5582e0;
+  --chart-2: #c8830b;
+  --chart-3: #b4529b;
+  --chart-4: #49a768;
+
+  --sidebar: #161b25;
+  --sidebar-foreground: #e6eaf0;
+  --sidebar-primary: #79a3f6;
+  --sidebar-primary-foreground: #11151e;
+  --sidebar-accent: #293346;
+  --sidebar-accent-foreground: #cddcf8;
+  --sidebar-border: #2c323e;
+  --sidebar-ring: #79a3f6;
 }
 
 @theme inline {
@@ -141,17 +200,22 @@
   --color-ring: var(--ring);
 
   --color-ok: var(--ok);
+  --color-ok-strong: var(--ok-strong);
   --color-ok-soft: var(--ok-soft);
   --color-soon: var(--soon);
+  --color-soon-strong: var(--soon-strong);
   --color-soon-soft: var(--soon-soft);
   --color-urgent: var(--urgent);
+  --color-urgent-strong: var(--urgent-strong);
   --color-urgent-soft: var(--urgent-soft);
 
+  /* To'rtta slot — beshinchisi ATAYIN yo'q. Beshinchi ottenka (moviy-yashil)
+     yashil bilan rang ko'rish buzilishida ajralmasdi; "ehtimol kerak
+     bo'lar" degan qo'shimcha rang esa aynan tasodifiy palitra belgisi. */
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
 
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
@@ -162,7 +226,35 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
-  --radius-sm: calc(var(--radius) - 4px);
+  /* ---- SHRIFT --------------------------------------------------------------
+     BITTA OILA — IBM Plex Sans, butun ilovada. Monoshirin shrift
+     ishlatilmaydi: sonlarni tekislash uchun u SHART EMAS, buning uchun
+     `tnum` (tabular figures) OpenType xususiyati bor va Plex Sans uni
+     qo'llab-quvvatlaydi — pastdagi `.tabular` sinfiga qarang.
+
+     IBM Plex tanlandi, chunki uning kirillchasi haqiqiy (avtomatik
+     cho'zilgan emas) — ilova ruscha ham ko'rsatiladi. */
+  --font-sans: 'IBM Plex Sans Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* ---- O'LCHAM POG'ONASI ---------------------------------------------------
+     Olti pog'ona. Zichligi yuqori ish quroli uchun asos 13px (Linear,
+     Retool kabi) — matn sayti emas, kuniga o'nlab marta ochiladigan jadval. */
+  --text-micro: 0.6875rem;          /* 11px — yorliq, bo'lim sarlavhasi */
+  --text-micro--line-height: 1rem;
+  --text-micro--letter-spacing: 0.01em;
+  --text-caption: 0.75rem;          /* 12px — ikkilamchi ma'lumot */
+  --text-caption--line-height: 1.0625rem;
+  --text-body: 0.8125rem;           /* 13px — asosiy: jadval, boshqaruv */
+  --text-body--line-height: 1.25rem;
+  --text-lead: 0.9375rem;           /* 15px — ajratilgan qiymat, karta sarlavhasi */
+  --text-lead--line-height: 1.375rem;
+  --text-title: 1.125rem;           /* 18px — panel sarlavhasi */
+  --text-title--line-height: 1.625rem;
+  --text-display: 1.5rem;           /* 24px — sahifa sarlavhasi */
+  --text-display--line-height: 2rem;
+  --text-display--letter-spacing: -0.015em;
+
+  --radius-sm: calc(var(--radius) - 3px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
@@ -170,16 +262,173 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
   }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
-    @apply bg-background text-foreground;
-    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-    font-size: 14px;
-    line-height: 1.45;
+    @apply bg-background text-foreground text-body;
+    font-family: var(--font-sans);
+    /* `cv02`-`cv04` — bir qavatli a/g/l: kichik o'lchamda aniqroq.
+       `ss03` — to'g'ri burchakli tirnoq (reyestr matnlarida ko'p uchraydi). */
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss03';
+    -webkit-font-smoothing: antialiased;
   }
-  /* Raqamli ustunlar (summa, ball, miqdor) bir-birining tagida turishi uchun */
+
+  /* FOKUS — bitta qoida, butun ilovada. Avval har komponent o'zicha
+     belgilagan edi: qayerdadir `ring-1`, qayerdadir `ring-[3px]`, ko'p
+     joyda esa umuman yo'q — klaviatura bilan yurgan odam qayerda
+     turganini ko'rmasdi.
+
+     `[tabindex='-1']` CHIQARIB TASHLANGAN: Radix dialog va panel
+     idishlariga ochilganda fokusni DASTURIY beradi. Ular ro'yxatga
+     kirsa, oyna har ochilganda butun atrofida halqa chizilardi —
+     foydalanuvchi hech narsani bosmagan bo'lsa ham. */
+  :focus-visible:not([tabindex='-1']) {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* RAQAMLI QIYMATLAR — summa, ball, miqdor, muddat, sana.
+     Jadvalda ular ustma-ust turadi, shuning uchun har raqam BIR XIL
+     kenglikda bo'lishi kerak: aks holda "111" bilan "999" har xil joy
+     egallab, ustun qaltirab ko'rinadi.
+
+     Buning uchun monoshirin shrift KERAK EMAS — `tabular-nums` (OpenType
+     `tnum`) aynan shu ishni qiladi va matn interfeysning o'z shriftida
+     qoladi.
+
+     ATAYIN `font-feature-settings` EMAS: u `body` dan meros bo'lib
+     kelayotgan harf shakllarini (`cv02`, `cv03`, `cv04`, `ss03`)
+     BUTUNLAY almashtirib yuborardi — holbuki bu sinf ichida harflar ham
+     bor ("747.1 mlrd UZS", "3 kun"). `font-variant-numeric` esa faqat
+     raqam xususiyatini qo'shadi, qolganiga tegmaydi. */
   .tabular {
-    font-variant-numeric: tabular-nums;
+    font-variant-numeric: tabular-nums lining-nums;
   }
+
+  /* Tailwind Preflight `code`, `kbd`, `samp`, `pre` elementlariga
+     monoshirin shriftni O'ZI beradi. Ilovada bitta shrift oilasi
+     ishlatiladi, shuning uchun bu standart bekor qilinadi — aks holda
+     kelajakda qo'shilgan har qanday `<code>` yolg'iz o'zi boshqa
+     shriftda chiqib turardi. Qiymat ekanini ramka va fon bildiradi. */
+  code, kbd, samp, pre {
+    font-family: inherit;
+  }
+
+  /* Noaniq davomiylikdagi jarayon chizig'i (AI tahlili, import). */
+  @keyframes indeterminate {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+  }
+
+  /* HARAKAT SIYOSATI.
+     Ilovada bezak uchun animatsiya YO'Q: harakat faqat holat o'zgarganini
+     bildiradi (hover, ochilish, yopilish) va 150-200 ms davom etadi.
+     Tizimda "harakatni kamaytirish" yoqilgan bo'lsa — hammasi o'chadi.
+     Bu WCAG 2.3.3 talabi, vestibulyar buzilishi bor foydalanuvchilar uchun. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* AI-CHAT MARKDOWN
+   ════════════════
+   `markdown.ts` HAMMA atributni o'chiradi (`ALLOWED_ATTR: []`), ya'ni
+   modelning javobida na sinf, na `style` qoladi. Stillash FAQAT shu
+   yerdan — konteyner sinfi orqali.
+
+   Nega bu yaxshi: model chiqishi ko'rinishga TA'SIR QILA OLMAYDI.
+   Prompt injection eng yomon holatda matnni o'zgartiradi, sahifani
+   emas. */
+.chat-markdown {
+  line-height: 1.6;
+  word-break: break-word;
+}
+.chat-markdown > * + * { margin-top: 0.6rem; }
+
+.chat-markdown h3,
+.chat-markdown h4 {
+  font-weight: 600;
+  /* Chat pufakchasi ichida sarlavha KATTA bo'lmasligi kerak — u
+     matndan faqat qalinligi bilan ajralib tursa yetarli. */
+  font-size: 0.95em;
+  margin-top: 1rem;
+}
+
+/* MANBA RAQAMI — javob ichidagi `[3]`.
+   Bosilganda hujjat matni ochiladi (ChatPanel: manbaOch). */
+.chat-markdown .manba-raqam {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.75em;
+  padding: 0 0.1em;
+  vertical-align: super;
+  line-height: 0;
+}
+.chat-markdown .manba-raqam:hover,
+.chat-markdown .manba-raqam:focus-visible {
+  text-decoration: underline;
+  outline: none;
+}
+
+.chat-markdown ul,
+.chat-markdown ol { padding-left: 1.25rem; }
+.chat-markdown ul { list-style: disc; }
+.chat-markdown ol { list-style: decimal; }
+.chat-markdown li + li { margin-top: 0.25rem; }
+
+.chat-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  background: var(--muted);
+  border-radius: 0.25rem;
+  padding: 0.1em 0.35em;
+}
+.chat-markdown pre {
+  background: var(--muted);
+  border-radius: 0.375rem;
+  padding: 0.6rem 0.75rem;
+  /* Uzun kod qatori BUTUN SAHIFANI kengaytirmasin — faqat o'zi suriladi. */
+  overflow-x: auto;
+}
+.chat-markdown pre code { background: none; padding: 0; }
+
+.chat-markdown blockquote {
+  border-left: 2px solid var(--border);
+  padding-left: 0.75rem;
+  color: var(--muted-foreground);
+}
+
+/* JADVAL — chat javoblarining eng foydali qismi (tenderlarni solishtirish).
+   Tor panelda sig'masligi mumkin, shuning uchun o'zi suriladi. */
+.chat-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+.chat-markdown th,
+.chat-markdown td {
+  border: 1px solid var(--border);
+  padding: 0.3rem 0.55rem;
+  text-align: left;
+  white-space: nowrap;
+}
+.chat-markdown th { background: var(--muted); font-weight: 600; }
+
+.chat-markdown hr {
+  border: 0;
+  border-top: 1px solid var(--border);
 }

@@ -76,7 +76,10 @@ CREATE TABLE tender (
     area_leaf_id                TEXT REFERENCES dim_area(area_id),  -- '2140' — indekslash uchun
 
     -- Buyurtmachi (company)
-    company_id                  BIGINT,                    -- 1163
+    buyer_org_id                BIGINT,                    -- 1163 (BUYURTMACHI
+                                                           --  tashkiloti, manba
+                                                           --  platformadan. Bizning
+                                                           --  ijarachimiz EMAS!)
     company_name                TEXT,                      -- 'АО "Quyuv-mexanika zavodi"'
 
     -- Shartnoma (ko'pincha null, tugatilgach to'ladi)
@@ -107,7 +110,7 @@ CREATE TABLE tender (
 -- Indekslar — dashboard filtrlari va agregatsiyalari uchun eng muhimlari
 CREATE INDEX idx_tender_status      ON tender(status);
 CREATE INDEX idx_tender_area_leaf   ON tender(area_leaf_id);
-CREATE INDEX idx_tender_company     ON tender(company_id);
+CREATE INDEX idx_tender_buyer_org   ON tender(buyer_org_id);
 CREATE INDEX idx_tender_created     ON tender(created_at);
 CREATE INDEX idx_tender_currency    ON tender(currency);
 CREATE INDEX idx_tender_type        ON tender(type);

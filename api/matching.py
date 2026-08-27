@@ -10,10 +10,19 @@ Ball tarkibi (jami 0–100, shaffof):
     📍 hudud         0–20   tender profil hududlaridan birida (prefix)
     💰 byudjet       0–15   totalcost profil [min,max] diapazonида
     💱 valyuta       0–5    afzal valyutaga mos
+
+SABABLAR IKKI KO'RINISHDA qaytadi:
+    `reasons`      — TAYYOR O'ZBEKCHA matn (interfeys shuni ko'rsatadi, avvalgidek)
+    `reason_keys`  — [{"key": ..., "vars": {...}}] STRUKTURA
+Bildirishnoma xabari `reason_keys` dan foydalanadi va sababni foydalanuvchi
+tanlagan tilda quradi (api/i18n.py). Bir mantiq — ikki ko'rinish: matn shu
+yerda ham lug'atdan olinadi, ya'ni ikkita haqiqat manbai paydo bo'lmaydi.
 """
+import datetime as _dt
+import re
 from typing import Any, Dict, List, Optional
 
-from api import translit
+from api import i18n, translit
 
 # Ball og'irliklari (o'zgartirish oson — bitta joyda)
 W_KEYWORD = 60
@@ -33,12 +42,30 @@ def _norm(s: Optional[str]) -> str:
 
 
 def _hits(term: Optional[str], blob: str) -> bool:
-    """`term` matnда bormi — alifbodan qat'i nazar.
+    """`term` matnда bormi — alifbodan qat'i nazar, SO'Z BOSHIDAN.
 
     Profilга "nasos" yozilgan bo'lsa, "Насос" tovarli tender ham topilsin
     (aks holda lotin alifbosida yozilgan profil hech narsa topmaydi).
+
+    SO'Z CHEGARASI (`\\b`) MAJBURIY — o'lchangan nosozlik:
+        "stol"  ⊂ "столб"   (ustun)      -> soxta moslik
+        "stol"  ⊂ "престол"              -> soxta moslik
+    Chegarasiz `in` tekshiruvi so'zning O'RTASIDAN ham topardi.
+
+    QO'SHIMCHA CHEKLOV YO'Q va bu ATAYLAB. O'lchandi (ochiq korpus):
+        monitor -> monitoring(+3), monitoringi(+4)   XATO
+        nasos   -> насосини(+3), nasoslarning(+7)    TO'G'RI
+        stol    -> столовая(+4, oshxona) XATO / стола(+1) TO'G'RI
+    Ya'ni bir xil qo'shimcha uzunligida ham to'g'ri, ham xato moslik bor —
+    uzunlik chegarasi ularni AJRATA OLMAYDI. Ularni ajratish morfologik
+    tahlil talab qiladi. Shuning uchun matn mosligi bu yerda IKKILAMCHI
+    signal bo'lib qoldi: birlamchi yo'l — `good_code` (tilga bog'liq
+    emas, qamrovi 100%). `product_matches()` ga qarang.
     """
-    return any(v in blob for v in translit.variants(term or ""))
+    for v in translit.variants(term or ""):
+        if v and re.search(r"\b" + re.escape(v), blob):
+            return True
+    return False
 
 
 def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,8 +77,13 @@ def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, A
     max_cost = profile.get("max_cost")
 
     score = 0.0
-    reasons: List[str] = []
     breakdown: Dict[str, float] = {}
+    # Sabablar STRUKTURA sifatida yig'iladi; o'zbekcha matn oxirida shulardan
+    # quriladi. Shu sabab bildirishnoma ularni istalgan tilda qayta chiza oladi.
+    keys: List[Dict[str, Any]] = []
+
+    def reason(key: str, **vars_: Any) -> None:
+        keys.append({"key": key, "vars": vars_})
 
     # --- Kalit so'z (0–60) ---
     # MUHIM: company_name ATAYIN kiritilmaydi. Kalit so'z NIMA sotib olinishini
@@ -69,7 +101,7 @@ def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, A
                 matched_kw.append(kw)
         kw_score = W_KEYWORD * (len(matched_kw) / len(keywords)) if matched_kw else 0.0
         if matched_kw:
-            reasons.append(f"{len(matched_kw)} ta kalit so‘z mos: {', '.join(matched_kw)}")
+            reason("reason.keywords", n=len(matched_kw), items=", ".join(matched_kw))
     else:
         kw_score = 0.0  # profilda kalit so'z yo'q — bu komponent neytral (0)
     breakdown["keyword"] = round(kw_score, 1)
@@ -81,7 +113,7 @@ def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, A
         hit = next((r for r in regions if area_path == r or area_path.startswith(r + ".")), None)
         if hit:
             region_score = W_REGION
-            reasons.append(f"Hududingizda: {tender.get('region_name') or hit}")
+            reason("reason.region", region=tender.get("region_name") or hit)
         else:
             region_score = 0.0
     else:
@@ -99,10 +131,10 @@ def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, A
         above = (max_cost is not None and cost > float(max_cost))
         if not below and not above:
             budget_score = W_BUDGET
-            reasons.append("Byudjetingizga mos")
+            reason("reason.budgetOk")
         else:
             budget_score = 0.0
-            reasons.append("Byudjetdan tashqari" + (" (past)" if below else " (yuqori)"))
+            reason("reason.budgetLow" if below else "reason.budgetHigh")
     else:
         budget_score = W_BUDGET / 2  # chegara yo'q — neytral
     breakdown["budget"] = round(budget_score, 1)
@@ -112,7 +144,7 @@ def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, A
     if pref_cur:
         if tender.get("currency") == pref_cur:
             cur_score = W_CURRENCY
-            reasons.append(f"Valyuta mos: {pref_cur}")
+            reason("reason.currency", currency=pref_cur)
         else:
             cur_score = 0.0
     else:
@@ -122,7 +154,141 @@ def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, A
 
     return {
         "score": round(score),
-        "reasons": reasons,
+        # Interfeys uchun — avvalgidek tayyor o'zbekcha matn
+        "reasons": [i18n.t(i18n.DEFAULT_LANG, k["key"], **k["vars"]) for k in keys],
+        # Bildirishnoma uchun — foydalanuvchi tilida qayta chizish imkoni
+        "reason_keys": keys,
         "matched_keywords": matched_kw,
         "breakdown": breakdown,
     }
+
+
+# ---------------------------------------------------------------------------
+# KATALOG MOSLIGI — "bu tender mening mahsulotimga tegishlimi?"
+#
+# `score_tender()` dan FARQI: u profil bo'yicha 0–100 ball beradi, bu esa
+# bitta MAHSULOT bilan bog'liqlikni aniqlaydi va sababini qaytaradi.
+#
+# NEGA SHU YERDA: qoidani uchta joy ishlatadi — `/catalog` va `/catalog/match`
+# endpointlari (`api/main.py`), bildirishnoma (`api/notify.py` orqali) va
+# hujjat qamrovi (`etl_doc_text.py --catalog`). Uch nusxa bo'lmasligi uchun
+# yagona manba shu funksiya (reja_ai_chat.md §15.3.1).
+# ---------------------------------------------------------------------------
+def product_matches(cand: Dict[str, Any], product: Dict[str, Any]) -> Optional[str]:
+    """Tender mahsulotga mos keladimi? -> 'kod' | 'nom' | None.
+
+    `cand` — `queries.match_candidates_sql()` qatori: `good_codes`,
+    `name`, `goods_blob` maydonlari kerak.
+    `product` — katalog qatori; `codes` (tasdiqlangan prefikslar) bo'lsa
+    BIRLAMCHI yo'l shu bo'ladi.
+
+    ------------------------------------------------------------------
+    KATEGORIYA MOSLIGI OLIB TASHLANDI — o'lchangan nosozlik
+    ------------------------------------------------------------------
+    Ilgari tenderning kategoriyasi mahsulotnikiga teng bo'lsa `'category'`
+    qaytardi va interfeys uni **100 ball** deb ko'rsatardi. Bu moslik
+    emas, shunchaki bir bo'limda ekanlik. O'lchangan oqibat (25 qatorli
+    sinov katalogi, 782 ochiq tender):
+
+        substring moslikning 131/206 tasi `category` orqali kelgan;
+        faqat-substring topilgan 136 tadan 94 tasi shu yo'ldan.
+
+    Aniq holatlar (ekranda ko'rilgan):
+        "Andijon GES T-2 kuch transformatorini ta'mirlash"
+            -> "Kondensator (tibbiy muzlatgich)"   100 ball  (mashina)
+        "Farg'ona ... maktablar uchun jihoz"  (4 kategoriya)
+            -> 25 mahsulotdan 23 tasi              100 ball
+
+    Ya'ni bitta keng kategoriyali mahsulot butun bo'limni "100% mos"
+    qilardi. Kategoriya endi FILTR (interfeysda alohida bor), moslik
+    dalili EMAS.
+    """
+    # --- 1. KOD (birlamchi) — tilga bog'liq emas, qamrovi 100% ---
+    kodlar = product.get("codes") or []
+    if kodlar:
+        for gc in (cand.get("good_codes") or []):
+            if not gc:
+                continue
+            for pref in kodlar:
+                if pref and gc.startswith(pref):
+                    return "kod"
+        # MUHIM: kodi BOR mahsulot uchun matnga TUSHMAYMIZ. Kod aniq
+        # javob beradi; matn esa (yuqoridagi o'lchovga qarang) shovqin
+        # qo'shadi. "Bemor monitori" -> "Axborot xavfsizligi
+        # monitoringi" aynan shu yo'l bilan chiqqandi.
+        return None
+
+    # --- 2. NOM (ikkilamchi) — faqat kodi YO'Q mahsulot uchun ---
+    terms = [product.get("name")] + (product.get("keywords") or [])
+    blob = _norm(f"{cand.get('name') or ''} {cand.get('goods_blob') or ''}")
+    for t in terms:
+        # _hits — alifbodan qat'i nazar va SO'Z BOSHIDAN: katalogda
+        # "nasos" bo'lsa "Насос" tovarli tender ham mos keladi.
+        if t and _hits(t, blob):
+            return "nom"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# TENDER TIRIKMI — "bunga hali taklif berish mumkinmi?"
+#
+# NEGA KERAK: yopilgan yoki muddati o'tgan tender bo'yicha tahlil qilish
+# — bekorga sarflangan pul (AI chaqiruvi) va foydalanuvchini chalg'itadigan
+# javob. Ro'yxat filtrlari (`queries.build_tender_filters`) buni allaqachon
+# ushlaydi, lekin AI qatlami ro'yxatdan MUSTAQIL chaqirilishi mumkin:
+# to'g'ridan-to'g'ri havola, eski kartochka, ERP so'rovi, chat tool'i.
+# Shuning uchun tekshiruv ikkinchi marta, model chaqirilishidan OLDIN
+# bajariladi (reja_ai_chat.md §16.2).
+#
+# TERMINAL_STATUSES `dim_status.is_terminal` ning NUSXASI. Qator `is_terminal`
+# ustunini olib kelsa (masalan `match_candidates_sql`) — o'sha ustunlik qiladi.
+# ---------------------------------------------------------------------------
+TERMINAL_STATUSES = frozenset({"close", "cancel", "not_realized", "expired"})
+
+
+def closed_reason(tender: Dict[str, Any],
+                  now: Optional[_dt.datetime] = None) -> Optional[str]:
+    """Tender yopiqmi? -> sabab matni (o'zbekcha) yoki `None` (tirik).
+
+    `tender` — kamida `status`, ixtiyoriy `close_at` va `is_terminal`.
+    `now` — sinov uchun; berilmasa joriy vaqt (UTC).
+    """
+    status = (tender.get("status") or "").strip()
+
+    if tender.get("is_terminal") is True or status in TERMINAL_STATUSES:
+        label = {"expired": "muddati tugagan", "close": "yakunlangan",
+                 "cancel": "bekor qilingan",
+                 "not_realized": "amalga oshmagan"}.get(status, status or "noma'lum")
+        return f"tender yopilgan ({label})"
+
+    close_at = _as_dt(tender.get("close_at"))
+    if close_at is not None:
+        now = now or _dt.datetime.now(_dt.timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=_dt.timezone.utc)
+        if close_at <= now:
+            return "takliflar muddati tugagan"
+
+    return None
+
+
+def _as_dt(v: Any) -> Optional[_dt.datetime]:
+    """`close_at` ni datetime ga keltiradi.
+
+    Funksiya IKKI xil kirish bilan chaqiriladi: xom DB qatori (psycopg2
+    `datetime` beradi) va SHAKLLANTIRILGAN JSON (`main._iso()` ISO satrga
+    aylantiradi). Ikkalasini ham qabul qilamiz — aks holda tekshiruv
+    chaqiruvchiga qarab yiqilardi.
+
+    Naive qiymat UTC deb olinadi: solishtirish xato bermasin.
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, str):
+        try:
+            v = _dt.datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(v, _dt.datetime):
+        return None
+    return v if v.tzinfo else v.replace(tzinfo=_dt.timezone.utc)

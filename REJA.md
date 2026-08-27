@@ -53,7 +53,8 @@ foydalimi va nechi pulga?"* degan savolga javob berish.
 ```
 -- A1: ko'p-ijarachilik
 company(id, name, tin, created_at)
-app_user(id, company_id, email, password_hash, role, created_at)
+company_account(id, username, company_name, password_hash, ...)
+-- ESLATMA: hodim hisoblari BU YERDA EMAS - ular ERP da (erp.app_user).
 
 -- P0-4: katalog va qoldiqlar
 catalog_product(id, company_id, sku, name, unit, cost_price, currency,
@@ -107,6 +108,32 @@ Mavjud jadvallar (`tender`, `tender_lot`, `tender_item`, `tender_document`, `dim
 Tartib **bog'liqlik** bo'yicha: har bosqich o'zidan oldingisiga tayanadi.
 
 ### A — Poydevor: auth + ko'p-ijarachilik  *(P0-11 qisman)*
+
+> **HOLAT (bajarildi, qisman):** kirish mexanizmi bor —
+> `schema_patch_auth_2.sql` (`company_account`, `company_session`),
+> `api/auth.py`, `/auth/*` endpointlari, `create_company.py` CLI.
+> Sinov: `_tests/auth_test.py` (43 tekshiruv).
+>
+> Quyidagi reja `app_user` ni SHU YERDA ko'zlagan edi — bu o'zgardi:
+> **hodimlar ERP niki** (`erp.app_user`), bu yerda esa KOMPANIYA hisobi.
+> Sabab: odam — ERP ning tushunchasi. Batafsil:
+> `tender erp/docs/erp_auth.md` 1-bo'lim.
+>
+> **AUTH-2 (bajarildi):** kirish ekrani (uz/ru/en) va **global darvoza**
+> qo'shildi — `FastAPI(dependencies=[Depends(gate)])`. Endpointlar
+> YOPIQ holatda boshlanadi; ochiq qolganlar `PUBLIC_PATHS` da sanalgan
+> (health, login, Swagger, bo'sh shablonlar, hujjat yuklab olish).
+> ERP bu yerga `X-Service-Key` bilan keladi va kalit faqat 6 endpointni
+> ochadi. Batafsil: `tender erp/docs/erp_auth.md` 8-bo'lim.
+>
+> **AUTH-3:** `api/erp_status.py` qo'shildi — tender panelidagi ERP bloki
+> endi ERP backendiga HTTP yubormaydi, `erp.v_tender_status` view ini
+> o'qiydi (faqat o'qish). Chegara simmetrik: har ikki tomon bir-birining
+> sxemasidan O'QIYDI, hech biri YOZMAYDI.
+>
+> Qolgani (`company_id` bo'yicha ko'p-ijarachilik filtri) — keyingi
+> bosqich; hozir bitta kompaniya rejimi.
+
 Hech qanday kompaniya ma'lumoti usiz kirita olmaydi.
 - `company`, `app_user` jadvallari; parol hash (bcrypt/argon2)
 - Sessiya yoki JWT; barcha yangi endpointlar `company_id` bo'yicha filtrlanadi

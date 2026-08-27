@@ -21,7 +21,7 @@ SELECT
     t.area_path, t.area_leaf_id,
     a.name_uz  AS region_name_uz,
     a.name_ru  AS region_name_ru,
-    t.company_id, t.company_name,
+    t.buyer_org_id, t.company_name,
     t.lot_count, t.good_count, t.part_count,
     t.publicated_at, t.close_at, t.starting_date, t.ends_at,
     t.remain_time, t.source_platform, t.fetched_at, t.first_seen_at,
@@ -369,6 +369,8 @@ STATS_OPEN_COUNT_SQL = """
 SELECT count(*) AS n FROM tender
 WHERE status = %(status)s
   AND (%(status)s <> 'open' OR close_at IS NULL OR close_at > now())
+  AND (%(region)s::text IS NULL
+       OR area_path = %(region)s OR area_path LIKE %(region)s || '.%%')
 """
 
 STATS_BY_CURRENCY_SQL = """
@@ -376,20 +378,81 @@ SELECT currency, count(*) AS tender_count, COALESCE(SUM(totalcost), 0) AS total_
 FROM tender
 WHERE status = %(status)s
   AND (%(status)s <> 'open' OR close_at IS NULL OR close_at > now())
+  AND (%(region)s::text IS NULL
+       OR area_path = %(region)s OR area_path LIKE %(region)s || '.%%')
 GROUP BY currency
 ORDER BY currency
 """
 
-STATS_BY_REGION_SQL = """
-SELECT a.area_id,
-       COALESCE(a.name_uz, a.name_ru) AS name,
-       count(*) AS tender_count
-FROM tender t
-LEFT JOIN dim_area a ON a.area_id = t.area_leaf_id
-WHERE t.status = %(status)s
-  AND (%(status)s <> 'open' OR t.close_at IS NULL OR t.close_at > now())
-GROUP BY a.area_id, COALESCE(a.name_uz, a.name_ru)
+# Respublika kesimi FAQAT level=1 tugunlar (viloyat / Toshkent shahri /
+# Qoraqalpog'iston). Tenderning `area_leaf_id` si ko'pincha level=3 tuman,
+# shu sabab bevosita leaf bo'yicha GROUP BY qilish "viloyatlar" o'rniga
+# tumanlarni chiqarib yuborardi. Prefix-join ierarxiyaning o'ziga tayanadi.
+STATS_BY_PROVINCE_SQL = """
+WITH grouped AS (
+    SELECT province.area_id,
+           COALESCE(province.name_uz, province.name_ru) AS name,
+           t.currency,
+           count(*) AS tender_count,
+           COALESCE(SUM(t.totalcost), 0) AS total_value
+    FROM tender t
+    LEFT JOIN dim_area province
+      ON province.level = 1
+     AND (t.area_path = province.area_id
+          OR t.area_path LIKE province.area_id || '.%%')
+    WHERE t.status = %(status)s
+      AND (%(status)s <> 'open' OR t.close_at IS NULL OR t.close_at > now())
+    GROUP BY province.area_id, COALESCE(province.name_uz, province.name_ru),
+             t.currency
+)
+SELECT area_id, name, SUM(tender_count)::bigint AS tender_count,
+       jsonb_agg(
+           jsonb_build_object('currency', currency, 'total_value', total_value)
+           ORDER BY currency NULLS LAST
+       ) AS totals_by_currency
+FROM grouped
+GROUP BY area_id, name
 ORDER BY tender_count DESC
+"""
+
+# Viloyat tanlanganda level=3 — tuman/shahar kesimi. UzEx faqat viloyatni
+# beradi; bunday tenderlar (va tuman kodi yo'q boshqa yozuvlar) yo'qolmaydi,
+# NULL guruhda "tuman/shahar ko'rsatilmagan" sifatida qaytadi.
+STATS_BY_LOCALITY_SQL = """
+WITH grouped AS (
+    SELECT CASE WHEN locality.level = 3
+                THEN locality.area_id ELSE NULL END AS area_id,
+           CASE WHEN locality.level = 3
+                THEN COALESCE(locality.name_uz, locality.name_ru)
+                ELSE NULL END AS name,
+           t.currency,
+           count(*) AS tender_count,
+           COALESCE(SUM(t.totalcost), 0) AS total_value
+    FROM tender t
+    LEFT JOIN dim_area locality ON locality.area_id = t.area_leaf_id
+    WHERE t.status = %(status)s
+      AND (%(status)s <> 'open' OR t.close_at IS NULL OR t.close_at > now())
+      AND (t.area_path = %(region)s OR t.area_path LIKE %(region)s || '.%%')
+    GROUP BY CASE WHEN locality.level = 3 THEN locality.area_id ELSE NULL END,
+             CASE WHEN locality.level = 3
+                  THEN COALESCE(locality.name_uz, locality.name_ru)
+                  ELSE NULL END,
+             t.currency
+)
+SELECT area_id, name, SUM(tender_count)::bigint AS tender_count,
+       jsonb_agg(
+           jsonb_build_object('currency', currency, 'total_value', total_value)
+           ORDER BY currency NULLS LAST
+       ) AS totals_by_currency
+FROM grouped
+GROUP BY area_id, name
+ORDER BY tender_count DESC
+"""
+
+STATS_REGION_SQL = """
+SELECT area_id, COALESCE(name_uz, name_ru) AS name, level
+FROM dim_area
+WHERE area_id = %(region)s
 """
 
 # --- /regions ---
@@ -413,7 +476,7 @@ SELECT
     t.totalcost, t.currency, t.area_path, t.area_leaf_id,
     a.name_uz AS region_name_uz, a.name_ru AS region_name_ru,
     COALESCE(a.name_uz, a.name_ru) AS region_name,
-    t.company_id, t.company_name,
+    t.buyer_org_id, t.company_name,
     t.lot_count, t.good_count, t.publicated_at, t.close_at,
     t.remain_time, t.source_platform,
     -- Kalit so'z qidiriladigan matn: tovar nomlari + AI sinonimlari.
@@ -424,7 +487,16 @@ SELECT
               WHERE ax.tender_id = t.id AND ax.kind = 'summary_v1'), '')
         AS goods_blob,
     -- Katalog moslik uchun: shu tenderning kategoriya kodlari
+    -- (FILTR uchun; moslik dalili EMAS — api/matching.py ga qarang)
     ARRAY(SELECT code FROM tender_category tc WHERE tc.tender_id = t.id) AS category_codes,
+    -- BIRLAMCHI moslik kaliti: rasmiy tasniflagich kodlari. Tilga
+    -- bog'liq emas va qamrovi to'liq (o'lchangan: 1880 ochiq
+    -- pozitsiyaning 1880 tasida kod bor).
+    -- `matching.product_matches()` shuni birinchi ko'radi.
+    -- DIQQAT: bu matn psycopg2 ga boradi — izohda ham FOIZ BELGISI
+    -- yozilmasin, u platsderjatel deb o'qiladi va so'rov yiqiladi.
+    ARRAY(SELECT DISTINCT tg2.good_code FROM tender_good tg2
+          WHERE tg2.tender_id = t.id AND tg2.good_code IS NOT NULL) AS good_codes,
     ARRAY(SELECT DISTINCT tg.name FROM tender_good tg
           WHERE tg.tender_id = t.id AND tg.name IS NOT NULL
           ORDER BY tg.name LIMIT 6) AS goods_preview
@@ -461,9 +533,12 @@ _PROFILE_COLS = ("id, name, keywords, regions, currency, min_cost, max_cost, "
                  "constraints_note, contact_name, email, phone, position, "
                  "updated_at")
 
+# KOMPANIYA PROFILI — ijarachi siri (J1.6): salohiyat, minimal marja,
+# aloqa ma'lumotlari. Har kompaniyada BITTA faol profil.
 PROFILE_GET_SQL = f"""
 SELECT {_PROFILE_COLS}
 FROM company_profile
+WHERE company_id = %(company_id)s
 ORDER BY updated_at DESC
 LIMIT 1
 """
@@ -471,13 +546,20 @@ LIMIT 1
 # Bitta faol profil: bor bo'lsa yangilaymiz, yo'q bo'lsa qo'shamiz
 PROFILE_UPSERT_SQL = f"""
 INSERT INTO company_profile (
-    id, name, keywords, regions, currency, min_cost, max_cost,
+    id, company_id, name, keywords, regions, currency, min_cost, max_cost,
     about, certificates, clearances, experience_years,
     max_contract_value, max_contract_currency, employees, capacity_note,
     lead_time_days, min_margin_percent, constraints_note,
     contact_name, email, phone, position, updated_at)
 VALUES (
-    COALESCE((SELECT id FROM company_profile ORDER BY updated_at DESC LIMIT 1), 1),
+    -- SHU KOMPANIYANING profili bor bo'lsa uning `id` si, yo'q bo'lsa
+    -- ketma-ketlikdan YANGI id. Ilgari bu yerda `COALESCE(..., 1)` turardi
+    -- va ikkinchi kompaniya profil saqlaganda birinchisining id=1 yozuvi
+    -- ustidan yozilardi — J1 dan keyin bu jimgina ma'lumot yo'qotish edi.
+    COALESCE((SELECT id FROM company_profile
+               WHERE company_id = %(company_id)s
+               ORDER BY updated_at DESC LIMIT 1),
+             nextval(pg_get_serial_sequence('company_profile', 'id'))),
     %(name)s, %(keywords)s, %(regions)s, %(currency)s, %(min_cost)s, %(max_cost)s,
     %(about)s, %(certificates)s, %(clearances)s, %(experience_years)s,
     %(max_contract_value)s, %(max_contract_currency)s, %(employees)s,
@@ -509,14 +591,18 @@ RETURNING {_PROFILE_COLS}
 _SS_COLS = ("id, name, keywords, categories, regions, currency, "
             "min_cost, max_cost, notify, last_seen_at, created_at, updated_at")
 
-SEARCHES_LIST_SQL = f"SELECT {_SS_COLS} FROM saved_search ORDER BY created_at"
+# SAQLANGAN QIDIRUVLAR — ijarachi siri (J1.6).
+SEARCHES_LIST_SQL = (f"SELECT {_SS_COLS} FROM saved_search "
+                     "WHERE company_id = %(company_id)s ORDER BY created_at")
 
-SEARCH_GET_SQL = f"SELECT {_SS_COLS} FROM saved_search WHERE id = %(id)s"
+SEARCH_GET_SQL = (f"SELECT {_SS_COLS} FROM saved_search "
+                  "WHERE id = %(id)s AND company_id = %(company_id)s")
 
 SEARCH_INSERT_SQL = f"""
-INSERT INTO saved_search (name, keywords, categories, regions, currency, min_cost, max_cost, notify)
-VALUES (%(name)s, %(keywords)s, %(categories)s, %(regions)s, %(currency)s,
-        %(min_cost)s, %(max_cost)s, %(notify)s)
+INSERT INTO saved_search (company_id, name, keywords, categories, regions,
+                          currency, min_cost, max_cost, notify)
+VALUES (%(company_id)s, %(name)s, %(keywords)s, %(categories)s, %(regions)s,
+        %(currency)s, %(min_cost)s, %(max_cost)s, %(notify)s)
 RETURNING {_SS_COLS}
 """
 
@@ -526,14 +612,16 @@ UPDATE saved_search SET
     regions=%(regions)s, currency=%(currency)s,
     min_cost=%(min_cost)s, max_cost=%(max_cost)s, notify=%(notify)s,
     updated_at=now()
-WHERE id=%(id)s
+WHERE id=%(id)s AND company_id=%(company_id)s
 RETURNING {_SS_COLS}
 """
 
-SEARCH_DELETE_SQL = "DELETE FROM saved_search WHERE id=%(id)s RETURNING id"
+SEARCH_DELETE_SQL = ("DELETE FROM saved_search "
+                     "WHERE id=%(id)s AND company_id=%(company_id)s RETURNING id")
 
 # Qidiruvni "ko'rildi" deb belgilash (yangi-mos belgisi tozalanadi — C bosqich)
-SEARCH_SEEN_SQL = "UPDATE saved_search SET last_seen_at=now() WHERE id=%(id)s RETURNING id"
+SEARCH_SEEN_SQL = ("UPDATE saved_search SET last_seen_at=now() "
+                   "WHERE id=%(id)s AND company_id=%(company_id)s RETURNING id")
 
 
 # --- /categories (B bosqich) — daraxt + OCHIQ tenderlar soni ---
@@ -607,15 +695,20 @@ WHERE t.id = %(id)s
 # Keshdagi tahlil. `content_hash` mos kelsa AI qayta chaqirilmaydi.
 AI_CACHED_SQL = """
 SELECT result, model, content_hash, input_tokens, output_tokens, created_at
-FROM ai_analysis WHERE tender_id = %(id)s AND kind = %(kind)s
+FROM ai_analysis
+WHERE tender_id = %(id)s AND kind = %(kind)s AND company_id = %(company_id)s
 """
 
 AI_UPSERT_SQL = """
-INSERT INTO ai_analysis (tender_id, kind, content_hash, result, model,
-                         input_tokens, output_tokens)
-VALUES (%(tender_id)s, %(kind)s, %(content_hash)s, %(result)s, %(model)s,
-        %(input_tokens)s, %(output_tokens)s)
-ON CONFLICT (tender_id, kind) DO UPDATE SET
+INSERT INTO ai_analysis (tender_id, kind, company_id, content_hash, result,
+                         model, input_tokens, output_tokens)
+VALUES (%(tender_id)s, %(kind)s, %(company_id)s, %(content_hash)s, %(result)s,
+        %(model)s, %(input_tokens)s, %(output_tokens)s)
+-- KOMPANIYA tahlili (match_v2, gonogo_v2) — katalog va profilga asoslanadi.
+-- `ai_analysis_private` qisman indeksi `WHERE company_id IS NOT NULL` bilan
+-- yaratilgan, ON CONFLICT ham AYNAN shu predikatni takrorlashi shart.
+-- UMUMIY tahlil (summary_v1) boshqa yo'ldan yuradi: etl_ai_summary.py.
+ON CONFLICT (tender_id, kind, company_id) WHERE company_id IS NOT NULL DO UPDATE SET
     content_hash  = EXCLUDED.content_hash,
     result        = EXCLUDED.result,
     model         = EXCLUDED.model,
@@ -665,11 +758,27 @@ _CP_COLS = ("id, name, category_code, keywords, unit, price, currency, "
             "stock_qty, stock_unit, stock_updated_at, cost_price, "
             "notify, created_at, updated_at")
 
-CATALOG_LIST_SQL = f"SELECT {_CP_COLS} FROM catalog_product ORDER BY created_at"
+# KATALOG — KOMPANIYA SIRI (J1.6). Har so'rovda `company_id` MAJBURIY:
+# tannarx, qoldiq va mahsulot ro'yxati boshqa ijarachiga ko'rinmasligi kerak.
+# `id` bo'yicha murojaatda ham filtr bor — begona id ni taxmin qilib
+# tahrirlash/o'chirish mumkin bo'lmasin (IDOR).
+# `codes` — INSON TASDIQLAGAN tasniflagich prefikslari. Moslashtirish
+# uchun BIRLAMCHI kalit. Manba `v_catalog_code_active`, ya'ni
+# tasdiqlanmagan taklif bu yerga TUSHMAYDI (schema_patch_goodcode.sql).
+CATALOG_LIST_SQL = (
+    f"SELECT {_CP_COLS}, "
+    "  COALESCE(ARRAY(SELECT v.code FROM v_catalog_code_active v "
+    "                  WHERE v.product_id = catalog_product.id "
+    "                    AND v.company_id = catalog_product.company_id), "
+    "           '{}') AS codes "
+    "FROM catalog_product "
+    "WHERE company_id = %(company_id)s ORDER BY created_at")
 
 CATALOG_INSERT_SQL = f"""
-INSERT INTO catalog_product (name, category_code, keywords, unit, price, currency, notify)
-VALUES (%(name)s, %(category_code)s, %(keywords)s, %(unit)s, %(price)s, %(currency)s, %(notify)s)
+INSERT INTO catalog_product (company_id, name, category_code, keywords, unit,
+                             price, currency, notify)
+VALUES (%(company_id)s, %(name)s, %(category_code)s, %(keywords)s, %(unit)s,
+        %(price)s, %(currency)s, %(notify)s)
 RETURNING {_CP_COLS}
 """
 
@@ -678,14 +787,23 @@ UPDATE catalog_product SET
     name=%(name)s, category_code=%(category_code)s, keywords=%(keywords)s,
     unit=%(unit)s, price=%(price)s, currency=%(currency)s, notify=%(notify)s,
     updated_at=now()
-WHERE id=%(id)s
+WHERE id=%(id)s AND company_id=%(company_id)s
 RETURNING {_CP_COLS}
 """
 
-CATALOG_DELETE_SQL = "DELETE FROM catalog_product WHERE id=%(id)s RETURNING id"
+CATALOG_DELETE_SQL = ("DELETE FROM catalog_product "
+                      "WHERE id=%(id)s AND company_id=%(company_id)s RETURNING id")
 
-CATALOG_STATE_GET_SQL = "SELECT last_seen_at FROM catalog_state WHERE id=1"
-CATALOG_SEEN_SQL = "UPDATE catalog_state SET last_seen_at=now() WHERE id=1 RETURNING last_seen_at"
+# `catalog_state` endi HAR KOMPANIYAGA bitta qator (singleton sindirilgan).
+# Yozuv bo'lmasligi mumkin — SEEN uni o'zi yaratadi (uq_catalog_state_company).
+CATALOG_STATE_GET_SQL = ("SELECT last_seen_at FROM catalog_state "
+                         "WHERE company_id = %(company_id)s")
+CATALOG_SEEN_SQL = """
+INSERT INTO catalog_state (company_id, last_seen_at)
+VALUES (%(company_id)s, now())
+ON CONFLICT (company_id) DO UPDATE SET last_seen_at = now()
+RETURNING last_seen_at
+"""
 
 # --- /freshness (H bosqich) — ma'lumot yangiligi + ETL sog'ligi ---
 # Har platforma uchun ENG SO'NGGI yurish.
@@ -698,6 +816,37 @@ ORDER BY source_platform, started_at DESC
 """
 
 # Aniqlash-kechikishi statistikasi (e'londan biz topgunga qadar), ochiq tenderlar
+# ---------------------------------------------------------------------------
+# KORPUS HOLATI — semantik qidiruv qancha tenderni KO'RADI
+#
+# "TUGADI" HOLATI YO'Q. Korpus doim o'sib turadi: har soat yangi tender
+# keladi, hujjati chiqariladi, bo'laklarga bo'linadi. Ya'ni to'g'ri
+# xulosa "quvib yetdi", "tamom" emas — va ko'rsatkich shuni aytishi
+# kerak, aks holda "0 qoldi" ni ko'rgan odam ish tugagan deb o'ylardi.
+#
+# `sutkalik_yangi` shuning uchun bor: navbat qisqarayotganini emas,
+# QUVIB YETAYOTGANINI ko'rsatadi.
+# ---------------------------------------------------------------------------
+#: TODO(§16.67): `detection` statistikasida minimal namuna
+#: sharti yo'q. Bugun n = 815, ya'ni xavf yo'q; yangi bazada
+#: BITTA kuzatuvdan mediana chiqarardi. `MOSLIK_MIN` bilan bir
+#: xil chora kerak.
+CORPUS_STATS_SQL = """
+SELECT count(*)                                        AS jami,
+       count(*) FILTER (WHERE embedding IS NULL)       AS vektorsiz,
+       count(*) FILTER (WHERE created_at > now() - interval '24 hours')
+                                                       AS sutkalik_yangi,
+       count(DISTINCT tender_id)                       AS tenderlar,
+       -- SOVUQ START yorlig'i. Bo'laklash endigina yurgan bo'lsa
+       -- "oxirgi 24 soat" BUTUN korpusni qamrab oladi (o'lchandi:
+       -- 118 426 dan 118 426) va `sutkalik_yangi` sur'at emas, bir
+       -- martalik to'ldirish bo'ladi.
+       EXTRACT(EPOCH FROM (now() - min(created_at))) / 86400.0
+                                                       AS yosh_kun
+FROM doc_chunk
+"""
+
+
 DETECTION_STATS_SQL = """
 SELECT
     count(*) FILTER (WHERE publicated_at IS NOT NULL) AS n,
@@ -726,18 +875,24 @@ ORDER BY status_id NULLS LAST, status_code
 _PS_COLS = ("id, markup_percent, risk_reserve_percent, risk_reserve_fixed, "
             "logistics_percent, logistics_fixed, vat_percent, currency, updated_at")
 
-# Sozlamalar bitta yozuv (id=1) — patch uni INSERT qilib qo'ygan, shuning
-# uchun SELECT hech qachon bo'sh qaytarmaydi.
-PRICING_SETTINGS_GET_SQL = f"SELECT {_PS_COLS} FROM pricing_settings WHERE id = 1"
+# NARX SOZLAMALARI — har KOMPANIYAGA bitta yozuv (J1.6).
+# Ilgari `WHERE id = 1` edi: singleton `schema_patch_multitenant.sql` da
+# sindirilgan, endi kalit — `company_id` (uq_pricing_settings_company).
+# DIQQAT: yangi kompaniyada yozuv BO'LMASLIGI mumkin — chaqiruvchi `None`
+# holatini qayta ishlashi kerak (`pricing.build_inputs` buni biladi:
+# bo'sh sozlama -> DEFAULTS).
+PRICING_SETTINGS_GET_SQL = (f"SELECT {_PS_COLS} FROM pricing_settings "
+                            "WHERE company_id = %(company_id)s")
 
 PRICING_SETTINGS_UPSERT_SQL = f"""
 INSERT INTO pricing_settings (
-    id, markup_percent, risk_reserve_percent, risk_reserve_fixed,
+    company_id, markup_percent, risk_reserve_percent, risk_reserve_fixed,
     logistics_percent, logistics_fixed, vat_percent, currency, updated_at)
-VALUES (1, %(markup_percent)s, %(risk_reserve_percent)s, %(risk_reserve_fixed)s,
-        %(logistics_percent)s, %(logistics_fixed)s, %(vat_percent)s,
-        %(currency)s, now())
-ON CONFLICT (id) DO UPDATE SET
+VALUES (%(company_id)s, %(markup_percent)s, %(risk_reserve_percent)s,
+        %(risk_reserve_fixed)s, %(logistics_percent)s, %(logistics_fixed)s,
+        %(vat_percent)s, %(currency)s, now())
+-- `id` ketma-ketlikdan keladi (patch DEFAULT qo'ygan); kalit — company_id.
+ON CONFLICT (company_id) DO UPDATE SET
     markup_percent=EXCLUDED.markup_percent,
     risk_reserve_percent=EXCLUDED.risk_reserve_percent,
     risk_reserve_fixed=EXCLUDED.risk_reserve_fixed,
@@ -752,12 +907,19 @@ RETURNING {_PS_COLS}
 _TP_COLS = ("tender_id, inputs, result, manual_price, currency, note, "
             "created_at, updated_at")
 
-TENDER_PRICING_GET_SQL = f"SELECT {_TP_COLS} FROM tender_pricing WHERE tender_id = %(id)s"
+# TENDER SMETASI — ijarachi siri (tannarx!). PK (tender_id, company_id):
+# ikki kompaniya AYNI tenderga alohida smeta saqlaydi.
+TENDER_PRICING_GET_SQL = (f"SELECT {_TP_COLS} FROM tender_pricing "
+                          "WHERE tender_id = %(id)s AND company_id = %(company_id)s")
 
 TENDER_PRICING_UPSERT_SQL = f"""
-INSERT INTO tender_pricing (tender_id, inputs, result, manual_price, currency, note)
-VALUES (%(tender_id)s, %(inputs)s, %(result)s, %(manual_price)s, %(currency)s, %(note)s)
-ON CONFLICT (tender_id) DO UPDATE SET
+INSERT INTO tender_pricing (tender_id, company_id, inputs, result,
+                            manual_price, currency, note)
+VALUES (%(tender_id)s, %(company_id)s, %(inputs)s, %(result)s,
+        %(manual_price)s, %(currency)s, %(note)s)
+-- PK kengaygan: `ON CONFLICT (tender_id)` endi hech qanday unique
+-- cheklovga mos kelmaydi va so'rov YIQILADI.
+ON CONFLICT (tender_id, company_id) DO UPDATE SET
     inputs=EXCLUDED.inputs, result=EXCLUDED.result,
     manual_price=EXCLUDED.manual_price, currency=EXCLUDED.currency,
     note=EXCLUDED.note, updated_at=now()

@@ -37,6 +37,7 @@ import json
 import os
 import sys
 import time
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -65,6 +66,10 @@ HEADERS = {
     # Foydalanuvchi agentini halol ko'rsatamiz
     "User-Agent": "xt-xarid-tender-aggregator/0.1 (research; contact: you@example.com)",
 }
+# O'zbekiston vaqti. ATAYIN qattiq yozilgan: manba sanalari mahalliy vaqtda
+# beriladi, baza ham Asia/Tashkent da yuradi, mamlakatda esa yozgi vaqt yo'q
+# (doim UTC+5). ETL boshqa mintaqadagi mashinada yurganda ham muddat siljimasin.
+TZ = timezone(timedelta(hours=5))
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +101,22 @@ def fetch_all_tenders(statuses: Optional[List[str]],
     """
     Berilgan reyestrni (ref_tender_public / ref_selection_public) limit+offset
     bilan sahifalab, to'liq yig'adi. Bo'sh sahifa (result==[]) kelguncha davom.
+
+    NATIJA `id` BO'YICHA TAKRORSIZ. Sabab: manba OFFSET bilan sahifalaydi va
+    ro'yxatni YANGISI BIRINCHI tartibida beradi. Sahifalar orasida yangi
+    protsedura e'lon qilinsa, butun ro'yxat bir pozitsiya pastga suriladi va
+    chegaradagi yozuv KEYINGI sahifada YANA keladi. O'sha takror butun ETLni
+    yiqitardi:
+
+        psycopg2.errors.CardinalityViolation: ON CONFLICT DO UPDATE
+        ne mozhet podeystvovat na stroku dvazhdy
+
+    Yuklash bitta tranzaksiyada bo'lgani uchun bu FAQAT bitta yozuvni emas,
+    BUTUN yurishni bekor qilardi — shuning uchun ba'zi soatlarda xt-xarid'dan
+    umuman yangi ma'lumot tushmasdi (etl_cron.log: "!! XATO:" bo'sh matn bilan).
+
+    Takrorni shu yerda, manbaga eng yaqin joyda olib tashlaymiz: shunda
+    lot/tovar qatorlari ham ikkilanmaydi.
     """
     session = requests.Session()
     filters: Dict[str, Any] = {}
@@ -134,15 +155,75 @@ def fetch_all_tenders(statuses: Optional[List[str]],
         offset += PAGE_LIMIT
         time.sleep(REQUEST_DELAY)
 
-    return all_records
+    # `id` bo'yicha takrorsizlantirish — OXIRGISI saqlanadi (u yangiroq
+    # sahifadan, ya'ni holati eng so'nggi).
+    unique: Dict[Any, Dict[str, Any]] = {}
+    for r in all_records:
+        unique[r.get("id")] = r
+    dropped = len(all_records) - len(unique)
+    if dropped:
+        print(f"  ! sahifalash takrori: {dropped} ta yozuv bir necha sahifada "
+              f"kelgan (id bo'yicha birlashtirildi)")
+    return list(unique.values())
+
+
+# ---------------------------------------------------------------------------
+# MUDDAT — manba FAQAT SANA beradi, biz esa SOATgacha aniqlik talab qilamiz
+#
+# `close_at` manbada '2026-08-28' ko'rinishida keladi. Postgres uni o'sha
+# kunning 00:00 iga aylantiradi, ya'ni saqlangan muddat haqiqiysidan 24 soatgacha
+# OLDIN bo'ladi. Oqibati o'lchandi (2026-08-12): bugun tugaydigan 18 ta ochiq
+# xt-xarid tenderi ro'yxatdan YARIM TUNDA yo'qolgan edi — API `close_at > now()`
+# sharti bilan filtrlaydi, ularga esa hali soatlar bor edi. Qolganlarida ham
+# "N soat qoldi" hisoblagichi bir kunga kam ko'rsatardi.
+#
+# Aniq vaqt manbada BOR: `remain_time` — so'rov paytida muddatgacha QOLGAN
+# SEKUNDLAR. Tekshirildi (ochiq yozuvlar): fetch vaqti + remain_time har safar
+# manba bergan `close_at` SANASINING ichiga tushdi, ya'ni ikkalasi bir xil
+# muddatni ko'rsatadi. Shuning uchun vaqtni remain_time dan tiklaymiz, sanani
+# esa SANITY tekshiruvi sifatida ishlatamiz (mos kelmasa — ishonmaymiz).
+#
+# remain_time bo'lmasa/mos kelmasa: 00:00 emas, KUN OXIRI. Sanada berilgan
+# muddat o'sha kun davomida amal qiladi — bu eng kam zarar keltiradigan taxmin.
+# ---------------------------------------------------------------------------
+def precise_close_at(raw: Any, remain_time: Any, fetched_at: datetime) -> Any:
+    """Sana ko'rinishidagi muddatni aniq vaqtga aylantiradi.
+
+    Manba vaqt bilan bersa (yoki sana umuman yo'q bo'lsa) — tegmaydi.
+    """
+    if not raw:
+        return raw
+    s = str(raw)
+    if len(s) > 10:          # allaqachon sana+vaqt
+        return raw
+    try:
+        day = date.fromisoformat(s[:10])
+    except ValueError:       # kutilmagan format — o'zgartirmasdan o'tkazamiz
+        return raw
+
+    try:
+        remain = int(remain_time)
+    except (TypeError, ValueError):
+        remain = None
+
+    if remain and remain > 0:
+        exact = fetched_at + timedelta(seconds=remain)
+        if exact.astimezone(TZ).date() == day:
+            return exact.isoformat()
+
+    return datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=TZ).isoformat()
 
 
 # ---------------------------------------------------------------------------
 # Transform — RPC yozuvini jadval qatorlariga ajratadi (namunada tasdiqlangan)
 # ---------------------------------------------------------------------------
-def transform(rec: Dict[str, Any]) -> Tuple[dict, List[dict], List[dict], Dict[str, dict]]:
+def transform(rec: Dict[str, Any],
+              fetched_at: Optional[datetime] = None
+              ) -> Tuple[dict, List[dict], List[dict], Dict[str, dict]]:
     meta = rec.get("meta") or {}
     area = rec.get("area") or ""
+    if fetched_at is None:
+        fetched_at = datetime.now(TZ)
     # MUHIM: dim_area.area_id TO'LIQ nuqtali yo'lni saqlaydi ('33.2137.2138.2140'),
     # oxirgi segment ('2140') EMAS. Shuning uchun FK (area_leaf_id → dim_area.area_id)
     # mos kelishi uchun bu yerga ham to'liq yo'lni beramiz (leaf tugun IDsi = yo'l).
@@ -160,14 +241,17 @@ def transform(rec: Dict[str, Any]) -> Tuple[dict, List[dict], List[dict], Dict[s
         "participants_of_joint_purchase": rec.get("participants_of_joint_purchase"),
         "green": rec.get("green"),
         "area_path": area or None, "area_leaf_id": area_leaf,
-        "company_id": rec.get("company_id"),
+        "buyer_org_id": rec.get("company_id"),   # manba kaliti o'zgarmagan
         "company_name": (rec.get("company_name") or "").strip() or None,
         "contract_num": rec.get("contract_num"),
         "contract_number": rec.get("contract_number"),
         "contract_id": rec.get("contract_id"),
         "created_at": rec.get("created_at"), "inserted_at": rec.get("inserted_at"),
         "publicated_at": rec.get("publicated_at"), "starting_date": rec.get("starting_date"),
-        "agree_at": rec.get("agree_at"), "close_at": rec.get("close_at"),
+        "agree_at": rec.get("agree_at"),
+        # Sana -> aniq vaqt (yuqoridagi izohga qarang)
+        "close_at": precise_close_at(rec.get("close_at"),
+                                     rec.get("remain_time"), fetched_at),
         "ends_at": rec.get("ends_at"),
         "close_docs_objections_at": rec.get("close_docs_objections_at"),
         "docs_objections_remain_time": rec.get("docs_objections_remain_time"),
@@ -209,7 +293,7 @@ TENDER_COLS = [
     "id","source_id","source_platform",
     "type","name","status","totalcost","currency","lang","is_new_multilot",
     "lot_count","good_count","part_count","participants_of_joint_purchase","green",
-    "area_path","area_leaf_id","company_id","company_name","contract_num",
+    "area_path","area_leaf_id","buyer_org_id","company_name","contract_num",
     "contract_number","contract_id","created_at","inserted_at","publicated_at",
     "starting_date","agree_at","close_at","ends_at","close_docs_objections_at",
     "docs_objections_remain_time","remain_time","raw_json",
@@ -233,7 +317,11 @@ def dedupe_by_key(rows: List[dict], key_cols: Tuple[str, ...], label: str) -> Li
 
 
 def load_to_db(dsn: str, tenders, lots, goods, categories) -> None:
-    # Yuklashdan oldin PK bo'yicha dedup — manba ma'lumotidagi takrorlar
+    # Yuklashdan oldin PK bo'yicha dedup — manba ma'lumotidagi takrorlar.
+    # `tender` ham tekshiriladi: bitta INSERT ichida takror `id` bo'lsa Postgres
+    # butun tranzaksiyani CardinalityViolation bilan bekor qiladi (asosiy sabab
+    # fetch_all_tenders da olib tashlangan, bu — kafolat).
+    tenders = dedupe_by_key(tenders, ("id",), "tender")
     lots  = dedupe_by_key(lots,  ("tender_id", "lot_id"), "tender_lot")
     goods = dedupe_by_key(goods, ("tender_id", "lot_id", "good_code"), "tender_good")
 
@@ -313,6 +401,8 @@ def main() -> None:
     label = "BARCHA statuslar" if args.all_statuses else "faqat 'open' (ochiq)"
     print(f"[1/3] Yig'ish boshlandi — {args.ref}, {label}")
 
+    # `remain_time` shu paytga nisbatan o'lchanadi — muddatni tiklashda kerak.
+    fetched_at = datetime.now(TZ)
     records = fetch_all_tenders(statuses, args.ref)
     if args.limit:
         records = records[:args.limit]
@@ -322,7 +412,7 @@ def main() -> None:
     print("[2/3] Transform...")
     all_t, all_l, all_g, all_c = [], [], [], {}
     for rec in records:
-        t, l, g, c = transform(rec)
+        t, l, g, c = transform(rec, fetched_at)
         all_t.append(t); all_l.extend(l); all_g.extend(g); all_c.update(c)
     print(f"[2/3] {len(all_t)} protsedura, {len(all_l)} lot, {len(all_g)} tovar, "
           f"{len(all_c)} kategoriya.\n")

@@ -22,6 +22,9 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
+import io                                           # noqa: E402
+import zipfile                                      # noqa: E402
+
 import psycopg2                                     # noqa: E402
 from psycopg2.extras import RealDictCursor          # noqa: E402
 
@@ -134,6 +137,136 @@ def test_parsers() -> None:
 # ---------------------------------------------------------------------------
 # 3. FORMAT ANIQLASH va STATUS mantig'i (tarmoqsiz)
 # ---------------------------------------------------------------------------
+def _zip_yasa(azolar) -> bytes:
+    """Sinov uchun ZIP quradi — diskka tegmasdan, xotirada."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for nom, matn in azolar:
+            z.writestr(nom, matn)
+    return buf.getvalue()
+
+
+def test_zip() -> None:
+    """ZIP arxivlari — HUJUM HOLATLARI va sehrli baytlar.
+
+    Arxiv TASHQI MANBADAN keladi. Tarmoq talab qilinmaydi: barcha
+    holatlar shu yerda quriladi.
+    """
+    section("3b. ZIP arxivlari — xavfsizlik")
+
+    # --- ZIP SLIP -----------------------------------------------------
+    # Diskka HECH QACHON yozmaymiz, shuning uchun slip TUZILISHIGA KO'RA
+    # mumkin emas. Shunday bo'lsa ham nom yorliq sifatida tozalanadi —
+    # javobda chalg'ituvchi yo'l ko'rinmasin.
+    matn, _, _, _ = E.extract_zip(
+        _zip_yasa([("../../../../etc/passwd.txt", "root:x:0:0")]))
+    check("zip slip: yo'l yorliqdan olib tashlanadi",
+          "../" not in matn and "passwd.txt" in matn, matn[:80])
+
+    # --- ZIP BOMBA ----------------------------------------------------
+    # Chegara OCHISHDAN OLDIN, e'lon qilingan siqilmagan hajm bo'yicha.
+    matn, _, _, xato = E.extract_zip(
+        _zip_yasa([("katta.txt", "A" * (E.ZIP_MAX_MEMBER + 1000))]))
+    check("zip bomba: katta a'zo o'tkazilmaydi",
+          bool(xato) or "A" * 100 not in matn, f"xato={xato}")
+
+    matn, _, _, xato = E.extract_zip(
+        _zip_yasa([(f"f{i}.txt", "matn " * 20)
+                   for i in range(E.ZIP_MAX_MEMBERS + 5)]))
+    check("a'zolar soni chegarasi", bool(xato) and "a'zo" in (xato or ""),
+          f"xato={xato}")
+
+    # --- ICHMA-ICH ARXIV ----------------------------------------------
+    ichki = _zip_yasa([("ichki.txt", "ICHKIMATN " * 30)])
+    tashqi = _zip_yasa([("ichki.zip", ichki)])
+    matn, _, _, _ = E.extract_zip(tashqi)
+    check("1-daraja ichki arxiv ochiladi", "ICHKIMATN" in matn, matn[:80])
+    matn, _, _, _ = E.extract_zip(_zip_yasa([("o2.zip", tashqi)]))
+    check("2-daraja ichki arxiv OCHILMAYDI", "ICHKIMATN" not in matn,
+          matn[:80])
+
+    # --- NOSOZ ARXIV --------------------------------------------------
+    _, _, _, xato = E.extract_zip(b"PK\x03\x04buzilgan")
+    check("buzilgan arxiv: xato qaytadi, yiqilmaydi", bool(xato), f"{xato}")
+    _, _, _, xato = E.extract_zip(
+        _zip_yasa([("a.png", b"\x89PNG"), ("b.exe", b"MZ")]))
+    check("o'qiladigan hujjat yo'q -> aniq sabab",
+          bool(xato) and "o'qiladigan" in (xato or ""), f"{xato}")
+
+    # --- MATN CHIQADI -------------------------------------------------
+    matn, _, chiqargich, xato = E.extract_zip(
+        _zip_yasa([("shartnoma.txt", "Kafolat muddati 12 oy. " * 5)]))
+    check("oddiy a'zodan matn olinadi", "Kafolat muddati" in matn, f"{xato}")
+    check("a'zo nomi sarlavha bo'lib qo'shiladi", "shartnoma.txt" in matn)
+    check("chiqargich a'zo sonini ko'rsatadi",
+          "zipfile(1/1)" == chiqargich, str(chiqargich))
+
+    # --- SEHRLI BAYTLAR -----------------------------------------------
+    section("3c. Sehrli baytlar — kengaytma yolg'on bo'lishi mumkin")
+    # O'LCHANGAN (2026-08-25): `.doc` deb belgilangan fayllarning bir
+    # qismi aslida `docx`. Kengaytmaga ishonsak, o'qiladigan hujjatni
+    # bekorga rad etardik.
+    check("pdf", E.sniff_magic(b"%PDF-1.4 xxx", "doc") == "pdf")
+    check("ole2 (eski .doc)",
+          E.sniff_magic(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "doc") == "ole2")
+    check("rar", E.sniff_magic(b"Rar!\x1a\x07\x01\x00", "zip") == "rar")
+    check("oddiy zip", E.sniff_magic(_zip_yasa([("a.txt", "x")]), "doc") == "zip")
+    check("noma'lum bayt -> kengaytma qoladi",
+          E.sniff_magic(b"\x00\x01\x02\x03", "pdf") == "pdf")
+    check("ole2 qo'llab-quvvatlanadi", E.is_supported("ole2"))
+    check("zip qo'llab-quvvatlanadi", E.is_supported("zip"))
+    check("rar hamon qo'llab-quvvatlanmaydi", not E.is_supported("rar"))
+
+
+def test_doc_ole2() -> None:
+    """Eski .doc (OLE2) — kutubxonasiz ajratgich.
+
+    Word 97 matnni UTF-16LE bo'lib saqlaydi. Sun'iy fayl quramiz:
+    OLE2 imzosi + binar shovqin + haqiqiy matn.
+    """
+    section("3d. Eski .doc (OLE2) — kutubxonasiz ajratish")
+
+    MATN = ("XIZMAT KO'RSATISH SHARTNOMASI. Kafolat muddati 12 oy "
+            "qilib belgilanadi va tovar qabul qilingan kundan boshlanadi. "
+            "To'lov shartlari: 30 kun ichida amalga oshiriladi.")
+    ole = (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"      # OLE2 imzosi
+           + b"\x00\x01\x02\x03" * 40                  # binar shovqin
+           + MATN.encode("utf-16-le")
+           + b"\xff\xfe" * 30)
+
+    check("sniff_magic OLE2 ni taniydi", E.sniff_magic(ole, "doc") == "ole2")
+    matn, _, chiqargich, xato = E.extract_doc(ole)
+    check("shartnoma matni ajratildi", "SHARTNOMASI" in matn,
+          f"xato={xato} {matn[:70]}")
+    check("kafolat bandi to'liq chiqdi", "Kafolat muddati 12 oy" in matn,
+          matn[:90])
+    check("chiqargich nomi", chiqargich == "ole2-xom", str(chiqargich))
+
+    # --- SHOVQIN FILTRI ---
+    # O'LCHANGAN: namunalarning birida matn `яяяяяя...` bilan
+    # boshlanardi — Word ning ichki binar maydoni cp1251 da shunday
+    # o'qilgan. Uzun, lekin ma'nosiz.
+    check("bir xil belgi takrori shovqin deb sanaladi",
+          E._ole_shovqinmi("я" * 80))
+    check("bo'sh bo'lak shovqin", E._ole_shovqinmi("   "))
+    check("haqiqiy matn shovqin EMAS",
+          not E._ole_shovqinmi("Kafolat muddati 12 oy bo'ladi va "
+                               "to'lov 30 kun ichida"))
+
+    shovqinli = (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+                 + ("я" * 200).encode("utf-16-le")
+                 + MATN.encode("utf-16-le"))
+    matn, _, _, _ = E.extract_doc(shovqinli)
+    check("shovqin natijadan chiqarildi", "я" * 40 not in matn, matn[:70])
+    check("shovqin yonidagi matn saqlandi", "Kafolat muddati" in matn,
+          matn[:70])
+
+    # --- MATNSIZ FAYL ---
+    _, _, _, xato = E.extract_doc(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+                                  + b"\x00" * 500)
+    check("matnsiz OLE2 -> aniq sabab", bool(xato), str(xato))
+
+
 def test_status_logic() -> None:
     section("3. Format / status mantig'i (tarmoqsiz)")
 
@@ -344,6 +477,8 @@ def main() -> None:
     try:
         test_schema(conn)
         test_parsers()
+        test_zip()
+        test_doc_ole2()
         test_status_logic()
         if not args.offline:
             import requests

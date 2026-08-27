@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { api } from '@/api'
 import Icon from './Icon'
 import CatalogImport from './CatalogImport'
-import { money } from '@/format'
+import { useFormat } from '@/format'
+import { useT } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -13,6 +14,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
+import { ConfirmDialog, useConfirm } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 import type { Category, Product } from '@/types'
 
@@ -26,6 +28,8 @@ interface CatalogViewProps {
 }
 
 export default function CatalogView({ items, categories, onChanged, onOpenMatch }: CatalogViewProps) {
+  const t = useT()
+  const f = useFormat()
   const [editing, setEditing] = useState<Product | 'new' | null>(null)
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -33,30 +37,30 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
   // O'chirish xatosi KO'RINISHI kerak. Ilgari `await api.deleteProduct(...)`
   // to'g'ridan-to'g'ri onClick ichida edi: rad etilgan promise jimgina yo'qolar,
   // foydalanuvchi esa "tugma ishlamayapti" deb ko'rardi.
+  const confirmDelete = useConfirm<Product>()
   async function remove(p: Product) {
-    if (!window.confirm(`"${p.name}" o‘chirilsinmi?`)) return
     setError(null)
     try {
       await api.deleteProduct(p.id)
       onChanged()
     } catch (e) {
-      setError(`"${p.name}" o‘chirilmadi: ${(e as Error).message}`)
+      setError(t('common.deleteFailed', { name: p.name, msg: (e as Error).message }))
     }
   }
 
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[13px] text-muted-foreground">
-          Nima sotasiz? Kiritganingizga qarab “Sizga mos” tenderlarni topadi.
+        <p className="text-body text-muted-foreground">
+          {t('cat.lead')}
         </p>
         <div className="flex gap-2">
           {/* P0-4 — Excel/CSV/Google Sheets dan ommaviy import */}
           <Button variant="outline" onClick={() => setImporting((v) => !v)}>
-            <Icon name="download" size={14} /> Import
+            <Icon name="download" size={14} /> {t('cat.import')}
           </Button>
           <Button onClick={() => setEditing('new')}>
-            <Icon name="plus" size={14} /> Mahsulot qo‘shish
+            <Icon name="plus" size={14} /> {t('cat.addProduct')}
           </Button>
         </div>
       </div>
@@ -64,7 +68,7 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
       {importing && <CatalogImport onImported={onChanged} onClose={() => setImporting(false)} />}
 
       {error && (
-        <div className="mb-3 rounded-lg border border-urgent/40 bg-urgent-soft px-3 py-2 text-[13px] text-urgent">
+        <div className="mb-3 rounded-lg border border-urgent/40 bg-urgent-soft px-3 py-2 text-body text-urgent-strong">
           {error}
         </div>
       )}
@@ -81,23 +85,23 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
       {items.length === 0 && !editing && (
         <Empty className="rounded-xl border border-dashed bg-card">
           <EmptyHeader>
-            <EmptyTitle>Katalog bo‘sh</EmptyTitle>
-            <EmptyDescription>Birinchi mahsulotni qo‘shing.</EmptyDescription>
+            <EmptyTitle>{t('cat.empty')}</EmptyTitle>
+            <EmptyDescription>{t('cat.emptyHint')}</EmptyDescription>
           </EmptyHeader>
         </Empty>
       )}
 
       {items.length > 0 && (
         <div className="overflow-x-auto rounded-xl border bg-card">
-          <Table className="text-[13px]">
+          <Table className="text-body">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead>Mahsulot / xizmat</TableHead>
-                <TableHead className="w-[180px]">Kategoriya</TableHead>
-                <TableHead className="w-[140px] text-right">Narx</TableHead>
-                <TableHead className="w-[110px] text-right">Qoldiq</TableHead>
-                <TableHead className="w-[110px] text-right">Mos tender</TableHead>
-                <TableHead className="w-[86px] text-right">Amallar</TableHead>
+                <TableHead>{t('cat.thProduct')}</TableHead>
+                <TableHead className="w-[180px]">{t('cat.thCategory')}</TableHead>
+                <TableHead className="w-[140px] text-right">{t('cat.thPrice')}</TableHead>
+                <TableHead className="w-[110px] text-right">{t('cat.thStock')}</TableHead>
+                <TableHead className="w-[110px] text-right">{t('cat.thMatches')}</TableHead>
+                <TableHead className="w-[86px] text-right">{t('cat.thActions')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -106,16 +110,16 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
                   <TableCell>
                     <div className="font-medium">{p.name}</div>
                     {p.keywords.length > 0 && (
-                      <div className="text-[12px] text-muted-foreground">
+                      <div className="text-caption text-muted-foreground">
                         {p.keywords.join(' · ')}
                       </div>
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
-                    {catName(categories, p.category_code)}
+                    {catName(categories, p.category_code) ?? t('cat.noCategory')}
                   </TableCell>
                   <TableCell className="tabular text-right">
-                    {p.price != null ? money(p.price, p.currency) : '—'}
+                    {p.price != null ? f.money(p.price, p.currency) : '—'}
                     {p.unit ? <span className="text-muted-foreground"> /{p.unit}</span> : null}
                   </TableCell>
                   <TableCell className="tabular text-right">
@@ -134,15 +138,15 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
                   <TableCell className="text-right">
                     <button
                       className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                      title="Tahrirlash" aria-label={`${p.name} — tahrirlash`}
+                      title={t('common.edit')} aria-label={`${p.name} — ${t('common.edit')}`}
                       onClick={() => setEditing(p)}
                     >
                       <Icon name="edit" size={14} />
                     </button>
                     <button
-                      className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-urgent-soft hover:text-urgent"
-                      title="O‘chirish" aria-label={`${p.name} — o‘chirish`}
-                      onClick={() => remove(p)}
+                      className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-urgent-soft hover:text-urgent-strong"
+                      title={t('common.delete')} aria-label={`${p.name} — ${t('common.delete')}`}
+                      onClick={() => confirmDelete.ask(p)}
                     >
                       <Icon name="trash" size={14} />
                     </button>
@@ -153,12 +157,18 @@ export default function CatalogView({ items, categories, onChanged, onOpenMatch 
           </Table>
         </div>
       )}
+
+      <ConfirmDialog
+        {...confirmDelete.props}
+        title={t('common.confirmDelete', { name: confirmDelete.target?.name ?? '' })}
+        onConfirm={() => confirmDelete.target && remove(confirmDelete.target)}
+      />
     </div>
   )
 }
 
-function catName(tree: Category[], code: string | null) {
-  if (!code) return '— kategoriyasiz —'
+function catName(tree: Category[], code: string | null): string | null {
+  if (!code) return null
   for (const p of tree) {
     if (p.code === code) return p.name
     for (const c of p.children) if (c.code === code) return c.name
@@ -173,6 +183,7 @@ function ProductForm({ product, categories, onSaved, onCancel }: {
   onSaved: () => void
   onCancel: () => void
 }) {
+  const t = useT()
   const editing = !!product?.id
   const [name, setName] = useState(product?.name || '')
   const [cat, setCat] = useState(product?.category_code || '')
@@ -191,7 +202,7 @@ function ProductForm({ product, categories, onSaved, onCancel }: {
   }
 
   async function save() {
-    if (!name.trim()) { setMsg({ ok: false, text: 'Mahsulot nomini kiriting.' }); return }
+    if (!name.trim()) { setMsg({ ok: false, text: t('cat.errNoName') }); return }
     setSaving(true); setMsg(null)
     const body = {
       name: name.trim(), category_code: cat || null, keywords,
@@ -202,30 +213,32 @@ function ProductForm({ product, categories, onSaved, onCancel }: {
       if (editing) await api.updateProduct(product!.id, body)
       else await api.createProduct(body)
       onSaved()
-    } catch (e) { setMsg({ ok: false, text: 'Xatolik: ' + (e as Error).message }) }
+    } catch (e) {
+      setMsg({ ok: false, text: t('common.errorWith', { msg: (e as Error).message }) })
+    }
     finally { setSaving(false) }
   }
 
   return (
     <Card className="mb-4 max-w-[760px] p-5">
-      <h3 className="mb-4 text-[17px] font-bold">
-        {editing ? 'Mahsulotni tahrirlash' : 'Yangi mahsulot / xizmat'}
+      <h3 className="mb-4 text-title font-semibold">
+        {t(editing ? 'cat.formEdit' : 'cat.formNew')}
       </h3>
 
       <div className="mb-4 grid gap-3 sm:grid-cols-[2fr_1fr]">
-        <Label text="Nomi *">
+        <Label text={t('cat.fName')}>
           <Input value={name} onChange={(e) => setName(e.target.value)}
-            placeholder="masalan: Ofis mebeli, Yo‘l qurilishi xizmati" />
+            placeholder={t('cat.fNamePlaceholder')} />
         </Label>
-        <Label text="Kategoriya">
+        <Label text={t('cat.fCategory')}>
           <Select value={cat || 'none'} onValueChange={(v) => setCat(v === 'none' ? '' : v)}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="none">— tanlang —</SelectItem>
+              <SelectItem value="none">{t('common.select')}</SelectItem>
               {categories.map((p) => (
                 <SelectGroup key={p.code}>
                   <SelectLabel>{p.name}</SelectLabel>
-                  <SelectItem value={p.code}>{p.name} (hammasi)</SelectItem>
+                  <SelectItem value={p.code}>{t('cat.fCategoryAll', { name: p.name })}</SelectItem>
                   {p.children.map((c) => (
                     <SelectItem key={c.code} value={c.code}>— {c.name}</SelectItem>
                   ))}
@@ -237,11 +250,11 @@ function ProductForm({ product, categories, onSaved, onCancel }: {
       </div>
 
       <div className="mb-4 grid gap-3 sm:grid-cols-3">
-        <Label text="Narx">
+        <Label text={t('cat.fPrice')}>
           <Input className="tabular" type="number" value={price}
             onChange={(e) => setPrice(e.target.value)} placeholder="0" />
         </Label>
-        <Label text="Valyuta">
+        <Label text={t('cat.fCurrency')}>
           <Select value={currency} onValueChange={setCurrency}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -250,25 +263,25 @@ function ProductForm({ product, categories, onSaved, onCancel }: {
             </SelectContent>
           </Select>
         </Label>
-        <Label text="Birlik">
+        <Label text={t('cat.fUnit')}>
           <Input value={unit} onChange={(e) => setUnit(e.target.value)}
-            placeholder="dona, m², xizmat" />
+            placeholder={t('cat.fUnitPlaceholder')} />
         </Label>
       </div>
 
-      <Label text="Kalit so‘zlar" note="Aniq nom bo‘yicha ham moslashtiradi.">
+      <Label text={t('cat.fKeywords')} note={t('cat.fKeywordsNote')}>
         <TagField value={keywords} input={kwInput} setInput={setKwInput} add={addKw}
           onRemove={(k) => setKeywords(keywords.filter((x) => x !== k))}
-          placeholder="монитор, стол… (Enter)" />
+          placeholder={t('cat.fKeywordsPlaceholder')} />
       </Label>
 
       <div className="mt-5 flex items-center gap-3">
         <Button onClick={save} disabled={saving}>
-          {saving ? 'Saqlanmoqda…' : (editing ? 'Yangilash' : 'Qo‘shish')}
+          {saving ? t('common.saving') : t(editing ? 'common.update' : 'common.add')}
         </Button>
-        <Button variant="ghost" onClick={onCancel}>Bekor qilish</Button>
+        <Button variant="ghost" onClick={onCancel}>{t('common.cancel')}</Button>
         {msg && (
-          <span className={cn('text-[13px]', msg.ok ? 'text-ok' : 'text-urgent')}>{msg.text}</span>
+          <span className={cn('text-body', msg.ok ? 'text-ok-strong' : 'text-urgent-strong')}>{msg.text}</span>
         )}
       </div>
     </Card>
@@ -282,9 +295,9 @@ export function Label({ text, note, children }: {
 }) {
   return (
     <label className="block">
-      <span className="mb-1.5 block text-[13px] font-semibold">{text}</span>
+      <span className="mb-1.5 block text-body font-semibold">{text}</span>
       {children}
-      {note && <span className="mt-1 block text-[11px] text-muted-foreground">{note}</span>}
+      {note && <span className="mt-1 block text-micro text-muted-foreground">{note}</span>}
     </label>
   )
 }
@@ -301,13 +314,13 @@ export function TagField({ value, input, setInput, add, onRemove, placeholder }:
     <div className="flex flex-wrap gap-1.5 rounded-md border border-input bg-card p-1.5">
       {value.map((k) => (
         <span key={k}
-          className="inline-flex items-center gap-1 rounded-full bg-secondary py-0.5 pl-2.5 pr-1 text-[12px] text-primary">
+          className="inline-flex items-center gap-1 rounded-full bg-secondary py-0.5 pl-2.5 pr-1 text-caption text-primary">
           {k}
-          <button className="px-0.5 text-[15px] leading-none" onClick={() => onRemove(k)}>×</button>
+          <button className="px-0.5 text-lead leading-none" onClick={() => onRemove(k)}>×</button>
         </span>
       ))}
       <input
-        className="min-w-[160px] flex-1 bg-transparent p-1 text-[13px] outline-none placeholder:text-muted-foreground"
+        className="min-w-[160px] flex-1 bg-transparent p-1 text-base md:text-body outline-none placeholder:text-muted-foreground"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add() } }}

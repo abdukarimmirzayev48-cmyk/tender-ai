@@ -1,0 +1,143 @@
+# -*- coding: utf-8 -*-
+"""SINOV: `api/atama.py` — uch yozuv bitta manbadan.
+
+Bu sinov UCHTA HAQIQIY XATONI qaytmasligi uchun yozilgan. Har biri
+alohida joyda chiqqan, lekin bir sinfdan:
+
+  1. §16.28 — leksik qidiruv tillararo 0/8 berardi: "kafolat" ni
+     "кафолат" ga o'girish TARJIMA emas, hujjatda "гарантийный".
+  2. §16.29 — eval baholovchisi "duch kelinmadi" ni tanimadi va
+     TO'G'RI javobni yiqilgan deb sanadi.
+  3. §16.33 — `.doc` sifat mezonida faqat kirill kalit so'zlar bor
+     edi, lotincha o'qilgan 4 fayl "yiqildi" deb ko'rsatildi (64%
+     o'rniga haqiqiy 92%).
+
+Modelga chiqmaydi, bazaga tegmaydi, PUL SARFLAMAYDI.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from api import atama                                   # noqa: E402
+
+PASS = FAIL = 0
+
+
+def check(nom: str, shart: bool, izoh: str = "") -> None:
+    global PASS, FAIL
+    if shart:
+        PASS += 1
+        print(f"  OK   {nom}")
+    else:
+        FAIL += 1
+        print(f"  XATO {nom}" + (f"\n       {izoh}" if izoh else ""))
+
+
+def section(t: str) -> None:
+    print(f"\n=== {t} ===")
+
+
+# ---------------------------------------------------------------------
+section("1. UCH YOZUV — har uchalasi ham qamralganmi")
+# ---------------------------------------------------------------------
+# XATO 1 (§16.28) shu yerda tutiladi: o'zbekcha so'z RUSCHA ekvivalentga
+# ham bog'lanishi SHART, aks holda ruscha hujjat topilmaydi.
+UCHLIK = [
+    ("kafolat", "кафолат", "гарант"),
+    ("muddat", "муддат", "срок"),
+    ("sertifikat", "сертификат", "сертификат"),
+    ("shartnoma", "шартнома", "договор"),
+    ("yetkazib", "етказиб", "поставк"),
+]
+for lot, kir, rus in UCHLIK:
+    v = atama.variantlar(lot)
+    check(f"{lot!r} -> kirill shakli", any(kir[:5] in x for x in v), str(v))
+    check(f"{lot!r} -> ruscha ekvivalent", any(rus in x for x in v), str(v))
+    # Teskari yo'nalish ham ishlashi SHART: ruscha savol, o'zbek hujjat.
+    vr = atama.variantlar(rus)
+    check(f"{rus!r} -> o'zbekcha ekvivalent",
+          any(lot[:5] in x for x in vr), str(vr))
+
+# Atama bo'lmagan so'z guruhsiz qoladi — lekin yozuv variantlari qoladi
+v = atama.variantlar("nasos")
+check("atama emas: yozuv variantlari saqlanadi", "насос" in v, str(v))
+check("atama emas: begona guruh qo'shilmaydi", len(v) <= 3, str(v))
+
+
+# ---------------------------------------------------------------------
+section("2. tsquery guruhi — prefiks bilan")
+# ---------------------------------------------------------------------
+g = atama.tsquery_guruh("kafolat")
+check("prefiks `:*` bilan chiqadi", any(x.endswith(":*") for x in g), str(g))
+check("ruscha prefiks bor", any(x.startswith("гарант") for x in g), str(g))
+check("so'zning o'zi birinchi", g[0] == "kafolat", str(g))
+
+# `to_tsquery` uchun xavfsiz belgilar
+yomon = [x for x in atama.tsquery_guruh("kafolat muddati")
+         if any(ch in x for ch in "&|!()<>")]
+check("tsquery uchun xavfli belgi yo'q", not yomon, str(yomon))
+
+
+# ---------------------------------------------------------------------
+section("3. QISQA PREFIKS bo'lmasin (shovqin manbai)")
+# ---------------------------------------------------------------------
+# "ой:*" -> "ойлик", "ойна" — birlik so'zlari ATAYLAB kiritilmagan.
+qisqa = [(nom, p) for nom, gr in atama.GURUH_PREFIKS.items()
+         for p in gr if len(p) < 3]
+check("3 belgidan qisqa prefiks yo'q", not qisqa, str(qisqa))
+for birlik in ("oy", "kun", "yil", "ой", "кун", "йил"):
+    check(f"birlik so'zi {birlik!r} guruhga tushmaydi",
+          not atama.guruh(birlik), str(atama.guruh(birlik)))
+
+
+# ---------------------------------------------------------------------
+section("4. TOPILMADI iboralari — §16.29 xatosi")
+# ---------------------------------------------------------------------
+n = atama.naqsh(atama.TOPILMADI)
+for ibora in ("hujjatlarda topilmadi", "duch kelinmadi", "ko'rsatilmagan",
+              "aniqlanmadi", "mavjud emas", "uchramadi",
+              "не найден", "отсутствует", "ma'lumot berilmagan"):
+    check(f"tanidi: {ibora!r}", bool(n.search(ibora)))
+check("oddiy javobni NOTO'G'RI belgilamaydi",
+      not n.search("Kafolat muddati 12 oyni tashkil etadi."))
+
+
+# ---------------------------------------------------------------------
+section("5. XARID NAQSHI — §16.33 xatosi")
+# ---------------------------------------------------------------------
+# Lotin ham, kirill ham, rus ham TOPILISHI shart. Birinchi o'lchovda
+# faqat kirill bor edi va lotincha hujjatlar "yiqildi" deb sanaldi.
+x = atama.xarid_naqshi()
+for matn, til in [
+    ("XIZMAT KO'RSATISHGA OID SHARTNOMA", "lotin"),
+    ("ХИЗМАТ КЎРСАТИШ ШАРТНОМАСИ", "kirill"),
+    ("ДОГОВОР на оказание услуг", "rus"),
+    ("Kafolat muddati 12 oy", "lotin"),
+    ("Гарантийный срок 24 месяца", "rus"),
+]:
+    check(f"{til}: {matn[:30]!r}", bool(x.search(matn)))
+check("aloqasiz matnda mos kelmaydi",
+      not x.search("Bugun ob-havo issiq va quyoshli"))
+
+
+# ---------------------------------------------------------------------
+section("6. Manba BITTA — takroriy ro'yxat qolmaganmi")
+# ---------------------------------------------------------------------
+import io                                                # noqa: E402
+import re as _re                                         # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for yol, nom in [("api/ai_chat.py", "ai_chat"),
+                 ("_tests/ai_eval/run_eval.py", "run_eval")]:
+    matn = io.open(os.path.join(ROOT, yol), encoding="utf-8").read()
+    check(f"{nom}: TERM_GROUPS ta'rifi yo'q",
+          not _re.search(r"^TERM_GROUPS\s*[:=]", matn, _re.M))
+    check(f"{nom}: 'гарант' ro'yxati qattiq yozilmagan",
+          "гарант" not in matn or "atama" in matn,
+          "atama modulidan o'qilsin")
+
+
+print("\n" + "=" * 58)
+print(f"NATIJA: {PASS}/{PASS + FAIL} o'tdi")
+sys.exit(1 if FAIL else 0)

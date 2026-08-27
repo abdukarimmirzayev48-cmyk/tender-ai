@@ -70,7 +70,10 @@ INSERT INTO ai_analysis (tender_id, kind, content_hash, result, model,
                          input_tokens, output_tokens)
 VALUES (%(tender_id)s, %(kind)s, %(content_hash)s, %(result)s, %(model)s,
         %(input_tokens)s, %(output_tokens)s)
-ON CONFLICT (tender_id, kind) DO UPDATE SET
+-- `summary_v1` UMUMIY: company_id IS NULL. Qisman unique indeks
+-- `ai_analysis_shared` shu shart bilan yaratilgan, shuning uchun
+-- ON CONFLICT ham predikatni takrorlashi SHART.
+ON CONFLICT (tender_id, kind) WHERE company_id IS NULL DO UPDATE SET
     content_hash = EXCLUDED.content_hash,
     result       = EXCLUDED.result,
     model        = EXCLUDED.model,

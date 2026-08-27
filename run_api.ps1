@@ -13,7 +13,7 @@
 # OSILISH QAYERDAN KELADI: `--reload` da uvicorn ikki jarayon ochadi. OTA
 # jarayon portni band qiladi, BOLA esa ilovani import qiladi. Import xato
 # bersa (masalan modul yo'li noto'g'ri: `app.main:app` <-> `api.main:app`)
-# bola o'ladi, OTA esa tirik qolib portni ushlab turaveradi. Terminalда
+# bola o'ladi, OTA esa tirik qolib portni ushlab turaveradi. Terminalda
 # traceback ko'rinadi, lekin port bo'shamaydi.
 #
 # ESLATMA: fayl ATAYIN faqat ASCII belgilardan iborat. PowerShell 5.1 .ps1
@@ -79,6 +79,10 @@ for ($i = 1; $i -le 20; $i++) {
 if ($ok) {
     Write-Host "Backend tayyor:  http://127.0.0.1:$Port" -ForegroundColor Green
     Write-Host "Swagger:         http://127.0.0.1:$Port/docs"
+    # ANIQ 0: `$LASTEXITCODE` skriptning natijasini EMAS, uning ichidagi
+    # oxirgi TASHQI buyruq (netstat, taskkill) natijasini saqlaydi. Chaqiruvchi
+    # (run_all.ps1) shunga qarab "ko'tarilmadi" deb yiqilib qolgan edi.
+    exit 0
 } else {
     Write-Host "Backend javob bermadi." -ForegroundColor Red
     Write-Host "Sababini ko'rish uchun:  .\run_api.ps1 -Foreground" -ForegroundColor Yellow

@@ -5,6 +5,13 @@ FOYDALANUVCHI HIKOYASI: "Broker-operator sifatida, men mosligi yuqori bo'lgan
 tender paydo bo'lsa, bildirishnoma olishni xohlayman, tizimni doimiy
 tekshirmaslik uchun."
 
+XABAR TILI — PLATFORMA TILI. Foydalanuvchi interfeysда qaysi tilni tanlagan
+bo'lsa (uz/ru/en), xabar ham SHU TILDA ketadi: mavzu, maydon nomlari, moslik
+sabablari, summa va sana formati. Til `notify_settings.lang` da saqlanadi —
+brauzerда emas: xabarni SERVER yuboradi (ETL dan keyin, foydalanuvchi ilovani
+ochmagan bo'lsa ham), ya'ni u tanlovni bazadan bilishi kerak. Matnlar
+`api/i18n.py` lug'atида; bu yerда birorta ham qotirilgan matn yo'q.
+
 IKKI KANAL, BITTA MANTIQ:
   EMAIL    — SMTP orqali (`send()`), sozlamaда `enabled`
   TELEGRAM — Bot API orqali (`send_telegram()`), sozlamaда `telegram_enabled`
@@ -45,7 +52,7 @@ from email.message import EmailMessage
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
-from api import db, matching, queries, telegram
+from api import db, i18n, matching, queries, telegram
 
 # Xabar turi/kanali (notify_sent.kind). HAR KANAL O'Z JURNALINI yuritadi:
 # aks holda email allaqachon "yuborilgan" deb belgilagan tenderlar keyinroq
@@ -88,41 +95,113 @@ class NotifyError(RuntimeError):
 # ---------------------------------------------------------------------------
 # SQL
 # ---------------------------------------------------------------------------
-_NS_COLS = ("id, enabled, email, min_score, smtp_host, smtp_port, smtp_user, "
-            "smtp_use_tls, from_email, base_url, telegram_enabled, "
-            "telegram_chat_id, updated_at")
+# USTUNLAR IKKI GURUHGA bo'linadi:
+#   ASOSIY   — `schema_patch_notify.sql` bilan kelgan, HAR DOIM bor
+#   QO'SHIMCHA — keyingi patchlar qo'shgan (Telegram, til)
+# Qo'shimcha patch alohida qadamда qo'llanadi, ya'ni u qo'llanmagan baza ham
+# bo'lishi mumkin. Ularni SELECT ga so'zsiz qo'shsak "column does not exist"
+# bilan MAVJUD EMAIL bildirishnomasi ham ishlamay qolardi. Shuning uchun
+# ustunlar borligi bir marta tekshiriladi va SQL o'sha topilgan ustunlardan
+# QURILADI (avval har patch uchun alohida "legacy" SQL nusxasi yozilardi —
+# uchinchi ustun qo'shilganда bu yo'l ikki barobar nusxaga aylanardi).
+_FIXED_COLS = ["id", "enabled", "email", "min_score", "smtp_host", "smtp_port",
+               "smtp_user", "smtp_use_tls", "from_email", "base_url"]
 
-SETTINGS_GET_SQL = f"SELECT {_NS_COLS} FROM notify_settings WHERE id = 1"
+# qo'shimcha guruh -> (ustunlar, "tayyormi" bayrog'i nomi)
+_TG_COLS = ["telegram_enabled", "telegram_chat_id"]
+_LANG_COLS = ["lang"]
 
-# `schema_patch_notify_telegram.sql` qo'llanmagan bazada Telegram ustunlari yo'q.
-# Ularsiz SELECT "column does not exist" bilan yiqilardi va MAVJUD EMAIL
-# bildirishnomasi ham ishlamay qolardi — patch esa alohida qadamда qo'llanadi.
-# Shuning uchun ustunlar borligi BIR MARTA tekshiriladi va yo'q bo'lsa modul
-# eski ustunlar bilan ishlayveradi (Telegram bo'limi esa "patch kerak" deydi).
-TG_COLS_SQL = """
-SELECT count(*) = 2 AS ok FROM information_schema.columns
-WHERE table_name = 'notify_settings'
-  AND column_name IN ('telegram_enabled', 'telegram_chat_id')
+COLS_EXIST_SQL = """
+SELECT count(*) AS n FROM information_schema.columns
+WHERE table_name = 'notify_settings' AND column_name = ANY(%(cols)s)
 """
 
-_LEGACY_COLS = ("id, enabled, email, min_score, smtp_host, smtp_port, smtp_user, "
-                "smtp_use_tls, from_email, base_url, updated_at")
+_col_cache: Dict[str, bool] = {}
 
-LEGACY_SETTINGS_GET_SQL = f"SELECT {_LEGACY_COLS} FROM notify_settings WHERE id = 1"
 
-_tg_cols: Optional[bool] = None
+def _cols_ready(cols: List[str]) -> bool:
+    """Ustunlar bazadami. Natija keshlanadi — har so'rovда
+    information_schema ni qidirmaslik uchun."""
+    key = ",".join(cols)
+    if key not in _col_cache:
+        try:
+            _col_cache[key] = int(db.scalar(COLS_EXIST_SQL,
+                                            {"cols": cols}) or 0) == len(cols)
+        except db.DBUnavailable:
+            return False          # baza yo'q — keshlamaymiz, keyin qayta uriniladi
+    return _col_cache[key]
 
 
 def telegram_columns_ready() -> bool:
-    """Telegram ustunlari bazadami. Natija keshlanadi — har so'rovда
-    information_schema ni qidirmaslik uchun."""
-    global _tg_cols
-    if _tg_cols is None:
-        try:
-            _tg_cols = bool(db.scalar(TG_COLS_SQL))
-        except db.DBUnavailable:
-            return False          # baza yo'q — keshlamaymiz, keyin qayta uriniladi
-    return _tg_cols
+    """`schema_patch_notify_telegram.sql` qo'llanganmi."""
+    return _cols_ready(_TG_COLS)
+
+
+def lang_column_ready() -> bool:
+    """`schema_patch_notify_lang.sql` qo'llanganmi.
+
+    Yo'q bo'lsa til SAQLANMAYDI va xabar standart tilда (o'zbekcha) ketadi —
+    bu holat interfeysга `lang_ready: false` bo'lib qaytadi, ya'ni jimgina
+    "til o'zgardi" deb ko'rsatilmaydi.
+    """
+    return _cols_ready(_LANG_COLS)
+
+
+def _settings_cols() -> List[str]:
+    """Bazada HAQIQATDA bor sozlama ustunlari."""
+    cols = list(_FIXED_COLS)
+    if telegram_columns_ready():
+        cols += _TG_COLS
+    if lang_column_ready():
+        cols += _LANG_COLS
+    return cols + ["updated_at"]
+
+
+def _cid(company_id: Optional[int] = None) -> int:
+    """Amal QAYSI kompaniya nomidan bajarilyapti (J1.6).
+
+    Bu modul ikki xil chaqiriladi:
+      * interfeysdan — endpoint sessiyadagi `company_id` ni uzatadi;
+      * SESSIYASIZ — bildirishnoma tsikli ETL dan keyin yuradi, sinovlar
+        ham to'g'ridan-to'g'ri chaqiradi.
+
+    Ikkinchi holatda kompaniya TAXMIN QILINMAYDI: `auth.sole_company_id()`
+    yagona faol hisobni qaytaradi va bir nechta bo'lsa ANIQ xato beradi.
+    """
+    if company_id is not None:
+        return int(company_id)
+    from api import auth
+    return auth.sole_company_id()
+
+
+def settings_get_sql() -> str:
+    """Sozlamalar HAR KOMPANIYAGA bitta yozuv (J1.6).
+
+    Ilgari `WHERE id = 1` edi — singleton `schema_patch_multitenant.sql`
+    da sindirilgan. Yangi kompaniyada yozuv BO'LMASLIGI mumkin;
+    `get_settings()` bunda standart qiymatlarni qaytaradi."""
+    return (f"SELECT {', '.join(_settings_cols())} FROM notify_settings "
+            "WHERE company_id = %(company_id)s")
+
+
+def settings_upsert_sql() -> str:
+    """Bitta faol yozuv (id=1) — bor bo'lsa yangilanadi.
+
+    Schema patch uni yaratib qo'ygan, lekin patch qo'llanmaган bazада ham
+    ishlashi uchun INSERT ... ON CONFLICT.
+    """
+    # `id` va `updated_at` alohida beriladi (biri qattiq 1, ikkinchisi now())
+    ins = [c for c in _settings_cols() if c not in ("id", "updated_at")]
+    values = ", ".join(f"%({c})s" for c in ins)
+    sets = ", ".join(f"{c}=EXCLUDED.{c}" for c in ins)
+    # `id` ketma-ketlikdan keladi (patch DEFAULT qo'ygan); kalit —
+    # `company_id` (uq_notify_settings_company).
+    return (
+        f"INSERT INTO notify_settings (company_id, {', '.join(ins)}, updated_at)\n"
+        f"VALUES (%(company_id)s, {values}, now())\n"
+        f"ON CONFLICT (company_id) DO UPDATE SET {sets}, updated_at=now()\n"
+        f"RETURNING {', '.join(_settings_cols())}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -140,11 +219,14 @@ WHERE table_name = 'notify_telegram_subscriber'
 _SUB_COLS = ("chat_id, title, chat_type, username, enabled, source, "
              "first_seen_at, last_seen_at")
 
+# OBUNACHILAR — ijarachiga bog'liq (J1.6): PK (company_id, chat_id).
 SUBS_LIST_SQL = (f"SELECT {_SUB_COLS} FROM notify_telegram_subscriber "
+                 "WHERE company_id = %(company_id)s "
                  "ORDER BY enabled DESC, last_seen_at DESC")
 
 SUBS_ENABLED_SQL = ("SELECT chat_id, title FROM notify_telegram_subscriber "
-                    "WHERE enabled ORDER BY first_seen_at")
+                    "WHERE enabled AND company_id = %(company_id)s "
+                    "ORDER BY first_seen_at")
 
 # Ulash havolasi bilan tasdiqlangan suhbat -> obunachi.
 #
@@ -154,9 +236,13 @@ SUBS_ENABLED_SQL = ("SELECT chat_id, title FROM notify_telegram_subscriber "
 # qayta ulanganда tiklanadi.
 SUB_UPSERT_SQL = f"""
 INSERT INTO notify_telegram_subscriber
-    (chat_id, title, chat_type, username, enabled, source)
-VALUES (%(chat_id)s, %(title)s, %(chat_type)s, %(username)s, TRUE, 'link')
-ON CONFLICT (chat_id) DO UPDATE SET
+    (chat_id, company_id, title, chat_type, username, enabled, source)
+VALUES (%(chat_id)s, %(company_id)s, %(title)s, %(chat_type)s, %(username)s,
+        TRUE, 'link')
+-- PK (company_id, chat_id) — J1 dan keyin. `company_id` INSERT da
+-- ko'rsatilmaydi: ustunda DEFAULT bor (schema_patch_multitenant.sql).
+-- J1.7 tugagach bu yerga aniq qiymat uzatiladi.
+ON CONFLICT (company_id, chat_id) DO UPDATE SET
     title = COALESCE(EXCLUDED.title, notify_telegram_subscriber.title),
     chat_type = COALESCE(EXCLUDED.chat_type, notify_telegram_subscriber.chat_type),
     username = COALESCE(EXCLUDED.username, notify_telegram_subscriber.username),
@@ -167,10 +253,12 @@ RETURNING {_SUB_COLS}, (xmax = 0) AS inserted
 """
 
 SUB_SET_ENABLED_SQL = (f"UPDATE notify_telegram_subscriber SET enabled = %(enabled)s "
-                       f"WHERE chat_id = %(chat_id)s RETURNING {_SUB_COLS}")
+                       "WHERE chat_id = %(chat_id)s "
+                       "AND company_id = %(company_id)s "
+                       f"RETURNING {_SUB_COLS}")
 
 SUB_DELETE_SQL = ("DELETE FROM notify_telegram_subscriber WHERE chat_id = %(chat_id)s "
-                  "RETURNING chat_id")
+                  "AND company_id = %(company_id)s RETURNING chat_id")
 
 _sub_table: Optional[bool] = None
 
@@ -186,22 +274,22 @@ def subscribers_ready() -> bool:
     return _sub_table
 
 
-def subscribers() -> List[Dict[str, Any]]:
+def subscribers(company_id: Optional[int] = None) -> List[Dict[str, Any]]:
     """Barcha obunachilar (o'chirilganlari ham — interfeys ularni ko'rsatadi)."""
     if not subscribers_ready() or not links_ready():
         return []
-    rows = db.query(SUBS_LIST_SQL)
+    rows = db.query(SUBS_LIST_SQL, {"company_id": _cid(company_id)})
     for r in rows:
         for k in ("first_seen_at", "last_seen_at"):
             r[k] = r[k].isoformat() if r.get(k) else None
     return rows
 
 
-def enabled_subscribers() -> List[Dict[str, Any]]:
+def enabled_subscribers(company_id: Optional[int] = None) -> List[Dict[str, Any]]:
     """Xabar ketadigan obunachilar."""
     if not subscribers_ready():
         return []
-    return db.query(SUBS_ENABLED_SQL)
+    return db.query(SUBS_ENABLED_SQL, {"company_id": _cid(company_id)})
 
 
 # ---------------------------------------------------------------------------
@@ -223,23 +311,26 @@ LINK_TTL_MIN = 30
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 
 LINK_CREATE_SQL = """
-INSERT INTO notify_telegram_link (token, expires_at)
-VALUES (%(token)s, now() + INTERVAL '%(ttl)s minutes')
+INSERT INTO notify_telegram_link (token, company_id, expires_at)
+VALUES (%(token)s, %(company_id)s, now() + INTERVAL '%(ttl)s minutes')
 RETURNING token, created_at, expires_at
 """
 
 # Ochiq (ishlatilmagan, muddati o'tmagan) tokenlar
-LINK_OPEN_SQL = ("SELECT token FROM notify_telegram_link "
+# ULASH HAVOLASI — kompaniyaga bog'liq (J1.6): token BOSHQA kompaniyaning
+# obunachisiga aylanmasligi kerak.
+LINK_OPEN_SQL = ("SELECT token, company_id FROM notify_telegram_link "
                  "WHERE used_at IS NULL AND expires_at > now()")
 
 LINK_USE_SQL = """
 UPDATE notify_telegram_link SET chat_id = %(chat_id)s, used_at = now()
 WHERE token = %(token)s AND used_at IS NULL AND expires_at > now()
-RETURNING token, chat_id
+RETURNING token, chat_id, company_id
 """
 
 LINK_STATUS_SQL = ("SELECT token, chat_id, used_at, expires_at "
-                   "FROM notify_telegram_link WHERE token = %(token)s")
+                   "FROM notify_telegram_link "
+                   "WHERE token = %(token)s AND company_id = %(company_id)s")
 
 
 def links_ready() -> bool:
@@ -252,7 +343,7 @@ def links_ready() -> bool:
         return False
 
 
-def create_link() -> Dict[str, Any]:
+def create_link(company_id: Optional[int] = None) -> Dict[str, Any]:
     """Bir martalik ulash havolasini yaratadi.
 
     Bot username `getMe` dan olinadi — havola AYNAN shu botga ketishi kerak,
@@ -271,7 +362,8 @@ def create_link() -> Dict[str, Any]:
         raise NotifyError("Bot username aniqlanmadi — tokenni tekshiring.")
 
     token = secrets.token_urlsafe(18)      # ~24 belgi, [A-Za-z0-9_-]
-    row = db.execute_returning(LINK_CREATE_SQL, {"token": token,
+    row = db.execute_returning(LINK_CREATE_SQL, {"company_id": _cid(company_id),
+                                                 "token": token,
                                                  "ttl": LINK_TTL_MIN})
     return {
         "token": token,
@@ -282,9 +374,10 @@ def create_link() -> Dict[str, Any]:
     }
 
 
-def link_status(token: str) -> Dict[str, Any]:
+def link_status(token: str, company_id: Optional[int] = None) -> Dict[str, Any]:
     """Havola ishlatilganmi (interfeys shuni kutib turadi)."""
-    row = db.query_one(LINK_STATUS_SQL, {"token": token})
+    row = db.query_one(LINK_STATUS_SQL, {"token": token,
+                                         "company_id": _cid(company_id)})
     if not row:
         return {"found": False, "connected": False}
     return {
@@ -316,6 +409,8 @@ def consume_links() -> Dict[str, Any]:
     except telegram.TelegramError as e:
         raise NotifyError(str(e)) from e
 
+    # Bot GLOBAL — barcha kompaniyalarning ochiq tokenlari o'qiladi. Qaysi
+    # kompaniyaga obuna bo'lish esa TOKENDAN aniqlanadi (LINK_USE_SQL).
     open_tokens = {r["token"] for r in db.query(LINK_OPEN_SQL)}
     if not open_tokens:
         return {"seen": len(chats), "added": 0, "added_chats": []}
@@ -342,8 +437,12 @@ def consume_links() -> Dict[str, Any]:
         if not used:
             continue
         open_tokens.discard(found)
+        # `company_id` TOKENDAN (LINK_USE_SQL qaytaradi) — parametrdan
+        # emas: havolani qaysi kompaniya yaratgan bo'lsa, obunachi ham
+        # o'shaniki bo'ladi.
         row = db.execute_returning(SUB_UPSERT_SQL, {
-            "chat_id": c["chat_id"], "title": c.get("title"),
+            "chat_id": c["chat_id"], "company_id": used["company_id"],
+            "title": c.get("title"),
             "chat_type": c.get("type"), "username": c.get("username"),
         })
         if row:
@@ -354,44 +453,10 @@ def consume_links() -> Dict[str, Any]:
 # Eski nom — `run()` va sinovlar shu nomni ishlatadi.
 sync_subscribers = consume_links
 
-# Bitta faol yozuv — bor bo'lsa yangilanadi (schema patch uni yaratib qo'ygan,
-# lekin patch qo'llanmaган bazaда ham ishlashi uchun INSERT ... ON CONFLICT).
-SETTINGS_UPSERT_SQL = f"""
-INSERT INTO notify_settings (
-    id, enabled, email, min_score, smtp_host, smtp_port, smtp_user,
-    smtp_use_tls, from_email, base_url, telegram_enabled, telegram_chat_id,
-    updated_at)
-VALUES (1, %(enabled)s, %(email)s, %(min_score)s, %(smtp_host)s, %(smtp_port)s,
-        %(smtp_user)s, %(smtp_use_tls)s, %(from_email)s, %(base_url)s,
-        %(telegram_enabled)s, %(telegram_chat_id)s, now())
-ON CONFLICT (id) DO UPDATE SET
-    enabled=EXCLUDED.enabled, email=EXCLUDED.email, min_score=EXCLUDED.min_score,
-    smtp_host=EXCLUDED.smtp_host, smtp_port=EXCLUDED.smtp_port,
-    smtp_user=EXCLUDED.smtp_user, smtp_use_tls=EXCLUDED.smtp_use_tls,
-    from_email=EXCLUDED.from_email, base_url=EXCLUDED.base_url,
-    telegram_enabled=EXCLUDED.telegram_enabled,
-    telegram_chat_id=EXCLUDED.telegram_chat_id, updated_at=now()
-RETURNING {_NS_COLS}
-"""
-
-# Telegram ustunlari yo'q bazada ishlatiladigan variant (patchgacha).
-LEGACY_SETTINGS_UPSERT_SQL = f"""
-INSERT INTO notify_settings (
-    id, enabled, email, min_score, smtp_host, smtp_port, smtp_user,
-    smtp_use_tls, from_email, base_url, updated_at)
-VALUES (1, %(enabled)s, %(email)s, %(min_score)s, %(smtp_host)s, %(smtp_port)s,
-        %(smtp_user)s, %(smtp_use_tls)s, %(from_email)s, %(base_url)s, now())
-ON CONFLICT (id) DO UPDATE SET
-    enabled=EXCLUDED.enabled, email=EXCLUDED.email, min_score=EXCLUDED.min_score,
-    smtp_host=EXCLUDED.smtp_host, smtp_port=EXCLUDED.smtp_port,
-    smtp_user=EXCLUDED.smtp_user, smtp_use_tls=EXCLUDED.smtp_use_tls,
-    from_email=EXCLUDED.from_email, base_url=EXCLUDED.base_url, updated_at=now()
-RETURNING {_LEGACY_COLS}
-"""
-
 # Profil emaili — sozlamada email bo'sh bo'lsa zaxira manba.
 PROFILE_EMAIL_SQL = ("SELECT email FROM company_profile "
-                     "WHERE email IS NOT NULL AND email <> '' "
+                     "WHERE company_id = %(company_id)s "
+                     "AND email IS NOT NULL AND email <> '' "
                      "ORDER BY updated_at DESC LIMIT 1")
 
 # Oxirgi ETL TSIKLI boshlangan payt. Bitta tsiklда bir necha manba yuriladi,
@@ -404,14 +469,15 @@ WHERE started_at >= (SELECT max(started_at) FROM etl_run) - INTERVAL '{CYCLE_WIN
 """
 
 # Allaqachon xabar ketgan tenderlar (takrorlanmasin)
-SENT_IDS_SQL = "SELECT tender_id FROM notify_sent WHERE kind = %(kind)s"
+SENT_IDS_SQL = ("SELECT tender_id FROM notify_sent "
+                "WHERE kind = %(kind)s AND company_id = %(company_id)s")
 
-# PK (tender_id, kind) -> ikkinchi marta yozilmaydi, ya'ni ikkinchi marta
-# xabar ham ketmaydi.
+# PK (tender_id, kind, company_id) -> bir tender haqida HAR KOMPANIYAGA
+# bir marta xabar ketadi. `company_id` DEFAULT dan keladi (J1.7 gacha).
 MARK_SENT_SQL = """
-INSERT INTO notify_sent (tender_id, kind, email, score)
-VALUES (%(tender_id)s, %(kind)s, %(email)s, %(score)s)
-ON CONFLICT (tender_id, kind) DO NOTHING
+INSERT INTO notify_sent (tender_id, kind, company_id, email, score)
+VALUES (%(tender_id)s, %(kind)s, %(company_id)s, %(email)s, %(score)s)
+ON CONFLICT (tender_id, kind, company_id) DO NOTHING
 RETURNING tender_id
 """
 
@@ -456,24 +522,34 @@ def smtp_ready() -> bool:
 # ---------------------------------------------------------------------------
 # Sozlamalar
 # ---------------------------------------------------------------------------
-def get_settings() -> Dict[str, Any]:
+def get_settings(company_id: Optional[int] = None) -> Dict[str, Any]:
     """Faol sozlamalar. Yozuv yo'q bo'lsa standart qiymatlar qaytadi
     (frontend forma bo'sh bazada ham ochilsin)."""
     ready = telegram_columns_ready()
-    row = db.query_one(SETTINGS_GET_SQL if ready else LEGACY_SETTINGS_GET_SQL)
+    # BIR MARTA hal qilamiz va HAMMA joyga uzatamiz. Ilgari `_cid()`
+    # shu yerda chaqirilar, lekin `_profile_email()` ARGUMENTSIZ
+    # qolardi va u `sole_company_id()` ga tushib, ikkinchi faol
+    # kompaniya paydo bo'lishi bilan 500 berardi.
+    cid = _cid(company_id)
+    row = db.query_one(settings_get_sql(), {"company_id": cid})
     st: Dict[str, Any] = dict(row) if row else {
         "id": 1, "enabled": False, "email": None, "min_score": 70,
         "smtp_host": None, "smtp_port": 587, "smtp_user": None,
         "smtp_use_tls": True, "from_email": None,
         "base_url": "http://localhost:5173",
         "telegram_enabled": False, "telegram_chat_id": None,
-        "updated_at": None,
+        "lang": i18n.DEFAULT_LANG, "updated_at": None,
     }
     st["updated_at"] = st["updated_at"].isoformat() if st.get("updated_at") else None
     # Patchgacha bo'lgan bazada bu kalitlar SELECT dan kelmaydi — interfeys
     # `undefined` ni ko'rmasligi uchun aniq standart qiymat qo'yamiz.
     st.setdefault("telegram_enabled", False)
     st.setdefault("telegram_chat_id", None)
+    # XABAR TILI. Bazadagi qiymat buzilgan/eski bo'lsa ham yaroqli kod qaytadi.
+    st["lang"] = i18n.norm_lang(st.get("lang"))
+    # False bo'lsa: `schema_patch_notify_lang.sql` hali qo'llanmagan — til
+    # saqlanmaydi va xabar o'zbekcha ketaveradi (interfeys buni aytadi).
+    st["lang_ready"] = lang_column_ready()
     # Sirlar HECH QACHON javobga qo'shilmaydi — faqat "sozlanganmi" belgisi.
     # SMTP endi PLATFORMA sozlamasi (.env) — interfeys faqat "platforma email
     # yubora oladimi" degan bitta belgini ko'radi, rekvizitlarni emas.
@@ -486,18 +562,20 @@ def get_settings() -> Dict[str, Any]:
     st["subscribers_ready"] = subscribers_ready()
     # Sozlamada email bo'sh bo'lsa profildan olinadi — foydalanuvchi qayerga
     # ketishini interfeysда ko'rsin.
-    st["effective_email"] = st.get("email") or _profile_email()
+    st["effective_email"] = st.get("email") or _profile_email(cid)
     return st
 
 
-def save_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+def save_settings(data: Dict[str, Any],
+                  company_id: Optional[int] = None) -> Dict[str, Any]:
     """Sozlamalarni saqlaydi (bitta faol yozuv).
 
     `data` — FAQAT o'zgartirilgan maydonlar (endpoint `exclude_unset` beradi).
     Yo'q maydon joriy qiymatida qoladi: ilgari har PUT to'liq almashtirardi va
     `{"enabled": false}` yuborish SMTP sozlamasini ham o'chirib yuborardi.
     """
-    cur = get_settings()
+    company_id = _cid(company_id)
+    cur = get_settings(company_id)
 
     def take(key, default=None):
         return data[key] if key in data else cur.get(key, default)
@@ -514,10 +592,18 @@ def save_settings(data: Dict[str, Any]) -> Dict[str, Any]:
         "base_url": (take("base_url") or "http://localhost:5173").rstrip("/"),
         "telegram_enabled": bool(take("telegram_enabled", False)),
         "telegram_chat_id": (str(take("telegram_chat_id") or "").strip() or None),
+        # Xabar tili — interfeys tili bilan bir xil (frontend uni tanlanganда
+        # yuboradi). Noma'lum qiymat o'zbekchaga tushadi, xato bermaydi:
+        # til — yumshoq afzallik, uni deb sozlamani saqlab bo'lmay qolmasin.
+        "lang": i18n.norm_lang(take("lang", i18n.DEFAULT_LANG)),
     }
     # Yoqilgan bildirishnoma manzilsiz — eng yomon holat: foydalanuvchi "yoqdim"
     # deb o'ylaydi, xabar esa hech qayerga ketmaydi. Buni JIM qoldirmaymiz.
-    if params["enabled"] and not (params["email"] or _profile_email()):
+    # `company_id` UZATILADI: busiz `sole_company_id()` ga tushardi va
+    # ikkinchi faol hisob paydo bo'lishi bilan sozlamani SAQLAB
+    # BO'LMAY qolardi (`get_settings` dagi bilan bir xil xato).
+    if params["enabled"] and not (params["email"]
+                                  or _profile_email(company_id)):
         raise NotifyError(
             "Bildirishnomani yoqish uchun email manzili kerak "
             "(shu yerda yoki kompaniya profilida).")
@@ -530,17 +616,22 @@ def save_settings(data: Dict[str, Any]) -> Dict[str, Any]:
             "Telegram bot tokeni serverда yo'q. .env fayliga "
             "TELEGRAM_BOT_TOKEN=... qo'shing va API'ni qayta ishga tushiring.")
 
-    if telegram_columns_ready():
-        db.execute_returning(SETTINGS_UPSERT_SQL, params)
-    else:
-        # Patch qo'llanmagan — Telegram maydonlarini saqlab bo'lmaydi. Buni
-        # JIMGINA tashlab ketmaymiz: foydalanuvchi yoqmoqchi bo'lsa aytamiz.
-        if params["telegram_enabled"] or params["telegram_chat_id"]:
-            raise NotifyError(
-                "Telegram sozlamalari uchun baza patchi qo'llanmagan. "
-                "Ishga tushiring: psql ... -f schema_patch_notify_telegram.sql")
-        db.execute_returning(LEGACY_SETTINGS_UPSERT_SQL, params)
-    return get_settings()
+    # Patch qo'llanmagan — Telegram maydonlarini saqlab bo'lmaydi. Buni
+    # JIMGINA tashlab ketmaymiz: foydalanuvchi yoqmoqchi bo'lsa aytamiz.
+    if not telegram_columns_ready() and (params["telegram_enabled"]
+                                         or params["telegram_chat_id"]):
+        raise NotifyError(
+            "Telegram sozlamalari uchun baza patchi qo'llanmagan. "
+            "Ishga tushiring: psql ... -f schema_patch_notify_telegram.sql")
+
+    # SQL faqat MAVJUD ustunlardan quriladi, shuning uchun ortiqcha kalitlar
+    # (masalan patch qo'llanmagan bazada `lang`) parametrlardan chiqariladi.
+    cols = set(_settings_cols())
+    db.execute_returning(
+        settings_upsert_sql(),
+        {**{k: v for k, v in params.items() if k in cols},
+         "company_id": company_id})
+    return get_settings(company_id)
 
 
 def _clamp_score(v: Any) -> int:
@@ -552,14 +643,30 @@ def _clamp_score(v: Any) -> int:
     return max(0, min(100, n))
 
 
-def _profile_email() -> Optional[str]:
-    """company_profile.email — FAQAT O'QIYMIZ (u jadval boshqa modulniki)."""
-    return db.scalar(PROFILE_EMAIL_SQL)
+def _profile_email(company_id: Optional[int] = None) -> Optional[str]:
+    """company_profile.email — FAQAT O'QIYMIZ (u jadval boshqa modulniki).
+
+    J1.6: profil KOMPANIYAGA bog'landi. `company_id` berilmasa sessiyasiz
+    chaqiruv (bildirishnoma tsikli, sinov) — yagona faol hisob olinadi.
+    NAVBAT 5 da `notify_settings` ham bog'langach, bu yer har kompaniya
+    bo'ylab aylanishning ichiga tushadi."""
+    if company_id is None:
+        from api import auth
+        company_id = auth.sole_company_id()
+    return db.scalar(PROFILE_EMAIL_SQL, {"company_id": company_id})
 
 
-def recipient(st: Dict[str, Any]) -> str:
-    """Qabul qiluvchi manzil. Yo'q bo'lsa — aniq xato."""
-    to = (st.get("email") or "").strip() or (_profile_email() or "").strip()
+def recipient(st: Dict[str, Any],
+              company_id: Optional[int] = None) -> str:
+    """Qabul qiluvchi manzil. Yo'q bo'lsa — aniq xato.
+
+    `company_id` MAJBURIY ma'noda: berilmasa `_profile_email()`
+    `sole_company_id()` ga tushadi va bir nechta faol kompaniya
+    bo'lsa xato beradi. Chaqiruvchilarda kompaniya ALLAQACHON
+    ma'lum — uni uzatish shart.
+    """
+    to = ((st.get("email") or "").strip()
+          or (_profile_email(company_id) or "").strip())
     if not to:
         raise NotifyError(
             "Qabul qiluvchi email yo'q. Sozlamalarда email kiriting yoki "
@@ -582,14 +689,16 @@ def last_cycle_since() -> datetime:
     return datetime.now(timezone.utc) - timedelta(hours=FALLBACK_HOURS)
 
 
-def sent_ids(kind: str = KIND_NEW_MATCH) -> set:
+def sent_ids(kind: str = KIND_NEW_MATCH,
+             company_id: Optional[int] = None) -> set:
     """Shu KANALDA allaqachon xabar ketgan tender id lari.
 
     Kanal bo'yicha ajratilgan (`kind`) — email 'new_match', Telegram
     'new_match_tg'. Shu sabab Telegram keyinroq yoqilsa, u o'zi ko'rmagan
     tenderlarni oladi va email jurnaliga bog'lanib qolmaydi.
     """
-    return {r["tender_id"] for r in db.query(SENT_IDS_SQL, {"kind": kind})}
+    return {r["tender_id"] for r in db.query(
+        SENT_IDS_SQL, {"kind": kind, "company_id": _cid(company_id)})}
 
 
 def _fetch_candidates(since: datetime) -> List[Dict[str, Any]]:
@@ -608,8 +717,15 @@ def score_candidate(cand: Dict[str, Any], products: List[Dict[str, Any]],
                     profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Bitta tenderning moslik balli. YANGI MANTIQ YO'Q — mavjud ikki manba:
 
-      katalog: api/main.py `_product_matches` (kategoriya=100, nom=70)
+      katalog: api/main.py `_product_matches` (kod=100, nom=60)
       profil : api/matching.py `score_tender` (0–100)
+
+    SHKALA O'ZGARDI (2026-08). Ilgari `kategoriya=100` edi va bu eng
+    katta soxta-moslik manbai bo'lgan: bitta keng kategoriyali mahsulot
+    butun bo'limni "100 ball" qilardi (o'lchangan: 206 moslikning 131
+    tasi shu yo'ldan; "Andijon GES transformatorini ta'mirlash"
+    tibbiy muzlatgich sotuvchiga 100 ball bilan borardi). Kategoriya
+    endi moslik dalili EMAS — `api/matching.product_matches()` ga qarang.
 
     Yakuniy ball = kattasi. `by` — ball qaysi manbadan kelgani (xabarда
     "nega bu tender?" degan savolga javob bo'ladi).
@@ -622,39 +738,55 @@ def score_candidate(cand: Dict[str, Any], products: List[Dict[str, Any]],
 
     cat_score = 0
     matched_products: List[str] = []
-    by_category = False
+    by_code = False
     for p in products:
         how = _product_matches(cand, p)
         if not how:
             continue
         matched_products.append(p["name"])
-        if how == "category":
-            by_category = True
+        if how == "kod":
+            by_code = True
     if matched_products:
-        # /catalog/match bilan AYNAN bir xil shkala
-        cat_score = 100 if by_category else 70
+        # /catalog/match bilan AYNAN bir xil shkala (kod=100, nom=60).
+        # Ikki joyda ikki shkala bo'lmasin: bildirishnoma va ekran bir
+        # xil tenderni turlicha ballasa, foydalanuvchi qaysisiga
+        # ishonishni bilmaydi.
+        cat_score = 100 if by_code else 60
 
     prof = matching.score_tender(cand, profile) if profile else None
     prof_score = int(prof["score"]) if prof else 0
 
     if cat_score >= prof_score:
-        score, by = cat_score, ("katalog" if cat_score else None)
-        reasons = ([f"Katalogingizga mos: {', '.join(matched_products[:5])}"
-                    + (" (kategoriya bo'yicha)" if by_category else " (nom bo'yicha)")]
-                   if matched_products else [])
+        score = cat_score
+        by_key = "by.catalog" if cat_score else None
+        keys = ([{"key": ("reason.catalogCode" if by_code
+                          else "reason.catalogName"),
+                  "vars": {"items": ", ".join(matched_products[:5])}}]
+                if matched_products else [])
     else:
-        score, by = prof_score, "profil"
-        reasons = (prof or {}).get("reasons", [])
+        score, by_key = prof_score, "by.profile"
+        keys = list((prof or {}).get("reason_keys") or [])
 
-    return {"score": score, "by": by, "reasons": reasons,
-            "products": matched_products}
+    # `by` va `reasons` — O'ZBEKCHA (avvalgidek, sinovlar va boshqa
+    # chaqiruvchilar uchun). Xabar esa `by_key`/`reason_keys` dan
+    # foydalanuvchi tilida quriladi — `_localize()` ga qarang.
+    return {
+        "score": score,
+        "by": i18n.t(i18n.DEFAULT_LANG, by_key) if by_key else None,
+        "by_key": by_key,
+        "reasons": [i18n.t(i18n.DEFAULT_LANG, k["key"], **k.get("vars", {}))
+                    for k in keys],
+        "reason_keys": keys,
+        "products": matched_products,
+    }
 
 
 def find_candidates(min_score: Optional[int] = None,
                     since: Optional[datetime] = None,
                     limit: int = DEFAULT_LIMIT,
                     include_sent: bool = False,
-                    kind: str = KIND_NEW_MATCH) -> List[Dict[str, Any]]:
+                    kind: str = KIND_NEW_MATCH,
+                    company_id: Optional[int] = None) -> List[Dict[str, Any]]:
     """Xabar yuborilishi kerak bo'lgan tenderlar (ball bo'yicha kamayish
     tartibida).
 
@@ -663,16 +795,21 @@ def find_candidates(min_score: Optional[int] = None,
                      (None bo'lsa oxirgi ETL tsikli)
     include_sent   — True bo'lsa `notify_sent` dagilar ham qaytadi (--force)
     """
-    st = get_settings()
+    # KOMPANIYA — barcha manbalar uchun BITTA qiymat: sozlama, katalog,
+    # profil va "allaqachon yuborilgan" jurnali bir xil ijarachiniki
+    # bo'lishi shart, aks holda chegara bir kompaniyaniki, katalog
+    # boshqasiniki bo'lib qolardi.
+    company_id = _cid(company_id)
+    st = get_settings(company_id)
     threshold = _clamp_score(min_score if min_score is not None else st["min_score"])
     since = since or last_cycle_since()
 
-    products = db.query(CATALOG_SQL)
+    products = db.query(CATALOG_SQL, {"company_id": company_id})
     # Faqat "xabar yoqilgan" mahsulotlar (catalog_product.notify)
     products = [p for p in products if p.get("notify", True)]
-    profile = db.query_one(PROFILE_SQL)
+    profile = db.query_one(PROFILE_SQL, {"company_id": company_id})
 
-    already = set() if include_sent else sent_ids(kind)
+    already = set() if include_sent else sent_ids(kind, company_id)
 
     out: List[Dict[str, Any]] = []
     for c in _fetch_candidates(since):
@@ -709,67 +846,124 @@ def card_url(base_url: Optional[str], tender_id: int) -> str:
     return f"{base}/?tender={tender_id}"
 
 
-def _money(v: Any, currency: Optional[str]) -> str:
-    """1234567.0 -> '1 234 567 UZS'. Bo'sh bo'lsa '—'."""
+def _money(v: Any, currency: Optional[str],
+           lang: str = i18n.DEFAULT_LANG) -> str:
+    """1234567.0 -> '1 234 567 UZS'. Bo'sh bo'lsa '—'.
+
+    Mingliklar ajratgichi TILGA bog'liq: o'zbek va rus tilida bo'sh joy
+    ('1 234 567'), ingliz tilида vergul ('1,234,567') — o'quvchi qaysi
+    yozuvni kutsa, o'sha.
+    """
     if v is None:
         return "—"
     try:
-        s = f"{float(v):,.0f}".replace(",", " ")
+        s = f"{float(v):,.0f}"
     except (TypeError, ValueError):
         return "—"
+    if lang != "en":
+        s = s.replace(",", " ")
     return f"{s} {currency or ''}".strip()
 
 
-def _dt(v: Any) -> str:
-    """datetime -> '28.07.2026 18:00'. Bo'sh bo'lsa '—'."""
+def _dt(v: Any, lang: str = i18n.DEFAULT_LANG) -> str:
+    """datetime -> '28.07.2026 18:00'. Bo'sh bo'lsa '—'.
+
+    Ingliz tilida ISO ('2026-07-28 18:00'): '07/28' va '28/07' ni bir-biridan
+    ajratib bo'lmaydi va muddat — xato qilib bo'lmaydigan maydon.
+    """
     if not v:
         return "—"
     if isinstance(v, str):
         return v
-    return v.strftime("%d.%m.%Y %H:%M")
+    return v.strftime("%Y-%m-%d %H:%M" if lang == "en" else "%d.%m.%Y %H:%M")
 
 
-def subject(tenders: List[Dict[str, Any]], threshold: int) -> str:
+def _score(score: Any, lang: str) -> str:
+    """'70 ball' / '70 баллов' / '70 pts' — ball SO'ZI bilan birga."""
+    try:
+        n = int(score)
+    except (TypeError, ValueError):
+        n = 0
+    return i18n.t(lang, "msg.score", n=n)
+
+
+def _name(t: Dict[str, Any], lang: str) -> str:
+    return t.get("name") or i18n.t(lang, "msg.noname")
+
+
+def _by(t: Dict[str, Any], lang: str) -> Optional[str]:
+    """Ball qaysi manbadan — foydalanuvchi tilida ('katalog'/'каталог'...).
+
+    `by_key` bo'lmasa (eski chaqiruv yoki qo'lда tuzilgan tender) tayyor
+    `by` matni ishlatiladi — xabar baribir chiqadi.
+    """
+    key = t.get("by_key")
+    return i18n.t(lang, key) if key else (t.get("by") or None)
+
+
+def _reasons(t: Dict[str, Any], lang: str) -> List[str]:
+    """Moslik sabablari foydalanuvchi tilida.
+
+    `reason_keys` (struktura) bo'lsa — lug'atdan quriladi. Bo'lmasa tayyor
+    `reasons` matni qaytadi: sabab TUSHIB QOLMASIN, hech bo'lmasa o'zbekcha
+    ko'rinsin.
+    """
+    keys = t.get("reason_keys")
+    if keys:
+        return [i18n.t(lang, k["key"], **(k.get("vars") or {})) for k in keys]
+    return list(t.get("reasons") or [])
+
+
+def subject(tenders: List[Dict[str, Any]], threshold: int,
+            lang: str = i18n.DEFAULT_LANG) -> str:
     n = len(tenders)
     if n == 1:
-        return f"Tender AI: 1 ta yangi mos tender ({tenders[0]['score']} ball)"
-    return f"Tender AI: {n} ta yangi mos tender (chegara {threshold} ball)"
+        return i18n.t(lang, "subject.one", score=_score(tenders[0]["score"], lang))
+    return i18n.t(lang, "subject.many", n=n, threshold=_score(threshold, lang))
 
 
 def render(tenders: List[Dict[str, Any]], base_url: Optional[str] = None,
-           threshold: int = 70) -> Tuple[str, str, str]:
-    """O'zbekcha xabar. Qaytadi: (mavzu, matn, html).
+           threshold: int = 70,
+           lang: str = i18n.DEFAULT_LANG) -> Tuple[str, str, str]:
+    """Xabar FOYDALANUVCHI TILIDA. Qaytadi: (mavzu, matn, html).
 
     HAR TENDER UCHUN: nomi, buyurtmachi, summa, muddat, moslik balli va
     TIZIMDAGI KARTOCHKAGA HAVOLA (TZ talabi — ikkala versiyada ham bor).
     """
-    subj = subject(tenders, threshold)
+    lang = i18n.norm_lang(lang)
+    subj = subject(tenders, threshold, lang)
+    thr = _score(threshold, lang)
+
+    def tr(key: str, **v: Any) -> str:
+        return i18n.t(lang, key, **v)
 
     # --- oddiy matn (HTML ni o'qiy olmaydigan mijozlar uchun) ---
     lines = [
-        "Tender AI — yangi mos tenderlar",
+        tr("msg.title"),
         "=" * 40,
-        f"Moslik chegarasi: {threshold} ball. Topildi: {len(tenders)} ta.",
+        tr("msg.summary", threshold=thr, n=len(tenders)),
         "",
     ]
     for i, t in enumerate(tenders, 1):
+        by = _by(t, lang)
+        score = _score(t["score"], lang)
         lines += [
-            f"{i}. {t.get('name') or '(nomsiz)'}",
-            f"   Moslik: {t['score']} ball" +
-            (f" ({t['by']} bo'yicha)" if t.get("by") else ""),
-            f"   Buyurtmachi: {t.get('company_name') or '—'}",
-            f"   Summa: {_money(t.get('totalcost'), t.get('currency'))}",
-            f"   Muddat: {_dt(t.get('close_at'))}",
-            f"   Hudud: {t.get('region_name') or '—'}",
+            f"{i}. {_name(t, lang)}",
+            "   " + (tr("msg.matchBy", score=score, by=by) if by
+                     else tr("msg.match", score=score)),
+            f"   {tr('msg.buyer')}: {t.get('company_name') or '—'}",
+            f"   {tr('msg.sum')}: {_money(t.get('totalcost'), t.get('currency'), lang)}",
+            f"   {tr('msg.deadline')}: {_dt(t.get('close_at'), lang)}",
+            f"   {tr('msg.region')}: {t.get('region_name') or '—'}",
         ]
-        for r in (t.get("reasons") or [])[:3]:
+        for r in _reasons(t, lang)[:3]:
             lines.append(f"   • {r}")
         # HAVOLA — TZ qabul qilish mezoni
-        lines += [f"   Kartochka: {card_url(base_url, t['id'])}", ""]
+        lines += [f"   {tr('msg.card')}: {card_url(base_url, t['id'])}", ""]
     lines += [
         "-" * 40,
-        "Bu xabar Tender AI tizimidan avtomatik yuborildi.",
-        "Chegarani o'zgartirish yoki o'chirish: Akkaunt > Bildirishnoma.",
+        tr("msg.footAuto"),
+        tr("msg.footSettings"),
     ]
     text = "\n".join(lines)
 
@@ -783,48 +977,51 @@ def render(tenders: List[Dict[str, Any]], base_url: Optional[str] = None,
     rows = []
     for t in tenders:
         url = card_url(base_url, t["id"])
+        by = _by(t, lang)
         reasons_html = "".join(
             f"<div style='color:#7a8397;font-size:12px'>• {_esc(r)}</div>"
-            for r in (t.get("reasons") or [])[:3])
+            for r in _reasons(t, lang)[:3])
         rows.append(f"""
       <tr><td style="padding:14px 0;border-bottom:1px solid #e6e9f0">
         <div style="margin-bottom:6px">
           <span style="display:inline-block;background:#edf1fa;color:#2b5cc4;
             font-weight:700;font-size:12px;padding:2px 8px;border-radius:10px">
-            {t['score']} ball{_esc(' · ' + t['by']) if t.get('by') else ''}</span>
+            {_esc(_score(t['score'], lang))}{_esc(' · ' + by) if by else ''}</span>
         </div>
         <a href="{escape(url)}" style="color:#1a2233;font-weight:600;
-          font-size:15px;text-decoration:none">{_esc(t.get('name') or '(nomsiz)')}</a>
+          font-size:15px;text-decoration:none">{_esc(_name(t, lang))}</a>
         <div style="color:#7a8397;font-size:13px;margin-top:4px">
           {_esc(t.get('company_name') or '—')}</div>
         <div style="color:#1a2233;font-size:13px;margin-top:4px">
-          Summa: <b>{_esc(_money(t.get('totalcost'), t.get('currency')))}</b>
-          &nbsp;·&nbsp; Muddat: <b>{_esc(_dt(t.get('close_at')))}</b>
+          {_esc(tr('msg.sum'))}:
+          <b>{_esc(_money(t.get('totalcost'), t.get('currency'), lang))}</b>
+          &nbsp;·&nbsp; {_esc(tr('msg.deadline'))}:
+          <b>{_esc(_dt(t.get('close_at'), lang))}</b>
           &nbsp;·&nbsp; {_esc(t.get('region_name') or '—')}</div>
         {reasons_html}
         <div style="margin-top:8px">
           <a href="{escape(url)}" style="display:inline-block;background:#2b5cc4;
             color:#ffffff;font-size:13px;font-weight:600;padding:7px 14px;
-            border-radius:8px;text-decoration:none">Tender kartochkasini ochish</a>
+            border-radius:8px;text-decoration:none">{_esc(tr('msg.open'))}</a>
         </div>
       </td></tr>""")
 
     html = f"""<!DOCTYPE html>
-<html lang="uz"><head><meta charset="utf-8"><title>{_esc(subj)}</title></head>
+<html lang="{lang}"><head><meta charset="utf-8"><title>{_esc(subj)}</title></head>
 <body style="margin:0;padding:24px;background:#f6f7fb;
   font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#1a2233">
   <table role="presentation" cellpadding="0" cellspacing="0" width="100%"
     style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #e6e9f0;
     border-radius:12px;padding:20px 24px">
     <tr><td>
-      <div style="font-size:18px;font-weight:700">Yangi mos tenderlar</div>
+      <div style="font-size:18px;font-weight:700">{_esc(tr('msg.titleShort'))}</div>
       <div style="color:#7a8397;font-size:13px;margin-top:2px">
-        Moslik chegarasi: {threshold} ball · Topildi: {len(tenders)} ta</div>
+        {_esc(tr('msg.summaryShort', threshold=thr, n=len(tenders)))}</div>
     </td></tr>
     {''.join(rows)}
     <tr><td style="padding-top:16px;color:#7a8397;font-size:12px">
-      Bu xabar Tender AI tizimidan avtomatik yuborildi.<br>
-      Chegarani o‘zgartirish yoki o‘chirish: Akkaunt &gt; Bildirishnoma.
+      {_esc(tr('msg.footAuto'))}<br>
+      {_esc(tr('msg.footSettings'))}
     </td></tr>
   </table>
 </body></html>"""
@@ -846,49 +1043,59 @@ def _score_mark(score: int) -> str:
     return "⚪️"
 
 
-def telegram_block(t: Dict[str, Any], base_url: Optional[str]) -> str:
+def telegram_block(t: Dict[str, Any], base_url: Optional[str],
+                   lang: str = i18n.DEFAULT_LANG) -> str:
     """Bitta tender uchun Telegram HTML bloki.
 
     HTML ichida FAQAT Telegram qo'llab-quvvatlaydigan teglar: <b>, <a>, <i>.
     Matn `telegram.esc()` dan o'tadi (& < >), apostrof esa TEGILMAYDI —
     o'zbekcha matnда u har qadamda uchraydi.
+
+    MAYDON NOMLARI O'RNIGA EMOJI (🏢 💰 ⏳ 📍) — ATAYIN: Telegramда joy tor,
+    belgi esa tilga bog'liq emas va tarjima talab qilmaydi. Tarjima faqat
+    o'qiladigan matnга (ball, sabablar, sana/summa formati) tegishli.
     """
     esc = telegram.esc
+    lang = i18n.norm_lang(lang)
     url = card_url(base_url, t["id"])
-    by = f" · {esc(t['by'])}" if t.get("by") else ""
+    by_txt = _by(t, lang)
+    by = f" · {esc(by_txt)}" if by_txt else ""
     lines = [
-        f"{_score_mark(int(t['score']))} <b>{t['score']} ball</b>{by}",
+        f"{_score_mark(int(t['score']))} <b>{esc(_score(t['score'], lang))}</b>{by}",
         # TZ QABUL MEZONI: tizimdagi kartochkaga havola. Tender nomining o'zi
         # havola — Telegramда eng qulay ko'rinish.
-        f"<b><a href=\"{esc(url)}\">{esc(t.get('name') or '(nomsiz)')}</a></b>",
+        f"<b><a href=\"{esc(url)}\">{esc(_name(t, lang))}</a></b>",
         f"🏢 {esc(t.get('company_name') or '—')}",
-        f"💰 {esc(_money(t.get('totalcost'), t.get('currency')))}"
-        f"   ⏳ {esc(_dt(t.get('close_at')))}",
+        f"💰 {esc(_money(t.get('totalcost'), t.get('currency'), lang))}"
+        f"   ⏳ {esc(_dt(t.get('close_at'), lang))}",
         f"📍 {esc(t.get('region_name') or '—')}",
     ]
-    for r in (t.get("reasons") or [])[:3]:
+    for r in _reasons(t, lang)[:3]:
         lines.append(f"<i>• {esc(r)}</i>")
     return "\n".join(lines)
 
 
 def render_telegram(tenders: List[Dict[str, Any]],
                     base_url: Optional[str] = None,
-                    threshold: int = 70) -> Tuple[str, List[str], str]:
+                    threshold: int = 70,
+                    lang: str = i18n.DEFAULT_LANG) -> Tuple[str, List[str], str]:
     """Telegram xabari qismlari: (sarlavha, tender bloklari, izoh).
 
     Bo'lib yuborishni `telegram.send_blocks()` bajaradi — bitta xabar 4096
     belgidan oshsa, KESIM BLOK CHEGARASIDAN o'tadi (tender o'rtasidan emas).
     """
-    head = (f"<b>Tender AI — {len(tenders)} ta yangi mos tender</b>\n"
-            f"<i>Moslik chegarasi: {threshold} ball</i>")
-    blocks = [telegram_block(t, base_url) for t in tenders]
-    foot = "<i>Sozlamalar: Akkaunt → Bildirishnoma</i>"
+    lang = i18n.norm_lang(lang)
+    esc = telegram.esc
+    head = (f"<b>{esc(i18n.t(lang, 'tg.head', n=len(tenders)))}</b>\n"
+            f"<i>{esc(i18n.t(lang, 'tg.threshold', threshold=_score(threshold, lang)))}</i>")
+    blocks = [telegram_block(t, base_url, lang) for t in tenders]
+    foot = f"<i>{esc(i18n.t(lang, 'tg.foot'))}</i>"
     return head, blocks, foot
 
 
-def require_subscribers() -> List[Dict[str, Any]]:
+def require_subscribers(company_id: Optional[int] = None) -> List[Dict[str, Any]]:
     """Xabar ketadigan obunachilar. Bitta ham bo'lmasa — ANIQ xato."""
-    subs = enabled_subscribers()
+    subs = enabled_subscribers(company_id)
     if not subs:
         raise NotifyError(
             "Telegram ulanmagan. Akkaunt → Bildirishnoma bo'limida "
@@ -898,13 +1105,14 @@ def require_subscribers() -> List[Dict[str, Any]]:
 
 
 def send_telegram(chat_id: str, tenders: List[Dict[str, Any]],
-                  base_url: Optional[str], threshold: int) -> int:
+                  base_url: Optional[str], threshold: int,
+                  lang: str = i18n.DEFAULT_LANG) -> int:
     """BITTA obunachiga yuboradi. Qaytadi: yuborilgan xabarlar soni.
 
     `telegram.TelegramError` -> `NotifyError` ga o'raladi: chaqiruvchi (API,
     skript, sinovlar) bitta xato turini ushlasa yetadi — email bilan bir xil.
     """
-    head, blocks, foot = render_telegram(tenders, base_url, threshold)
+    head, blocks, foot = render_telegram(tenders, base_url, threshold, lang)
     try:
         return telegram.send_blocks(chat_id, head, blocks, foot)
     except telegram.TelegramError as e:
@@ -982,38 +1190,57 @@ def send(st: Dict[str, Any], to: str, subj: str, text: str, html: str) -> None:
 
 
 def mark_sent(tender_id: int, email: str, score: int,
-              kind: str = KIND_NEW_MATCH) -> None:
+              kind: str = KIND_NEW_MATCH,
+              company_id: Optional[int] = None) -> None:
     """Jurnalga yozadi. Takroriy yozuv ON CONFLICT bilan e'tiborsiz qoladi —
     ya'ni bir tender haqida ikkinchi marta xabar ketmaydi."""
     db.execute_returning(MARK_SENT_SQL, {
-        "tender_id": tender_id, "kind": kind, "email": email, "score": score})
+        "tender_id": tender_id, "kind": kind, "email": email,
+        "score": score, "company_id": _cid(company_id)})
 
 
 def _sample(st: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Sinov xabari uchun SOXTA tender — ikkala kanal bir xil namunani
-    ishlatsin (ko'rinishlar farqi faqat formatда bo'lsin)."""
+    ishlatsin (ko'rinishlar farqi faqat formatда bo'lsin).
+
+    Namuna ham FOYDALANUVCHI TILIDA: sinov xabari aynan "haqiqiy xabar
+    qanday keladi" degan savolga javob beradi, ya'ni tili ham o'shaniki
+    bo'lishi kerak.
+    """
+    lang = i18n.norm_lang(st.get("lang"))
     return [{
-        "id": 0, "name": "Sinov xabari — Tender AI sozlamalari ishlayapti",
+        "id": 0, "name": i18n.t(lang, "test.name"),
         "company_name": "Tender AI", "totalcost": 100000000, "currency": "UZS",
-        "region_name": "Toshkent shahri", "close_at": None,
-        "score": st["min_score"], "by": "sinov",
-        "reasons": ["Bu sinov xabari — haqiqiy tender emas."], "products": [],
+        "region_name": i18n.t(lang, "test.region"), "close_at": None,
+        "score": st["min_score"], "by_key": "by.test",
+        "by": i18n.t(i18n.DEFAULT_LANG, "by.test"),
+        "reason_keys": [{"key": "test.reason", "vars": {}}], "products": [],
     }]
 
 
-def send_test(st: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def send_test(st: Optional[Dict[str, Any]] = None,
+              company_id: Optional[int] = None) -> Dict[str, Any]:
     """EMAIL sinov xabari — sozlamalar to'g'riligini tekshirish uchun.
     Haqiqiy tenderlar bilan bog'liq emas, `notify_sent` ga YOZMAYDI."""
-    st = st or get_settings()
-    to = recipient(st)
-    subj, text, html = render(_sample(st), st.get("base_url"), st["min_score"])
-    send(st, to, "[SINOV] " + subj, text, html)
+    company_id = _cid(company_id)
+    st = st or get_settings(company_id)
+    lang = i18n.norm_lang(st.get("lang"))
+    to = recipient(st, company_id)
+    subj, text, html = render(_sample(st), st.get("base_url"), st["min_score"],
+                              lang)
+    send(st, to, f"{i18n.t(lang, 'test.tag')} {subj}", text, html)
     return {"sent": True, "to": to}
 
 
 def send_telegram_test(st: Optional[Dict[str, Any]] = None,
+                       company_id: Optional[int] = None,
                        chat_id: Optional[str] = None) -> Dict[str, Any]:
     """TELEGRAM sinov xabari. `notify_sent` ga YOZMAYDI.
+
+    TILI — PLATFORMA TILI (sozlamadagi `lang`), xuddi haqiqiy bildirishnoma
+    kabi. Sinovning butun mohiyati "haqiqiy xabar qanday keladi" ni
+    ko'rsatishда, shuning uchun u haqiqiysidan tili bilan ham farq
+    qilmasligi kerak.
 
     `chat_id` berilsa — faqat o'sha obunachiga (interfeysdagi bitta qatorni
     sinash uchun). Berilmasa — BARCHA yoqilgan obunachilarga, ya'ni haqiqiy
@@ -1022,22 +1249,26 @@ def send_telegram_test(st: Optional[Dict[str, Any]] = None,
     `telegram_enabled` TEKSHIRILMAYDI — sinov aynan "yoqishdan oldin
     ishlayaptimi?" degan savolga javob beradi.
     """
-    st = st or get_settings()
+    company_id = _cid(company_id)
+    st = st or get_settings(company_id)
+    lang = i18n.norm_lang(st.get("lang"))
     targets = ([{"chat_id": chat_id, "title": None}] if chat_id
-               else require_subscribers())
+               else require_subscribers(company_id))
 
     head, blocks, foot = render_telegram(_sample(st), st.get("base_url"),
-                                         st["min_score"])
-    head = "🧪 <b>[SINOV]</b> " + head
+                                         st["min_score"], lang)
+    head = f"🧪 <b>{telegram.esc(i18n.t(lang, 'test.tag'))}</b> " + head
 
     sent: List[str] = []
     errors: List[Dict[str, str]] = []
+    messages = 0
     for sub in targets:
+        cid = str(sub["chat_id"])
         try:
-            telegram.send_blocks(str(sub["chat_id"]), head, blocks, foot)
-            sent.append(str(sub["chat_id"]))
+            messages += telegram.send_blocks(cid, head, blocks, foot)
+            sent.append(cid)
         except telegram.TelegramError as e:
-            errors.append({"chat_id": str(sub["chat_id"]), "error": str(e)})
+            errors.append({"chat_id": cid, "error": str(e)})
 
     # HAMMASI yiqilsa — bu xato, jimgina "yuborildi" demaymiz.
     if not sent:
@@ -1047,8 +1278,9 @@ def send_telegram_test(st: Optional[Dict[str, Any]] = None,
         bot = telegram.get_me()
     except telegram.TelegramError:
         bot = {}
-    return {"sent": True, "chats": sent, "errors": errors,
-            "bot": bot.get("username")}
+    # `lang` javobда qaytadi — interfeys "qaysi tilda ketdi" ni ko'rsatsin.
+    return {"sent": True, "chats": sent, "lang": lang, "messages": messages,
+            "errors": errors, "bot": bot.get("username")}
 
 
 # ---------------------------------------------------------------------------
@@ -1056,7 +1288,8 @@ def send_telegram_test(st: Optional[Dict[str, Any]] = None,
 # ---------------------------------------------------------------------------
 def run(min_score: Optional[int] = None, limit: int = DEFAULT_LIMIT,
         dry_run: bool = False, force: bool = False,
-        since_hours: Optional[float] = None) -> Dict[str, Any]:
+        since_hours: Optional[float] = None,
+        company_id: Optional[int] = None) -> Dict[str, Any]:
     """Bitta bildirishnoma tsikli. Qaytadi: natija xulosasi (skript chop etadi).
 
     dry_run — HECH NARSA yuborilmaydi va BAZAGA YOZILMAYDI (faqat ko'rsatadi)
@@ -1076,8 +1309,13 @@ def run(min_score: Optional[int] = None, limit: int = DEFAULT_LIMIT,
     qolganlariga baribir ketadi. Har xato natijada qaytadi — jimgina
     yutilmaydi.
     """
-    st = get_settings()
+    company_id = _cid(company_id)
+    st = get_settings(company_id)
     threshold = _clamp_score(min_score if min_score is not None else st["min_score"])
+    # XABAR TILI — sozlamadan (foydalanuvchi interfeysда tanlagani). Ikkala
+    # kanal bitta tildan foydalanadi: bir xil xabar ikki joyда boshqa tilda
+    # kelsa foydalanuvchi buni nosozlik deb hisoblardi.
+    lang = i18n.norm_lang(st.get("lang"))
     since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)
              if since_hours else last_cycle_since())
 
@@ -1098,15 +1336,16 @@ def run(min_score: Optional[int] = None, limit: int = DEFAULT_LIMIT,
     # filtrlangandan KEYIN qo'llanadi. Aks holda email allaqachon ko'rgan
     # tenderlar Telegramning limitini yeb qo'yardi.
     all_cands = find_candidates(min_score=threshold, since=since, limit=0,
+                                company_id=company_id,
                                 include_sent=True)
 
     def for_channel(kind: str) -> List[Dict[str, Any]]:
-        seen = set() if force else sent_ids(kind)
+        seen = set() if force else sent_ids(kind, company_id)
         out = [t for t in all_cands if t["id"] not in seen]
         return out[:limit] if limit else out
 
     tenders = for_channel(KIND_NEW_MATCH)          # email
-    subs = enabled_subscribers() if st.get("telegram_enabled") else []
+    subs = enabled_subscribers(company_id) if st.get("telegram_enabled") else []
     # Har obunachi uchun O'Z ro'yxati (kim nimani ko'rmagan bo'lsa — o'sha)
     per_sub = [(s, for_channel(tg_kind(s["chat_id"]))) for s in subs]
     tg_total = sum(len(x) for _, x in per_sub)
@@ -1119,7 +1358,7 @@ def run(min_score: Optional[int] = None, limit: int = DEFAULT_LIMIT,
         "chats": [], "errors": [], "error": sync_error, "message": None,
     }
     result: Dict[str, Any] = {
-        "enabled": st["enabled"], "min_score": threshold,
+        "enabled": st["enabled"], "min_score": threshold, "lang": lang,
         "since": since.isoformat(), "found": len(tenders),
         "sent": 0, "dry_run": dry_run, "to": None,
         "tenders": tenders, "telegram": tg, "message": None,
@@ -1132,7 +1371,7 @@ def run(min_score: Optional[int] = None, limit: int = DEFAULT_LIMIT,
         return result
 
     if tenders:
-        subj, text, html = render(tenders, st.get("base_url"), threshold)
+        subj, text, html = render(tenders, st.get("base_url"), threshold, lang)
         result["subject"] = subj
         result["text"] = text
         result["html"] = html
@@ -1152,11 +1391,12 @@ def run(min_score: Optional[int] = None, limit: int = DEFAULT_LIMIT,
         parts.append("Email: yangi tender yo'q (hammasi allaqachon yuborilgan).")
     else:
         try:
-            to = recipient(st)
+            to = recipient(st, company_id)
             result["to"] = to
             send(st, to, subj, text, html)
             for t in tenders:
-                mark_sent(t["id"], to, t["score"], kind=KIND_NEW_MATCH)
+                mark_sent(t["id"], to, t["score"], kind=KIND_NEW_MATCH,
+                          company_id=company_id)
             result["sent"] = len(tenders)
             parts.append(f"Email: {len(tenders)} ta tender yuborildi ({to}).")
         except NotifyError as e:
@@ -1179,11 +1419,13 @@ def run(min_score: Optional[int] = None, limit: int = DEFAULT_LIMIT,
                 continue
             chat_id = str(sub["chat_id"])
             try:
-                n = send_telegram(chat_id, items, st.get("base_url"), threshold)
+                n = send_telegram(chat_id, items, st.get("base_url"), threshold,
+                                  lang)
                 for t in items:
                     # `email` ustuniga chat ID yoziladi — jurnal "qayerga ketdi"
                     # degan savolga javob bersin (ustun nomi tarixiy).
                     mark_sent(t["id"], f"tg:{chat_id}", t["score"],
+                              company_id=company_id,
                               kind=tg_kind(chat_id))
                 tg["sent"] += len(items)
                 tg["messages"] += n

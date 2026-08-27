@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api } from '@/api'
 import { Label, TagField } from './CatalogView'
+import { useT } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -20,6 +21,7 @@ interface ProfileFormProps {
 }
 
 export default function ProfileForm({ search, regions, onSaved, onCancel }: ProfileFormProps) {
+  const t = useT()
   const editing = !!search?.id
   const [name, setName] = useState(search?.name || '')
   const [keywords, setKeywords] = useState<string[]>(search?.keywords || [])
@@ -41,7 +43,7 @@ export default function ProfileForm({ search, regions, onSaved, onCancel }: Prof
   }
 
   async function save() {
-    if (!name.trim()) { setMsg({ ok: false, text: 'Qidiruvga nom bering.' }); return }
+    if (!name.trim()) { setMsg({ ok: false, text: t('sf.errNoName') }); return }
     setSaving(true); setMsg(null)
     const body = {
       name: name.trim(),
@@ -56,7 +58,7 @@ export default function ProfileForm({ search, regions, onSaved, onCancel }: Prof
       else await api.createSearch(body)
       onSaved?.()
     } catch (e) {
-      setMsg({ ok: false, text: 'Xatolik: ' + (e as Error).message })
+      setMsg({ ok: false, text: t('common.errorWith', { msg: (e as Error).message }) })
     } finally {
       setSaving(false)
     }
@@ -64,36 +66,32 @@ export default function ProfileForm({ search, regions, onSaved, onCancel }: Prof
 
   return (
     <Card className="max-w-[760px] p-6">
-      <h2 className="text-[18px] font-bold">
-        {editing ? 'Qidiruvni tahrirlash' : 'Yangi qidiruv'}
+      <h2 className="text-title font-semibold">
+        {t(editing ? 'sf.editTitle' : 'sf.newTitle')}
       </h2>
-      <p className="mb-5 mt-1 text-[13px] text-muted-foreground">
-        Saqlangach chap panelda mos tenderlar soni bilan turadi.
-      </p>
+      <p className="mb-5 mt-1 text-body text-muted-foreground">{t('sf.lead')}</p>
 
       <div className="mb-4">
-        <Label text="Nomi *">
+        <Label text={t('sf.fName')}>
           <Input value={name} onChange={(e) => setName(e.target.value)}
-            placeholder="Kompyuter texnikasi" />
+            placeholder={t('sf.fNamePh')} />
         </Label>
       </div>
 
       <div className="mb-4">
-        <Label text="Kalit so‘zlar" note="Ruscha/kirill yozing — manba ma'lumoti shunday.">
+        <Label text={t('sf.fKeywords')} note={t('sf.fKeywordsNote')}>
           <TagField value={keywords} input={kwInput} setInput={setKwInput} add={addKw}
             onRemove={(k) => setKeywords(keywords.filter((x) => x !== k))}
-            placeholder="мебель, компьютер, услуги… (Enter)" />
+            placeholder={t('sf.fKeywordsPh')} />
         </Label>
       </div>
 
       <div className="mb-4">
-        <span className="mb-1.5 block text-[13px] font-semibold">Hududlar</span>
-        <span className="mb-2 block text-[11px] text-muted-foreground">
-          Bo‘sh — butun respublika.
-        </span>
+        <span className="mb-1.5 block text-body font-semibold">{t('sf.regions')}</span>
+        <span className="mb-2 block text-micro text-muted-foreground">{t('sf.regionsHint')}</span>
         <div className="grid gap-1.5 sm:grid-cols-2">
           {regions.map((r) => (
-            <label className="flex cursor-pointer items-center gap-2 text-[13px]" key={r.area_id}>
+            <label className="flex cursor-pointer items-center gap-2 text-body" key={r.area_id}>
               <Checkbox checked={selRegions.includes(r.area_id)}
                 onCheckedChange={() => toggleRegion(r.area_id)} />
               {r.name}
@@ -103,33 +101,33 @@ export default function ProfileForm({ search, regions, onSaved, onCancel }: Prof
       </div>
 
       <div className="grid gap-3 sm:grid-cols-3">
-        <Label text="Valyuta">
+        <Label text={t('sf.fCurrency')}>
           <Select value={currency || 'any'} onValueChange={(v) => setCurrency(v === 'any' ? '' : v)}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="any">Farqsiz</SelectItem>
+              <SelectItem value="any">{t('sf.anyCurrency')}</SelectItem>
               <SelectItem value="UZS">UZS</SelectItem>
               <SelectItem value="USD">USD</SelectItem>
             </SelectContent>
           </Select>
         </Label>
-        <Label text="Min byudjet">
+        <Label text={t('sf.fMinBudget')}>
           <Input className="tabular" type="number" value={minCost}
             onChange={(e) => setMinCost(e.target.value)} placeholder="0" />
         </Label>
-        <Label text="Max byudjet">
+        <Label text={t('sf.fMaxBudget')}>
           <Input className="tabular" type="number" value={maxCost}
-            onChange={(e) => setMaxCost(e.target.value)} placeholder="cheksiz" />
+            onChange={(e) => setMaxCost(e.target.value)} placeholder={t('sf.fMaxBudgetPh')} />
         </Label>
       </div>
 
       <div className="mt-5 flex items-center gap-3">
         <Button onClick={save} disabled={saving}>
-          {saving ? 'Saqlanmoqda…' : (editing ? 'Yangilash' : 'Saqlash')}
+          {saving ? t('common.saving') : t(editing ? 'common.update' : 'common.save')}
         </Button>
-        <Button variant="ghost" onClick={onCancel}>Bekor qilish</Button>
+        <Button variant="ghost" onClick={onCancel}>{t('common.cancel')}</Button>
         {msg && (
-          <span className={cn('text-[13px]', msg.ok ? 'text-ok' : 'text-urgent')}>{msg.text}</span>
+          <span className={cn('text-body', msg.ok ? 'text-ok-strong' : 'text-urgent-strong')}>{msg.text}</span>
         )}
       </div>
     </Card>

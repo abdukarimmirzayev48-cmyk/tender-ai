@@ -1,0 +1,1485 @@
+# -*- coding: utf-8 -*-
+"""SINOV: J3 — `tender_requirement` poydevori.
+
+Modelga CHIQMAYDI, PUL SARFLAMAYDI. Barcha yozuvlar sinov oxirida
+qaytariladi.
+
+Nima tekshiriladi:
+  A. SXEMA   — jadval, cheklovlar va ATAYLAB YO'Q bo'lgan FK
+  B. STATIK  — `ON CONFLICT` maqsadi UNIQUE cheklov bilan mos kelishi
+  C. AMALIY  — idempotentlik, izolyatsiya, yurish jurnali
+"""
+import io
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dotenv import load_dotenv                              # noqa: E402
+load_dotenv(os.path.join(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))), ".env"))
+
+from api import db, requirement as R                        # noqa: E402
+
+PASS = FAIL = 0
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_yozilgan = []          # (company_id, tender_id) — oxirida tozalanadi
+
+
+def _cheklov_xatosimi(e: Exception) -> bool:
+    """CHECK cheklovi ishladimi.
+
+    Xato MATNIGA bog'lanmaymiz: PostgreSQL xabari TILGA bog'liq
+    (ruscha o'rnatishda "ограничение-проверку") va cheklov nomi
+    `_chk` ham, `_check` ham bo'lishi mumkin. Ikkalasida ham sinov
+    yiqilgan edi — ya'ni u cheklovni emas, XABAR MATNINI o'lchayotgan
+    edi.
+    """
+    matn = str(e).lower()
+    # NOT NULL ni CHECK deb QABUL QILMAYMIZ: sinov noto'g'ri sababdan
+    # "o'tgan" bo'lib ko'rinardi (aynan shunday bo'ldi — `review_status`
+    # qo'shilgach uchta CHECK sinovi NOT NULL ga urildi).
+    if "not null" in matn or "not-null" in matn:
+        return False
+    return (type(e).__name__ == "CheckViolation"
+            or "check" in matn or "_chk" in matn)
+
+
+def check(nom: str, shart: bool, izoh: str = "") -> None:
+    global PASS, FAIL
+    if shart:
+        PASS += 1
+        print(f"  OK   {nom}")
+    else:
+        FAIL += 1
+        print(f"  XATO {nom}" + (f"\n       {izoh}" if izoh else ""))
+
+
+def section(t: str) -> None:
+    print(f"\n=== {t} ===")
+
+
+# =====================================================================
+def test_sinovni_sinash():
+    """0. SINOV VOSITASINING O'ZI to'g'ri ishlaydimi.
+
+    ORTIQCHA KO'RINADI, LEKIN: shu loyihada "sinov o'zi tekshirilmagan"
+    xatosi TO'RT MARTA takrorlandi:
+
+      §16.28  leksik qidiruv — rus ekvivalenti unutilgan;
+      §16.29  eval baholovchisi — "duch kelinmadi" tanilmagan;
+      §16.33  `.doc` sifat mezoni — lotin shakllari yo'q;
+      §16.44  `_cheklov_xatosimi()` — NOT NULL ni CHECK deb qabul
+              qilib, uchta sinovni YOLG'ON "o'tdi" qilib ko'rsatgan.
+
+    Qoida: HAR NEGATIV yordamchi musbat holatda `True`, salbiy
+    holatda `False` qaytarishi ALOHIDA qulflanadi.
+    """
+    section("0. Sinov vositasining o'zi")
+
+    class SoxtaCheck(Exception):
+        pass
+    SoxtaCheck.__name__ = "CheckViolation"
+
+    check("CHECK buzilishi -> True", _cheklov_xatosimi(SoxtaCheck("xato")))
+    check("xabarda 'check' bo'lsa -> True",
+          _cheklov_xatosimi(Exception("violates check constraint x_check")))
+    check("cheklov nomi '_chk' bo'lsa -> True",
+          _cheklov_xatosimi(Exception("narusheniye ogranicheniya x_method_chk")))
+    # ENG MUHIMI: NOT NULL ni CHECK deb QABUL QILMASIN.
+    check("NOT NULL -> False (CHECK emas!)",
+          not _cheklov_xatosimi(Exception(
+              'null value in column "x" violates not-null constraint')))
+    check("ruscha NOT NULL -> False",
+          not _cheklov_xatosimi(Exception(
+              'znachenie NULL narushaet ogranichenie NOT NULL')))
+    check("aloqasiz xato -> False",
+          not _cheklov_xatosimi(Exception("connection refused")))
+
+
+# =====================================================================
+def test_sxema():
+    section("A. SXEMA")
+
+    for jadval in ("tender_requirement", "tender_requirement_run"):
+        check(f"{jadval} mavjud",
+              bool(db.scalar("SELECT to_regclass(%(t)s)",
+                             {"t": "public." + jadval})))
+
+    # `company_id` NOT NULL — J1 qoidasi. DEFAULT bo'lsa J1 dagi
+    # "MIN(id) noto'g'ri kompaniyaga yozdi" hodisasi qaytardi.
+    r = db.query_one("""SELECT is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_name='tender_requirement' AND column_name='company_id'""")
+    check("company_id NOT NULL", r and r["is_nullable"] == "NO", str(r))
+    check("company_id da DEFAULT YO'Q", r and r["column_default"] is None,
+          f"default={r and r['column_default']}")
+
+    # ATAYLAB YO'Q: `doc_chunk` ga FK. `etl_embed --chunks` bo'laklarni
+    # DELETE+INSERT qiladi — FK bo'lsa talablar CASCADE bilan o'chardi.
+    n = db.scalar("""
+        SELECT count(*) FROM information_schema.table_constraints tc
+        JOIN information_schema.constraint_column_usage ccu
+          ON ccu.constraint_name = tc.constraint_name
+        WHERE tc.table_name='tender_requirement'
+          AND tc.constraint_type='FOREIGN KEY' AND ccu.table_name='doc_chunk'""")
+    check("doc_chunk ga FK YO'Q (qayta bo'laklash talabni o'chirmasin)",
+          n == 0, f"{n} ta FK topildi")
+
+    # UNIQUE cheklov — `ON CONFLICT` shunga tayanadi
+    r = db.query_one("""
+        SELECT string_agg(a.attname, ',' ORDER BY k.ord) AS ustunlar
+        FROM pg_constraint c
+        JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+        WHERE c.conname = 'tender_requirement_uq'""")
+    check("tender_requirement_uq mavjud", bool(r and r["ustunlar"]), str(r))
+    if r and r["ustunlar"]:
+        # `method` 2026-08-25 da QO'SHILDI (schema_patch_requirement_2):
+        # naqsh va LLM natijalari bir-birini o'chirmasin.
+        check("UNIQUE ustunlari kutilgandek",
+              r["ustunlar"]
+              == "company_id,tender_id,source,method,position_no,name",
+              r["ustunlar"])
+
+    # CHECK: confidence 0..1
+    try:
+        db.execute_returning("""INSERT INTO tender_requirement
+            (company_id, tender_id, source, method, name, confidence,
+             review_status)
+            VALUES (2, (SELECT id FROM tender LIMIT 1), 'document', 'llm',
+                    'x', 1.5, 'pending')
+            RETURNING id""")
+        check("confidence>1 rad etiladi", False, "qabul qilindi")
+    except Exception as e:                                  # noqa: BLE001
+        check("confidence>1 rad etiladi", _cheklov_xatosimi(e), str(e)[:70])
+
+    # CHECK: source qiymatlari
+    try:
+        db.execute_returning("""INSERT INTO tender_requirement
+            (company_id, tender_id, source, method, name, review_status)
+            VALUES (2, (SELECT id FROM tender LIMIT 1), 'boshqa', 'llm', 'x',
+                    'pending')
+            RETURNING id""")
+        check("noma'lum source rad etiladi", False, "qabul qilindi")
+    except Exception as e:                                  # noqa: BLE001
+        check("noma'lum source rad etiladi", _cheklov_xatosimi(e),
+              str(e)[:70])
+
+    # CHECK: method qiymatlari
+    try:
+        db.execute_returning("""INSERT INTO tender_requirement
+            (company_id, tender_id, source, method, name, review_status)
+            VALUES (2, (SELECT id FROM tender LIMIT 1), 'document', 'sehr', 'x',
+                    'pending')
+            RETURNING id""")
+        check("noma'lum method rad etiladi", False, "qabul qilindi")
+    except Exception as e:                                  # noqa: BLE001
+        check("noma'lum method rad etiladi", _cheklov_xatosimi(e),
+              str(e)[:70])
+
+    # `method` DEFAULT bo'lmasligi SHART — har chaqiruvchi aniq aytsin
+    r = db.query_one("""SELECT is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_name='tender_requirement' AND column_name='method'""")
+    check("method NOT NULL va DEFAULT yo'q",
+          r and r["is_nullable"] == "NO" and r["column_default"] is None,
+          str(r))
+
+
+# =====================================================================
+def test_statik():
+    section("B. STATIK — ON CONFLICT maqsadi")
+    # J1 SABOQI: PK/UNIQUE o'zgarganda `ON CONFLICT` maqsadi ham
+    # o'zgarishi kerak. O'sha paytda BESHTA joyda jimgina buzilgan va
+    # buni faqat YURGIZIB KO'RISH ochgan edi. Bu yerda statik ushlaymiz.
+    m = re.search(r"ON CONFLICT\s*\(([^)]+)\)", R.SQL_UPSERT, re.I)
+    check("SQL_UPSERT da ON CONFLICT bor", bool(m))
+    if m:
+        maqsad = ",".join(x.strip() for x in m.group(1).split(","))
+        check("ON CONFLICT maqsadi UNIQUE bilan bir xil",
+              maqsad == "company_id,tender_id,source,method,position_no,name",
+              maqsad)
+
+    m2 = re.search(r"ON CONFLICT\s*\(([^)]+)\)", R.SQL_RUN_UPSERT, re.I)
+    if m2:
+        maqsad2 = ",".join(x.strip() for x in m2.group(1).split(","))
+        check("run jurnali ON CONFLICT = PK",
+              maqsad2 == "company_id,tender_id,method", maqsad2)
+
+    # Har o'qish so'rovida `company_id` bo'lishi SHART
+    for nom in ("SQL_LIST", "SQL_RUN_GET", "SQL_PENDING"):
+        sql = getattr(R, nom)
+        check(f"{nom} da company_id bor",
+              bool(re.search(r"\bcompany_id\b", sql, re.I)),
+              " ".join(sql.split())[:90])
+
+
+# =====================================================================
+def test_amaliy():
+    section("C. AMALIY — idempotentlik va izolyatsiya")
+    t = db.query_one("""SELECT g.tender_id, count(*) AS n FROM tender_good g
+        GROUP BY 1 HAVING count(*) BETWEEN 3 AND 60 ORDER BY 2 DESC LIMIT 1""")
+    if not t:
+        check("pozitsiyali tender topildi", False, "tender_good bo'sh")
+        return
+    tid = t["tender_id"]
+
+    kompaniyalar = [r["id"] for r in
+                    db.query("SELECT id FROM company_account ORDER BY id LIMIT 2")]
+    if len(kompaniyalar) < 2:
+        check("ikki kompaniya bor", False, "izolyatsiya sinovi uchun kerak")
+        return
+    A, B = kompaniyalar[0], kompaniyalar[1]
+    _yozilgan.extend([(A, tid), (B, tid)])
+
+    r1 = R.from_api(tid, A)
+    check("from_api talab yozdi", r1["n"] > 0, str(r1))
+    lst1 = R.list_for(tid, A)
+    check("list_for o'sha sonni qaytardi", len(lst1) == r1["n"],
+          f"{len(lst1)} != {r1['n']}")
+
+    # IDEMPOTENTLIK — ikkinchi yurish dublikat yaratmasin
+    R.from_api(tid, A)
+    lst2 = R.list_for(tid, A)
+    check("ikkinchi yurish dublikat yaratmaydi", len(lst2) == len(lst1),
+          f"{len(lst1)} -> {len(lst2)}")
+
+    # IZOLYATSIYA — B kompaniya A ning talablarini ko'rmaydi
+    check("B kompaniya A ning talablarini ko'rmaydi",
+          len(R.list_for(tid, B)) == 0)
+    R.from_api(tid, B)
+    check("B o'z talablarini ko'radi", len(R.list_for(tid, B)) > 0)
+    check("A ning talablari o'zgarmadi", len(R.list_for(tid, A)) == len(lst1))
+
+    # YURISH JURNALI — "topilmadi" va "ajratilmagan" AJRALADI
+    info = R.run_info(tid, A)
+    check("yurish jurnali yozildi", info is not None and info["status"] == "ok",
+          str(info))
+    yoq_tender = db.scalar("""SELECT t.id FROM tender t
+        WHERE NOT EXISTS (SELECT 1 FROM tender_good g WHERE g.tender_id=t.id)
+        LIMIT 1""")
+    if yoq_tender:
+        _yozilgan.append((A, yoq_tender))
+        r = R.from_api(yoq_tender, A)
+        check("pozitsiyasiz tender: 0 talab, lekin JURNAL bor",
+              r["n"] == 0 and R.run_info(yoq_tender, A) is not None, str(r))
+        s = R.summary(yoq_tender, A)
+        check("summary 'ajratilgan' deb ko'rsatadi",
+              s["holat"] == "ok" and s["jami"] == 0, str(s))
+
+    # summary — iste'molchilar uchun
+    s = R.summary(tid, A)
+    check("summary to'g'ri sanaydi",
+          s["jami"] == len(lst1) and s["hujjatdan"] == 0, str(s))
+
+    # pending — ajratilgani QAYTA tanlanmasin
+    p = [x["id"] for x in R.pending(A, 2000)]
+    check("ajratilgan tender pending da yo'q", tid not in p,
+          f"pending: {len(p)} ta")
+
+
+# =====================================================================
+def test_hujjatdan():
+    """D. HUJJATDAN AJRATISH — modelga CHIQMAYDI.
+
+    `save()` sof funksiyaga yaqin: model javobini olib jadvalga yozadi.
+    Uni soxta javob bilan sinash mumkin — chaqiruvsiz, pulsiz.
+    """
+    from api import requirement_ai as RA
+    section("D. Hujjatdan ajratish (modelsiz)")
+
+    # --- Atama qamrovi: UCH YOZUV ham bo'lishi SHART (§16.34) ---
+    tsq = RA._talab_tsquery()
+    for atama_ in ("kafolat", "гарант", "sertifikat", "срок", "оплат"):
+        check(f"tsquery da {atama_!r} bor", atama_ in tsq, tsq[:100])
+
+    # --- Bo'laklar RAQAMLANADI (§16.32 saboqi) ---
+    soxta_chunks = [
+        {"file_ref": "a.pdf", "char_start": 100, "char_end": 900,
+         "file_name": "shartnoma.pdf", "text": "Kafolat muddati 12 oy."},
+        {"file_ref": "b.pdf", "char_start": 50, "char_end": 800,
+         "file_name": "texnik.pdf", "text": "ISO 9001 talab qilinadi."},
+    ]
+    matn = RA.build_input({"id": 1, "name": "Sinov"}, soxta_chunks)
+    check("bo'laklar raqamlangan", "[1]" in matn and "[2]" in matn, matn[:80])
+    check("fayl nomi ko'rsatilgan", "shartnoma.pdf" in matn)
+
+    # --- Amaliy: soxta javobni saqlash ---
+    tid = db.scalar("SELECT id FROM tender LIMIT 1")
+    cid = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
+    _yozilgan.append((cid, tid))
+
+    natija = {"requirements": [
+        {"name": "Kafolat muddati", "tur": "kafolat", "qiymat": "12 oy",
+         "is_mandatory": True, "manba_raqami": 1,
+         "iqtibos": "Kafolat muddati 12 oy.", "confidence": 0.95},
+        {"name": "ISO 9001", "tur": "sertifikat", "qiymat": "ISO 9001",
+         "is_mandatory": True, "manba_raqami": 2,
+         "iqtibos": "ISO 9001 talab qilinadi.", "confidence": 0.90},
+    ]}
+    r = RA.save(tid, cid, natija, soxta_chunks, "hash1")
+    check("ikki talab yozildi", r["n"] == 2, str(r))
+    check("status ok (ishonch yuqori)", r["status"] == "ok", str(r))
+
+    yozilgan = [x for x in R.list_for(tid, cid) if x["source"] == "document"]
+    kaf = next((x for x in yozilgan if x["name"] == "Kafolat muddati"), None)
+    check("manba_raqami=1 -> 1-bo'lak file_ref",
+          kaf and kaf["file_ref"] == "a.pdf", str(kaf and kaf["file_ref"]))
+    check("manba_raqami=1 -> 1-bo'lak char_start",
+          kaf and kaf["char_start"] == 100, str(kaf and kaf["char_start"]))
+    iso = next((x for x in yozilgan if x["name"] == "ISO 9001"), None)
+    check("manba_raqami=2 -> 2-bo'lak", iso and iso["char_start"] == 50,
+          str(iso and iso["char_start"]))
+    check("attrs da tur va qiymat bor",
+          kaf and (kaf["attrs"] or {}).get("tur") == "kafolat"
+          and (kaf["attrs"] or {}).get("qiymat") == "12 oy", str(kaf))
+
+    # --- MODEL O'YLAB TOPGAN RAQAM ---
+    # Talab TASHLANMAYDI (ma'lumot yo'qotilmasin), lekin manbasiz qoladi
+    # va ishonchi pasaytiriladi — holat KO'RINIB tursin.
+    natija2 = {"requirements": [
+        {"name": "Yolgon manba", "tur": "boshqa", "qiymat": "x",
+         "is_mandatory": False, "manba_raqami": 99,
+         "iqtibos": "yo'q", "confidence": 0.95},
+    ]}
+    r2 = RA.save(tid, cid, natija2, soxta_chunks, "hash2")
+    check("mavjud bo'lmagan raqam sanaladi", r2["yolgon_manba"] == 1, str(r2))
+    y = next((x for x in R.list_for(tid, cid) if x["name"] == "Yolgon manba"),
+             None)
+    check("yolgon manbali talab TASHLANMAYDI", y is not None)
+    check("manba maydonlari bo'sh", y and y["file_ref"] is None)
+    check("ishonch 0.50 ga tushirildi",
+          y and float(y["confidence"]) <= 0.50, str(y and y["confidence"]))
+    check("attrs da ogohlantirish bor",
+          y and "ogohlantirish" in (y["attrs"] or {}), str(y and y["attrs"]))
+    check("yurish jurnalida xato qayd etilgan",
+          "manba raqami" in ((R.run_info(tid, cid, method="llm") or {})
+                             .get("error") or ""),
+          str(R.run_info(tid, cid, method="llm")))
+
+    # --- PAST ISHONCH -> needs_review, TASHLANMAYDI (qaror 3.5) ---
+    natija3 = {"requirements": [
+        {"name": "Bo'sh shablon", "tur": "kafolat",
+         "qiymat": "ko'rsatilmagan (_____)", "is_mandatory": True,
+         "manba_raqami": 1, "iqtibos": "kafolat muddati _____ ni tashkil",
+         "confidence": 0.35},
+    ]}
+    r3 = RA.save(tid, cid, natija3, soxta_chunks, "hash3")
+    check("past ishonch -> needs_review", r3["status"] == "needs_review",
+          str(r3))
+    b = next((x for x in R.list_for(tid, cid) if x["name"] == "Bo'sh shablon"),
+             None)
+    check("past ishonchli talab SAQLANADI", b is not None)
+    check("ko'rib chiqish ko'rinishida chiqadi",
+          db.scalar("""SELECT count(*) FROM v_requirement_review
+                       WHERE tender_id=%(t)s AND company_id=%(c)s""",
+                    {"t": tid, "c": cid}) > 0)
+
+    # --- DRY RUN pul sarflamaydi va BAZAGA YOZMAYDI ---
+    oldin = len(R.list_for(tid, cid))
+    d = RA.extract(tid, cid, dry_run=True, force=True)
+    check("dry_run status", d["status"] in ("dry_run", "no_text"), str(d))
+    check("dry_run bazaga yozmadi", len(R.list_for(tid, cid)) == oldin)
+    if d["status"] == "dry_run":
+        check("dry_run narxni beradi", d["taxminiy_narx_usd"] > 0, str(d))
+
+    # --- content_hash o'zgarmasa QAYTA AJRATILMAYDI (pul tejash) ---
+    RA.save(tid, cid, {"requirements": []}, soxta_chunks, "hash_bir")
+    d2 = RA.extract(tid, cid, dry_run=True)
+    check("hash mos kelmasa dry_run davom etadi",
+          d2["status"] in ("dry_run", "no_text", "skipped"), str(d2))
+
+
+# =====================================================================
+def test_naqsh():
+    """E. NAQSH AJRATGICHI — bepul, modelsiz.
+
+    Naqshlar SOF FUNKSIYA ustida sinaladi: matn beriladi, nima
+    topilgani tekshiriladi. Bazaga ham, modelga ham tegmaydi.
+    """
+    from api import requirement_naqsh as N
+    section("E. Naqsh ajratgichi (bepul)")
+
+    # --- UCH YOZUV: har uchalasida ham topilishi SHART (§16.34) ---
+    HOLATLAR = [
+        ("Гарантийный срок на запасные части 12 месяцев с момента",
+         "Kafolat muddati", "12 oy", "rus"),
+        ("Kafolat muddati 24 oy qilib belgilanadi",
+         "Kafolat muddati", "24 oy", "lotin"),
+        ("Кафолат муддати 36 ой этиб белгиланади",
+         "Kafolat muddati", "36 oy", "kirill"),
+        ("Форма платежа – предоплата в 50 % от стоимости",
+         "Oldindan to'lov", "50 %", "rus"),
+        ("yetkazib berish muddati 30 kun ichida",
+         "Yetkazib berish muddati", "30 kun", "lotin"),
+    ]
+    for matn, kutilgan_nom, kutilgan_qiymat, til in HOLATLAR:
+        topildi = False
+        for nom, _tur, naqsh, birlik in N.QOIDALAR:
+            m = naqsh.search(matn)
+            if m and nom == kutilgan_nom:
+                if f"{m.group('son')} {birlik}" == kutilgan_qiymat:
+                    topildi = True
+                    break
+        check(f"{til}: {kutilgan_qiymat!r} topildi", topildi, matn[:50])
+
+    # --- ORALIQ: uzun ro'yxatdan keyingi raqam ham olinishi kerak ---
+    # O'LCHANGAN: ORALIQ=80 da bu TUSHIB QOLGAN edi (t7475137).
+    uzun = ("Гарантийный срок на основные узлы: РМК, генераторы, "
+            "электродвигателя, статоры, роторы составляет 24 месяца")
+    topildi = any(naqsh.search(uzun) and naqsh.search(uzun).group("son") == "24"
+                  for _n, _t, naqsh, b in N.QOIDALAR if b == "oy")
+    check("uzun ro'yxatdan keyingi raqam olinadi", topildi, uzun[:60])
+
+    # --- JUMLA CHEGARASI: nuqtadan keyingi raqam OLINMASLIGI kerak ---
+    yolgon = "Kafolat muddati alohida kelishiladi. Narxi 500 oy oldin"
+    xato_topildi = False
+    for _n, _t, naqsh, b in N.QOIDALAR:
+        m = naqsh.search(yolgon)
+        if m and m.group("son") == "500":
+            xato_topildi = True
+    check("nuqtadan keyingi raqam OLINMAYDI", not xato_topildi, yolgon)
+
+    # --- BO'SH SHABLON ---
+    bosh = "5.5. kafolat muddati Tovar chiqarilgan sanadan boshlab _____ni tashkil"
+    check("bo'sh shablon tanildi", bool(N.BOSH_SHABLON.search(bosh)), bosh[:50])
+    check("to'ldirilgan shablon shablon deb sanalmaydi",
+          not N.BOSH_SHABLON.search("kafolat muddati 12 oyni tashkil etadi"))
+
+    # --- HUJJAT LUG'ATI: uch yozuv ---
+    for matn, kutilgan, til in [
+        ("сертификат качества товара", "Sifat sertifikati", "rus"),
+        ("sifat sertifikati taqdim etilsin", "Sifat sertifikati", "lotin"),
+        ("сертификат происхождения", "Kelib chiqish sertifikati", "rus"),
+        ("ISO 9001 talab qilinadi", "ISO standarti", "lotin"),
+        ("ГОСТ 12.4.011", "GOST talabi", "rus"),
+    ]:
+        topildi = any(nom == kutilgan and naqsh.search(matn)
+                      for nom, naqsh in N.HUJJAT_RE)
+        check(f"{til}: {kutilgan!r}", topildi, matn)
+
+    # --- INCOTERMS ---
+    m = N.INCOTERMS_RE.search("Yetkazib berish sharti DAP Toshkent")
+    check("INCOTERMS DAP tanildi", m and m.group(1).upper() == "DAP",
+          str(m and m.group(0)))
+    check("tasodifiy so'z INCOTERMS emas",
+          not N.INCOTERMS_RE.search("Bu matnda bazis yo'q"))
+
+    # --- ISHONCH: naqsh reyestrdan PAST, chunki kontekstni bilmaydi ---
+    check("naqsh ishonchi reyestrdan past", N.CONF_NAQSH < 1.00)
+    check("bo'sh shablon ishonchi eng past",
+          N.CONF_BOSH_SHABLON < N.CONF_NAQSH)
+
+    # --- TAQQOSLASH mezoni: raqam VA nom bo'yicha ---
+    # O'LCHANGAN XATO: avval faqat RAQAM bo'yicha edi va sertifikatlar
+    # (raqamsiz) HECH QACHON "qoplangan" deb sanalmasdi — mezon
+    # ajratgichni emas, o'zini o'lchayotgan edi.
+    check("kalit so'zlar uch yozuvda bir xil kalitga tushadi",
+          N._kalit_sozlar("Sifat sertifikati")
+          & N._kalit_sozlar("сертификат качества"),
+          f"{N._kalit_sozlar('Sifat sertifikati')} vs "
+          f"{N._kalit_sozlar('сертификат качества')}")
+
+
+# =====================================================================
+def test_isteemolchilar():
+    """F. ISTE'MOLCHILAR — talablar HAQIQATAN ishlatilyaptimi.
+
+    Ajratilgan 3700 ta talab hech qayerda o'qilmasa, ular bo'sh
+    mehnat. Bu bo'lim BOG'LANISH uzilmaganini tekshiradi — modelga
+    chiqmasdan.
+    """
+    section("F. Iste'molchilar (ai_gonogo, compare_tenders, get_tender)")
+
+    # --- 1. `ai_gonogo` promptga talab blokini QO'SHADIMI ---
+    from api import ai_gonogo
+    import inspect
+    imzo = inspect.signature(ai_gonogo.build_input).parameters
+    check("build_input `talablar` parametrini oladi", "talablar" in imzo,
+          str(list(imzo)))
+
+    matn = ai_gonogo.build_input(
+        {"id": 1, "name": "Sinov", "detail": {}}, [], None,
+        docs="XOM HUJJAT MATNI", talablar="=== TALABLAR ===\nKafolat: 12 oy")
+    check("talablar promptga tushdi", "Kafolat: 12 oy" in matn, matn[-200:])
+    check("talablar XOM MATNDAN OLDIN",
+          matn.index("Kafolat: 12 oy") < matn.index("XOM HUJJAT MATNI"),
+          "tuzilgan ma'lumot oldin turishi kerak")
+    # Bo'sh bo'lsa blok UMUMAN qo'shilmasin — "talab yo'q" degan
+    # yolg'on taassurot bo'lmasin.
+    matn2 = ai_gonogo.build_input({"id": 1, "name": "S", "detail": {}}, [],
+                                  None, docs="X", talablar="")
+    check("bo'sh talablar bloki qo'shilmaydi", "TALABLAR" not in matn2)
+
+    # --- 2. `main.gonogo_cached` blokni UZATADIMI (statik) ---
+    ROOT_ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    mainsrc = io.open(os.path.join(ROOT_, "api", "main.py"),
+                      encoding="utf-8").read()
+    check("main.py prompt_block ni chaqiradi",
+          "prompt_block(tender_id, company_id)" in mainsrc)
+    check("main.py talablarni analyze ga uzatadi",
+          "talablar=talablar" in mainsrc)
+
+    # --- 3. `compare_tenders` va `get_tender` (statik) ---
+    chatsrc = io.open(os.path.join(ROOT_, "api", "ai_chat.py"),
+                      encoding="utf-8").read()
+    check("compare_tenders talablarni qo'shadi",
+          '_req.qisqa(tid, company_id)' in chatsrc)
+    check("get_tender talablarni qo'shadi",
+          '_talab_xulosa(int(args["tender_id"])' in chatsrc)
+    check("tool ta'rifida talablar eslatilgan",
+          "AJRATILGAN TALABLAR" in chatsrc)
+
+    # --- 4. `prompt_block` mazmuni ---
+    tid = db.scalar("""SELECT tender_id FROM tender_requirement
+        WHERE source='document' LIMIT 1""")
+    if tid:
+        cid = db.scalar("""SELECT company_id FROM tender_requirement
+            WHERE tender_id=%(t)s LIMIT 1""", {"t": tid})
+        blok = R.prompt_block(tid, cid)
+        check("prompt_block matn qaytardi", bool(blok), blok[:60])
+        check("ishonch KO'RSATILGAN", "ishonch" in blok,
+              "modelga 'bu aniq ma'lumot' degan taassurot bermaymiz")
+        check("qamrov ogohlantirishi bor",
+              "BARCHASI emas" in blok, blok[-160:])
+        check("usul ko'rsatilgan (naqsh/model)",
+              "naqsh]" in blok or "model]" in blok, blok[:200])
+
+    # --- 5. BO'SH holat — "yo'q" va "ajratilmagan" AJRALADI ---
+    yoq = db.scalar("""SELECT t.id FROM tender t WHERE NOT EXISTS
+        (SELECT 1 FROM tender_requirement_run r WHERE r.tender_id=t.id)
+        LIMIT 1""")
+    if yoq:
+        check("ajratilmagan tenderda prompt bloki BO'SH",
+              R.prompt_block(yoq, 2) == "")
+        x = R.summary(yoq, 2)
+        check("summary 'ajratilmagan' deb ogohlantiradi",
+              "AJRATILMAGAN" in (x.get("izoh") or ""), str(x.get("izoh")))
+
+    # --- 6. `qisqa()` eng ISHONCHLI qiymatni tanlaydi ---
+    # O'LCHANGAN XATO: `max()` alifbo bo'yicha tasodifiy qiymat
+    # tanlardi va `tolov` ustuniga jarima stavkasi tushib qolgan edi.
+    reqsrc = io.open(os.path.join(ROOT_, "api", "requirement.py"),
+                     encoding="utf-8").read()
+    check("qisqa() DISTINCT ON ishlatadi (max() emas)",
+          "DISTINCT ON (attrs->>'tur')" in reqsrc)
+    check("INCOTERMS 'bazis' turida, 'muddat' emas",
+          '"tur": "bazis"' in io.open(
+              os.path.join(ROOT_, "api", "requirement_naqsh.py"),
+              encoding="utf-8").read())
+
+
+# =====================================================================
+def test_review():
+    """G. KO'RIB CHIQISH — navbat HARAKATLANADIMI.
+
+    Asosiy shart: tenderning barcha talablari ko'rib chiqilgach u
+    `v_requirement_review` dan CHIQIB KETISHI kerak. Aks holda navbat
+    raqami o'zgarmaydi va ish qilinganini bilib bo'lmaydi.
+    """
+    section("G. Ko'rib chiqish navbati")
+
+    kompaniyalar = [r["id"] for r in
+                    db.query("SELECT id FROM company_account ORDER BY id LIMIT 2")]
+    A = kompaniyalar[0]
+    B = kompaniyalar[1] if len(kompaniyalar) > 1 else A
+
+    # --- Sinov uchun O'Z tenderimizni tayyorlaymiz ---
+    tid = db.scalar("""SELECT t.id FROM tender t
+        WHERE NOT EXISTS (SELECT 1 FROM tender_requirement r
+                          WHERE r.tender_id = t.id) LIMIT 1""")
+    if not tid:
+        check("bo'sh tender topildi", False)
+        return
+    _yozilgan.append((A, tid))
+
+    # TURLARI HAR XIL: aks holda `qisqa()` ikkitasidan qaysinisini
+    # tanlashi NOANIQ bo'ladi (ikkalasi ham tasdiqlangan, faqat ishonch
+    # farq qiladi) va sinov TASODIFIY tartibga tayanib qolardi.
+    for i, (nom, conf, tur) in enumerate(
+            [("Sinov kafolat", 0.90, "kafolat"),
+             ("Sinov shablon", 0.35, "muddat")], 1):
+        db.execute_returning(R.SQL_UPSERT, {
+            "company_id": A, "tender_id": tid, "lot_id": None,
+            "source": "document", "method": "llm", "position_no": i,
+            "name": nom,
+            "attrs": '{"tur":"' + tur + '","qiymat":"12 oy"}',
+            "qty": None, "unit": None, "delivery_days": None,
+            "is_mandatory": True, "confidence": conf, "raw_snippet": "matn",
+            "file_ref": "a.pdf", "char_start": 100, "char_end": 400,
+            "model": "sinov", "review_status": "pending"})
+
+    # --- 1. Navbatga TUSHDIMI ---
+    navbat = {x["tender_id"] for x in R.review_queue(A, 500)}
+    check("yangi talablar navbatga tushdi", tid in navbat)
+
+    items = R.review_items(tid, A)
+    check("ikkala talab ham 'pending'",
+          all(x["review_status"] == "pending" for x in items), str(items[:1]))
+
+    # NOM bo'yicha olamiz, INDEKS bo'yicha EMAS.
+    # `review_items()` ishonch bo'yicha O'SISH tartibida qaytaradi
+    # (past ishonchlisi tepada — ko'rib chiqish shundan boshlanadi).
+    # Indeksga tayangan sinov noto'g'ri talabni belgilab, keyin
+    # "rad etilgan talab promptda qoldi" deb YOLG'ON xato bergan edi.
+    def top(nom):
+        return next(x for x in R.review_items(tid, A) if x["name"] == nom)
+
+    kafolat_id = top("Sinov kafolat")["id"]
+    shablon_id = top("Sinov shablon")["id"]
+
+    # --- 2. IZOLYATSIYA: B kompaniya bularni ko'rmaydi ---
+    check("B kompaniya navbatida yo'q",
+          tid not in {x["tender_id"] for x in R.review_queue(B, 500)})
+    check("B kompaniya talablarni ko'rmaydi",
+          len(R.review_items(tid, B)) == 0)
+
+    # --- 3. IDOR: B kompaniya A ning talabini o'zgartira olmaydi ---
+    natija = R.review_set(kafolat_id, B, "approved")
+    check("B kompaniya A ning talabini O'ZGARTIRA OLMAYDI",
+          natija is None, str(natija))
+    check("holat o'zgarmadi",
+          top("Sinov kafolat")["review_status"] == "pending")
+
+    # --- 4. TASDIQLASH ---
+    r1 = R.review_set(kafolat_id, A, "approved", by=A)
+    check("tasdiqlash ishladi", r1 and r1["review_status"] == "approved",
+          str(r1))
+    navbat2 = {x["tender_id"]: x["kutayotgan"] for x in R.review_queue(A, 500)}
+    check("navbat SONI kamaydi", navbat2.get(tid) == 1, str(navbat2.get(tid)))
+
+    # --- 5. TUZATISH — qiymatsiz RAD ETILADI ---
+    try:
+        R.review_set(shablon_id, A, "corrected", corrected="  ")
+        check("qiymatsiz 'corrected' rad etiladi", False, "qabul qilindi")
+    except ValueError:
+        check("qiymatsiz 'corrected' rad etiladi", True)
+
+    r2 = R.review_set(shablon_id, A, "corrected", corrected="24 oy", by=A)
+    check("tuzatish ishladi", r2 and r2["review_status"] == "corrected",
+          str(r2))
+    tuzatilgan = [x for x in R.review_items(tid, A)
+                  if x["review_status"] == "corrected"][0]
+    check("tuzatilgan qiymat saqlandi",
+          tuzatilgan["corrected_value"] == "24 oy")
+    check("ASL qiymat ham QOLADI (J6 uchun)",
+          (tuzatilgan["attrs"] or {}).get("qiymat") == "12 oy",
+          str(tuzatilgan["attrs"]))
+
+    # --- 6. ASOSIY SHART: tender navbatdan CHIQDIMI ---
+    navbat3 = {x["tender_id"] for x in R.review_queue(A, 500)}
+    check("HAMMASI ko'rib chiqilgach tender NAVBATDAN CHIQDI",
+          tid not in navbat3,
+          "aks holda navbat raqami o'zgarmaydi va ish ko'rinmaydi")
+
+    # --- 7. TUZATILGAN qiymat iste'molchilarga YETADIMI ---
+    q = R.qisqa(tid, A)
+    check("qisqa() tuzatilgan qiymatni beradi", q["yetkazish"] == "24 oy",
+          str(q["yetkazish"]))
+    blok = R.prompt_block(tid, A)
+    check("prompt_block tuzatilgan qiymatni beradi", "24 oy" in blok, blok[:150])
+    check("prompt_block 'INSON TASDIQLAGAN' deb belgilaydi",
+          "INSON TASDIQLAGAN" in blok, blok[:200])
+
+    # --- 8. RAD ETILGAN talab HAMMA JOYDAN chiqadi ---
+    R.review_set(kafolat_id, A, "rejected", by=A)
+    blok2 = R.prompt_block(tid, A)
+    check("rad etilgan talab promptga TUSHMAYDI",
+          "Sinov kafolat" not in blok2, blok2[:200])
+    check("ishonchli() rad etilganni bermaydi",
+          all(x["name"] != "Sinov kafolat" for x in R.ishonchli(tid, A)))
+
+    # --- 9. QAROR QATLAMI chegarasi ---
+    ishonchli = R.ishonchli(tid, A)
+    check("tuzatilgan talab qaror qatlamiga TUSHADI",
+          any(x["name"] == "Sinov shablon" for x in ishonchli),
+          "inson tasdiqlagan — ishonch darajasidan qat'iy nazar")
+    check("ISHONCH_CHEGARA belgilangan", R.ISHONCH_CHEGARA >= 0.80,
+          str(R.ISHONCH_CHEGARA))
+
+
+# =====================================================================
+def test_kirish_yetib_boradimi():
+    """N. AJRATGICH YOZILDI — LEKIN KIRISH YETIB BORADIMI?
+
+    Yangi sinf. Qadam yozilgan, ulangan, sinovi o'tgan — lekin
+    BOSHQA MODUL kirishni filtrlab tashlaydi va ajratgich ma'lumotni
+    umuman ko'rmaydi.
+
+    HAQIQATAN SODIR BO'LDI: `tajriba` qoidasi qo'shildi va ishladi,
+    lekin `requirement_ai._talab_tsquery()` da guruhlar QATTIQ
+    YOZILGAN ro'yxat edi va unda `tajriba` yo'q edi. Tajriba atamasi
+    bor bo'laklar TANLANMAY qoldi.
+
+    O'lchov farqi ko'rsatdi: bo'lak skani 50 tenderda talab bor
+    dedi, ajratgich 22 ta topdi.
+    """
+    section("N. Kirish ajratgichga yetib boradimi")
+
+    from api import atama, requirement_ai, requirement_naqsh
+
+    # 1. HAR QOIDA TURI tanlash ro'yxatida bormi.
+    #
+    #    To'g'ridan-to'g'ri `tur` -> guruh mosligi yo'q (masalan
+    #    `moliyaviy` turi `zakalat` guruhidan keladi), shuning uchun
+    #    qoidalar ISHLATGAN atama guruhlarini tekshiramiz.
+    kerak = set()
+    for _nom, _tur, naqsh, _b in requirement_naqsh.QOIDALAR:
+        for guruh, prefikslar in atama.GURUH_PREFIKS.items():
+            if any(p in naqsh.pattern for p in prefikslar):
+                kerak.add(guruh)
+    yoq = sorted(kerak - set(atama.TALAB_GURUHLARI))
+    check("qoidalar ishlatgan HAR guruh tanlash ro'yxatida",
+          not yoq,
+          f"ro'yxatda yo'q: {yoq} -> bunday bo'lak TANLANMAYDI")
+
+    # 2. Ro'yxat YAGONA manbadan o'qilsin.
+    src = io.open(os.path.join(ROOT, "api", "requirement_ai.py"),
+                  encoding="utf-8").read()
+    check("tanlash ro'yxati `atama.py` dan keladi",
+          "atama.TALAB_GURUHLARI" in src,
+          "qattiq yozilgan ro'yxat yangilanmay qolardi")
+
+    # 3. Ro'yxatdagi nomlar HAQIQIY guruh bo'lsin. `.get(g, [])`
+    #    noma'lum nomni JIMGINA e'tiborsiz qoldirardi.
+    notogri = [g for g in atama.TALAB_GURUHLARI
+               if g not in atama.GURUHLAR]
+    check("ro'yxatda noma'lum guruh yo'q", not notogri, str(notogri))
+
+    # 4. NAQSH BYUDJETI LLM dan KATTA bo'lsin — u bepul.
+    #
+    #    O'lchandi: `k = 40` da tajriba talabi bo'lagida BOR 50 ta
+    #    ochiq tenderdan 30 tasi ajratildi, 20 tasi tanlovga umuman
+    #    tushmadi. `k = 400` da 50/50.
+    check("naqsh byudjeti LLM byudjetidan katta",
+          requirement_naqsh.NAQSH_K > requirement_ai.TOP_CHUNKS,
+          f"naqsh={requirement_naqsh.NAQSH_K}, "
+          f"llm={requirement_ai.TOP_CHUNKS} — naqsh BEPUL, "
+          "cheklov faqat token sarflaydigan yo'lga kerak")
+
+    # 5. AMALDA: tanlangan bo'lak soni haqiqatan ko'proqmi.
+    tid = db.scalar("""SELECT c.tender_id FROM doc_chunk c
+        JOIN tender t ON t.id = c.tender_id
+        WHERE t.close_at > now()
+        GROUP BY c.tender_id HAVING count(*) > 60 LIMIT 1""")
+    if tid:
+        oz = len(requirement_ai.select_chunks(tid, k=40))
+        kop = len(requirement_ai.select_chunks(
+            tid, k=requirement_naqsh.NAQSH_K))
+        check("katta byudjet KO'PROQ bo'lak beradi", kop > oz,
+              f"k=40 -> {oz}, k={requirement_naqsh.NAQSH_K} -> {kop}")
+
+
+# =====================================================================
+def test_inson_mehnati_olchovi():
+    """O. `reviewed` va `not pending` BIR NARSA EMAS.
+
+    `tender_requirement` da 1 514 qator `review_status = 'approved'`
+    va ularni HECH KIM ko'rmagan — reyestr pozitsiyalari
+    AVTO-tasdiqlanadi.
+
+    Ular `review_status <> 'pending'` shartiga QONUNIY tushadi.
+    Xato mantiqda emas: "tekshirilgan" va "kutayotgan emas" ni bir
+    narsa deb hisoblashda.
+
+    IKKI JOYDA topildi va IKKALASI HAM inson foydasiga og'ardi:
+
+      `v_review_disagreement` : "0% kelishmovchilik" — model
+          hech qachon xato qilmaydi degan xulosa;
+      vaqt o'lchovi           : `n_reviewed` shishib,
+          `sekund_talabga` kam chiqardi.
+
+    Uchinchisi bo'lmasin.
+    """
+    section("O. Inson mehnati o'lchovi")
+
+    # 1. HOLAT: avto-tasdiq HAQIQATAN bor.
+    n_avto = db.scalar("""SELECT count(*) FROM tender_requirement
+        WHERE review_status <> 'pending' AND reviewed_by IS NULL""") or 0
+    n_inson = db.scalar("""SELECT count(*) FROM tender_requirement
+        WHERE reviewed_by IS NOT NULL""") or 0
+    check("avto-tasdiqlangan qatorlar bor (sinov ma'noli)",
+          n_avto > 0, f"avto={n_avto}, inson={n_inson}")
+
+    # 2. INSON MEHNATINI o'lchaydigan joylar `reviewed_by` ishlatsin.
+    #
+    #    STATIK: `n_reviewed` ga son beradigan chaqiruv atrofida
+    #    `reviewed_by` bo'lishi SHART.
+    src = io.open(os.path.join(ROOT, "api", "main.py"),
+                  encoding="utf-8").read()
+    i = src.find("review_tugadi(")
+    check("`review_tugadi` chaqiruvi topildi", i > 0)
+    if i > 0:
+        # IZOH QATORLARI OLIB TASHLANADI.
+        #
+        # Birinchi yurishda skaner O'Z TUSHUNTIRISHINI o'qidi: yangi
+        # izohda "Ilgari ... `<> pending` edi" deb yozilgan va skaner
+        # uni buzilish deb topdi.
+        atrof = "\n".join(
+            x for x in src[max(0, i - 1400):i].split("\n")
+            if not x.lstrip().startswith("#"))
+        check("vaqt o'lchovi `reviewed_by` ni sanaydi",
+              "reviewed_by IS NOT NULL" in atrof,
+              "`review_status <> 'pending'` avto-tasdiqni ham sanardi")
+        check("vaqt o'lchovi `<> 'pending'` bilan SANAMAYDI",
+              "review_status <> 'pending'" not in atrof,
+              str(atrof[-200:]))
+
+    # 3. KELISHMOVCHILIK ko'rinishi ham.
+    sql = io.open(os.path.join(ROOT, "schema_patch_requirement_7.sql"),
+                  encoding="utf-8").read()
+    # SQL izohlari ham olib tashlanadi — patch sarlavhasida
+    # "Ilgari ... edi" deb TUSHUNTIRILGAN.
+    kod = "\n".join(x for x in sql.split("\n")
+                    if not x.lstrip().startswith("--"))
+    # `COMMENT ON` matni ham izoh — u shart emas.
+    j2 = kod.find("COMMENT ON VIEW")
+    if j2 > 0:
+        kod = kod[:j2]
+    check("kelishmovchilik ko'rinishi `reviewed_by` ni talab qiladi",
+          "r.reviewed_by IS NOT NULL" in kod)
+    check("kelishmovchilik ko'rinishi `<> 'pending'` ni ISHLATMAYDI",
+          "review_status <> 'pending'" not in kod,
+          "avto-tasdiq kelishuv deb sanalardi")
+
+    # 4. `review_bulk` INSON harakati — `reviewed_by` yozsin.
+    rsrc = io.open(os.path.join(ROOT, "api", "requirement.py"),
+                   encoding="utf-8").read()
+    j = rsrc.find("def review_bulk")
+    check("`review_bulk` `reviewed_by` yozadi",
+          j > 0 and "reviewed_by = %(by)s" in rsrc[j:j + 900],
+          "ommaviy tasdiqlash HAM inson harakati")
+
+    # 5. SKANERNI SINAYMIZ.
+    yomon = "korilgan = count WHERE review_status <> 'pending'"
+    yaxshi = "korilgan = count WHERE reviewed_by IS NOT NULL"
+    check("skaner yomon shaklni TOPADI",
+          "review_status <> 'pending'" in yomon)
+    check("skaner to'g'ri shaklni tutmaydi",
+          "review_status <> 'pending'" not in yaxshi)
+
+
+# =====================================================================
+def test_pilot():
+    """M. PILOT — namuna aralash va YOPIQ rejim.
+
+    IKKI XAVFNI yumshatadi:
+
+    1. ANCHORING. Interfeys model javobini oldindan ko'rsatsa, inson
+       TEKSHIRMAYDI — TASDIQLAYDI. Hujjatda "12 oy (ehtiyot qismlar)"
+       va "24 oy (asosiy uzellar)" bo'lsa, birinchisini topib
+       tasdiqlab ketadi va MODEL XATOSI GROUND TRUTH ga aylanadi.
+
+    2. NAMUNA QIYSHIQLIGI. Navbat muddat bo'yicha saralangan; tez
+       yopiladigan tenderlar ma'lum turdagi bo'lishi mumkin. Shunda
+       "6 talab har tenderga" degan o'rtacha ham qiyshiq chiqadi.
+    """
+    section("M. Pilot to'plami va yopiq rejim")
+
+    # NAVBATI ENG KATTA kompaniya. `ORDER BY id LIMIT 1` NOTO'G'RI
+    # bo'lardi: birinchi kompaniyaning navbatida bittagina tender bor,
+    # va u holda uchala guruh ham o'sha bitta tenderga qulab tushadi —
+    # sinov aralashuvni umuman o'lchamagan bo'lardi.
+    A = db.scalar("""
+        SELECT company_id FROM v_requirement_review
+        GROUP BY company_id ORDER BY count(*) DESC LIMIT 1""")
+    n_navbat = db.scalar("""SELECT count(*) FROM v_requirement_review
+                            WHERE company_id = %(c)s""", {"c": A}) or 0
+
+    r = R.pilot_yarat(A)
+    check("pilot yaratildi", r["jami"] > 0, str(r))
+    p = R.pilot_royxat(A)
+    check("ro'yxat qaytdi", len(p) == r["jami"], f"{len(p)} != {r['jami']}")
+
+    # --- NAMUNA ARALASH ---
+    # Uchala guruh FAQAT navbat yetarlicha katta bo'lganda ajraladi.
+    # Kichik navbatda uchala so'rov bir xil tenderlarni qaytaradi va
+    # `korilgan` ularni birlashtiradi — bu KUTILGAN xatti-harakat, xato
+    # emas. Shuning uchun shart navbat hajmiga bog'langan.
+    guruhlar = {x["guruh"] for x in p}
+    if n_navbat >= 3 * R.GURUH_N:
+        check("uchala guruh ham bor",
+              guruhlar == {"muddat", "tasodif", "summa"},
+              f"navbat={n_navbat}, guruhlar={guruhlar}")
+    else:
+        check("kichik navbatda guruhlar qulaydi (kutilgan)",
+              len(guruhlar) >= 1, f"navbat={n_navbat}")
+
+    # --- YOPIQ rejim har uch guruhdan ARALASH ---
+    # Aks holda kelishmovchilik darajasi bitta guruhning xususiyatini
+    # ko'rsatardi, umumiy holatni emas.
+    blind = [x for x in p if x["rejim"] == "blind"]
+    check("yopiq rejim tenderlari bor", len(blind) > 0, str(len(blind)))
+    if len(guruhlar) == 3:
+        check("yopiq rejim UCH GURUHDAN aralash",
+              {x["guruh"] for x in blind} == guruhlar,
+              str({x["guruh"] for x in blind}))
+    check("yopiq rejim birinchi tartiblarda",
+          max(x["tartib"] for x in blind) <= R.BLIND_N,
+          str(sorted(x["tartib"] for x in blind)))
+
+    # --- TO'PLAM MUZLAGAN ---
+    # `ON CONFLICT DO NOTHING` o'zi YETARLI EMAS edi: navbat vaqt
+    # bilan o'zgaradi (muddatlar o'tadi, ETL qo'shadi, `random()`
+    # boshqa qatorlar ustida ishlaydi), shuning uchun ertasi kuni
+    # qayta chaqiruv BOSHQA tanlov qildi va 30 ta to'plam 50 ga
+    # o'sdi, yopiq ulush 10 dan 16 ga suzdi. Endi mavjud pilot
+    # QAYTA HISOBLANMAYDI.
+    r2 = R.pilot_yarat(A)
+    check("qayta yaratish DUBLIKAT bermaydi", r2["qoshildi"] == 0, str(r2))
+    check("mavjud pilot QAYTA HISOBLANMAYDI", r2.get("mavjud") is True,
+          str(r2))
+    check("to'plam o'zgarmadi", len(R.pilot_royxat(A)) == len(p))
+    check("yopiq ulush suzmadi", r2["blind"] == len(blind),
+          f"{r2['blind']} != {len(blind)}")
+
+    # Kod xatosi jimgina o'tmasin — qoida BAZADA ham turadi.
+    check("tartib NOYOB (baza cheklovi)", bool(db.scalar("""
+        SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE c.relname = 'review_pilot_tartib_idx' AND i.indisunique""")),
+        "review_pilot_tartib_idx UNIQUE bo'lishi kerak")
+    check("takror tartib yo'q", not db.query("""
+        SELECT 1 FROM review_pilot GROUP BY company_id, tartib
+        HAVING count(*) > 1 LIMIT 1"""))
+
+    # --- REJIM serverdan keladi ---
+    if blind:
+        tid = blind[0]["tender_id"]
+        check("pilot_rejim 'blind' qaytaradi",
+              R.pilot_rejim(tid, A) == "blind")
+    yoq = db.scalar("""SELECT t.id FROM tender t WHERE NOT EXISTS
+        (SELECT 1 FROM review_pilot p WHERE p.tender_id = t.id) LIMIT 1""")
+    if yoq:
+        check("pilotda bo'lmagan tender 'anchored'",
+              R.pilot_rejim(yoq, A) == "anchored")
+
+    # --- BLIND_VALUE bir marta yozilgach O'ZGARMAYDI ---
+    # Model javobi ochilgach inson fikrini o'zgartirsa ham, ASL
+    # mustaqil javob qolishi kerak — aks holda kelishmovchilik
+    # darajasi YOLG'ON chiqadi.
+    # PILOTDAN TASHQARI tender ustida — pilot tenderlarining talablari
+    # sinov oxirida O'CHIRILADI, va inson ochganda bo'sh tender ko'rardi.
+    # `blind_value` yozilishi rejimdan qat'i nazar ishlaydi, shuning
+    # uchun invariantni istalgan tenderda tekshirish mumkin.
+    tashqari = db.scalar("""
+        SELECT v.tender_id FROM v_requirement_review v
+        WHERE v.company_id = %(c)s AND NOT EXISTS
+          (SELECT 1 FROM review_pilot p
+            WHERE p.company_id = v.company_id AND p.tender_id = v.tender_id)
+        LIMIT 1""", {"c": A})
+    if tashqari:
+        tid = tashqari
+        items = [x for x in R.review_items(tid, A)
+                 if x["review_status"] == "pending"]
+        if items:
+            it = items[0]
+            _yozilgan.append((A, tid))
+            R.review_set(it["id"], A, "approved", by=A, blind_value="12 oy")
+            keyin = next(x for x in R.review_items(tid, A)
+                         if x["id"] == it["id"])
+            check("blind_value yozildi", keyin["blind_value"] == "12 oy",
+                  str(keyin["blind_value"]))
+            R.review_set(it["id"], A, "corrected", corrected="24 oy",
+                         by=A, blind_value="boshqa javob")
+            keyin2 = next(x for x in R.review_items(tid, A)
+                          if x["id"] == it["id"])
+            check("blind_value QAYTA yozilmaydi",
+                  keyin2["blind_value"] == "12 oy",
+                  f"o'zgardi: {keyin2['blind_value']}")
+            check("corrected_value esa yangilanadi",
+                  keyin2["corrected_value"] == "24 oy")
+
+    # --- KELISHMOVCHILIK ko'rinishi ---
+    kel = db.query("""SELECT ishonch_darajasi, jami, kelishmovchilik_foiz
+        FROM v_review_disagreement WHERE company_id = %(c)s""", {"c": A})
+    check("kelishmovchilik ko'rinishi ishlaydi", isinstance(kel, list),
+          str(kel[:1]))
+
+    # AVTO-TASDIQLANGAN QATOR KELISHUV EMAS.
+    #
+    # O'LCHANGAN XATO: shart `review_status <> 'pending'` edi va u
+    # REYESTR pozitsiyalarini tortardi — ular avto-tasdiqlanadi
+    # (`approved`, `confidence = 1.00`, `reviewed_by IS NULL`).
+    # Natijada ko'rinish "yuqori ishonchda 12 tadan 0%
+    # kelishmovchilik" degan SOXTA raqam berdi, holbuki inson
+    # tegmagan qator BITTA HAM yo'q edi.
+    #
+    # Bu pilotning BOSH KO'RSATKICHI: tuzatilmasa, pilot yurganda
+    # ham raqam soxta chiqardi va "0%" ishonchli ko'ringani uchun
+    # hech kim shubhalanmasdi.
+    n_avto = db.scalar("""
+        SELECT count(*) FROM tender_requirement r
+        JOIN review_pilot p ON p.tender_id = r.tender_id
+                           AND p.company_id = r.company_id
+        WHERE p.rejim = 'blind' AND r.reviewed_by IS NULL
+          AND r.review_status <> 'pending'""") or 0
+    n_inson = db.scalar("""
+        SELECT count(*) FROM tender_requirement r
+        JOIN review_pilot p ON p.tender_id = r.tender_id
+                           AND p.company_id = r.company_id
+        WHERE p.rejim = 'blind' AND r.reviewed_by IS NOT NULL""") or 0
+    n_kel = sum(int(x["jami"] or 0) for x in kel)
+
+    check("avto-tasdiqlangan qator KELISHUV deb sanalmaydi",
+          n_kel == n_inson,
+          f"ko'rinishda {n_kel}, inson ko'rgani {n_inson}, "
+          f"avto-tasdiqlangan {n_avto}")
+    if n_avto and not n_inson:
+        check("inson tegmaganda ko'rinish BO'SH", not kel,
+              f"{n_avto} ta avto-tasdiq bor, lekin ko'rinish {kel}")
+
+    # SO'ROVNING O'ZI to'g'ri shartni ishlatadimi.
+    src = io.open(os.path.join(ROOT, "schema_patch_requirement_7.sql"),
+                  encoding="utf-8").read()
+    check("ko'rinish `reviewed_by IS NOT NULL` shartini ishlatadi",
+          "r.reviewed_by IS NOT NULL" in src,
+          "`review_status <> 'pending'` YETARLI EMAS")
+
+    # --- O'SISH SUR'ATI ---
+    sp = R.review_speed(A)
+    check("sutkalik o'sish sanaladi", "sutkalik_osish" in sp, str(sp)[:80])
+    check("kunlik quvvat maydoni bor", "kunlik_quvvat" in sp)
+    check("quvvat yetadimi degan xulosa bor", "quvvat_yetadimi" in sp,
+          "navbat qisqaradimi yoki o'sadimi — eng muhim xulosa")
+
+    # SOVUQ START. Birinchi kunlarda "oxirgi 24 soat" butun navbatni
+    # qamrab oladi (604 dan 604) — bu sur'at emas, bir martalik
+    # to'ldirish. Yorliqsiz qolsa "kuniga 604 ta kelyapti" deb
+    # o'qilardi va xulosa TESKARI chiqardi.
+    check("o'sish ishonchliligi yorliqlangan", "osish_ishonchli" in sp,
+          str(sp.get("osish_ishonchli")))
+    if not sp["osish_ishonchli"]:
+        check("sovuq startda IZOH beriladi", bool(sp.get("osish_izohi")),
+              str(sp.get("osish_izohi")))
+        check("sovuq startda XULOSA CHIQARILMAYDI",
+              sp["quvvat_yetadimi"] is None,
+              f"ishonchsiz ma'lumotdan xulosa: {sp['quvvat_yetadimi']}")
+
+
+# =====================================================================
+def test_vaqt_olchovi():
+    """L. KO'RIB CHIQISH VAQTI o'lchanadimi.
+
+    Pilotning yagona noma'lum raqami — bir tenderni ko'rib chiqish
+    vaqti. Undan "har talabni inson tasdiqlaydi" modeli ishlaydimi
+    degan savolning javobi chiqadi:
+
+        ~2 daqiqa  -> 611 tender = ~20 soat  -> real
+        ~10 daqiqa -> ~100 soat              -> namuna asosida
+
+    NEGA ALOHIDA JADVAL: `reviewed_at` faqat OXIRGI bosishni biladi.
+    Tenderni ochib, hujjatni o'qib, birinchi tugmani bosgunicha o'tgan
+    vaqt — ko'rib chiqishning ENG KATTA qismi — u yerda YO'Q.
+    """
+    section("L. Ko'rib chiqish vaqti")
+
+    A = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
+    tid = db.scalar("""SELECT t.id FROM tender t
+        WHERE NOT EXISTS (SELECT 1 FROM tender_requirement r
+                          WHERE r.tender_id = t.id) LIMIT 1""")
+    if not tid:
+        check("bo'sh tender topildi", False)
+        return
+    _yozilgan.append((A, tid))
+    db.execute_returning("""DELETE FROM requirement_review_open
+        WHERE company_id=%(c)s AND tender_id=%(t)s RETURNING tender_id""",
+        {"c": A, "t": tid})
+
+    for i in range(1, 3):
+        db.execute_returning(R.SQL_UPSERT, {
+            "company_id": A, "tender_id": tid, "lot_id": None,
+            "source": "document", "method": "llm", "position_no": i,
+            "name": f"Vaqt sinovi {i}",
+            "attrs": '{"tur":"kafolat","qiymat":"12 oy"}',
+            "qty": None, "unit": None, "delivery_days": None,
+            "is_mandatory": False, "confidence": 0.90, "raw_snippet": "m",
+            "file_ref": "a.pdf", "char_start": 1, "char_end": 2,
+            "model": "sinov", "review_status": "pending"})
+
+    # --- OCHILISH yoziladi ---
+    R.review_ochildi(tid, A)
+    ochildi = db.query_one("""SELECT opened_at, finished_at FROM
+        requirement_review_open WHERE company_id=%(c)s AND tender_id=%(t)s""",
+        {"c": A, "t": tid})
+    check("ochilish vaqti yozildi", ochildi is not None
+          and ochildi["opened_at"] is not None)
+    check("tugash hali BO'SH", ochildi and ochildi["finished_at"] is None)
+
+    # --- QAYTA ochish vaqtni QAYTARMAYDI ---
+    # Aks holda sahifani yangilash o'lchovni nolga tushirardi va
+    # natija haqiqiydan PAST chiqardi.
+    birinchi = ochildi["opened_at"]
+    R.review_ochildi(tid, A)
+    ikkinchi = db.scalar("""SELECT opened_at FROM requirement_review_open
+        WHERE company_id=%(c)s AND tender_id=%(t)s""", {"c": A, "t": tid})
+    check("qayta ochish vaqtni QAYTARMAYDI", birinchi == ikkinchi,
+          f"{birinchi} -> {ikkinchi}")
+
+    # --- Tugash ---
+    for x in R.review_items(tid, A):
+        if x["name"].startswith("Vaqt sinovi"):
+            R.review_set(x["id"], A, "approved", by=A)
+    R.review_tugadi(tid, A, 2)
+    tugadi = db.query_one("""SELECT finished_at, n_reviewed FROM
+        requirement_review_open WHERE company_id=%(c)s AND tender_id=%(t)s""",
+        {"c": A, "t": tid})
+    check("tugash vaqti yozildi", tugadi and tugadi["finished_at"] is not None)
+    check("ko'rilgan talab soni yozildi", tugadi and tugadi["n_reviewed"] == 2)
+
+    # --- Hisobotga TUSHADI ---
+    tez = db.query_one("""SELECT sekund, sekund_talabga FROM v_review_speed
+        WHERE tender_id=%(t)s AND company_id=%(c)s""", {"t": tid, "c": A})
+    check("hisobotga tushdi", tez is not None, str(tez))
+    check("sekund manfiy emas", tez and float(tez["sekund"]) >= 0)
+
+    # --- `review_speed()` MEDIANA beradi ---
+    sp = R.review_speed(A)
+    check("o'lchangan tender sanaladi", sp["olchangan_tender"] >= 1, str(sp))
+    check("mediana maydoni bor", "mediana_sekund" in sp)
+    check("navbatda qolgan sanaladi", sp["navbatda_qolgan"] >= 0)
+    # 10 tadan kam bo'lsa OGOHLANTIRADI — bitta o'lchov bilan
+    # 611 tenderni bashorat qilish xato bo'lardi.
+    if sp["olchangan_tender"] < 10:
+        check("kam o'lchovda OGOHLANTIRADI", bool(sp["izoh"]), str(sp["izoh"]))
+
+    db.execute_returning("""DELETE FROM requirement_review_open
+        WHERE company_id=%(c)s AND tender_id=%(t)s RETURNING tender_id""",
+        {"c": A, "t": tid})
+
+
+# =====================================================================
+def test_eskirish():
+    """K. `pending` KIRISH O'ZGARISHINI sezadimi.
+
+    O'LCHANGAN XATO: `pending` faqat "yurgizilganmi" ga qarardi,
+    "KIRISH O'ZGARDIMI" ga emas.
+
+    Ssenariy (haqiqatan bo'ldi):
+      1. tenderda hujjat matni YO'Q -> naqsh yurishi 'no_text'
+      2. keyinroq `etl_doc_text` matnni chiqardi, bo'laklar paydo bo'ldi
+      3. `pending` uni "allaqachon yurgizilgan" deb O'TKAZIB YUBORDI
+      -> 236 ta tenderning talablari MANGU yo'q bo'lardi
+
+    Bu §16.49 dagi "tender_embedding orqada qoldi" bilan bir sinf:
+    quvur ishlaydi, lekin YANGI MA'LUMOTGA YETIB BORMAYDI.
+    """
+    section("K. Kirish o'zgarishini sezish")
+
+    A = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
+
+    # Bo'lagi BOR, lekin talabi yo'q, va MUDDATI O'TMAGAN tender.
+    #
+    # `close_at > now()` SHARTI SHART: `SQL_PENDING` yopilgan tenderni
+    # to'g'ri chiqarib tashlaydi, ya'ni yopiq tender tanlansa sinov
+    # KOD XATOSI EMAS, TASODIFIY HOLAT tufayli yiqilardi. Aynan
+    # shunday bo'ldi: tanlangan tender 13 kun oldin yopilgan edi va
+    # sinov "qayta tanlanmadi" deb xato berdi.
+    OCHIQ = "(t.close_at IS NULL OR t.close_at > now())"
+    tid = db.scalar(f"""SELECT c.tender_id FROM doc_chunk c
+        JOIN tender t ON t.id = c.tender_id
+        WHERE {OCHIQ}
+          AND NOT EXISTS (SELECT 1 FROM tender_requirement_run r
+                          WHERE r.tender_id = c.tender_id
+                            AND r.company_id = %(a)s)
+        LIMIT 1""", {"a": A})
+    if not tid:
+        # Hammasi ishlangan — sun'iy holat quramiz (baribir OCHIQ).
+        tid = db.scalar(f"""SELECT c.tender_id FROM doc_chunk c
+            JOIN tender t ON t.id = c.tender_id
+            WHERE {OCHIQ} LIMIT 1""")
+    if not tid:
+        check("bo'lagi bor OCHIQ tender topildi", False,
+              "sinov ma'lumoti yo'q — eskirish tekshirilmadi")
+        return
+    _yozilgan.append((A, tid))
+
+    # 1. 'no_text' holatini QO'YAMIZ (matn yo'q edi degan holat)
+    R._run_yoz(A, tid, "naqsh", "no_text", 0, None, None,
+               error="talabga oid bo'lak yo'q")
+    check("'no_text' yozildi",
+          (R.run_info(tid, A, method="naqsh") or {}).get("status") == "no_text")
+
+    # 2. Endi bo'laklar BOR — `pending` uni QAYTA TANLASHI kerak
+    bor = db.scalar("SELECT count(*) FROM doc_chunk WHERE tender_id=%(t)s",
+                    {"t": tid})
+    check("tenderda bo'lak bor", bor > 0, str(bor))
+    navbat = {x["id"] for x in R.pending(A, 5000, method="naqsh")}
+    check("'no_text' + bo'lak BOR -> QAYTA tanlanadi", tid in navbat,
+          "aks holda talablari mangu yo'q bo'lardi")
+
+    # 3. Muvaffaqiyatli yurishdan keyin QAYTA tanlanmasin
+    R._run_yoz(A, tid, "naqsh", "ok", 5, 0.75, "hash1")
+    navbat2 = {x["id"] for x in R.pending(A, 5000, method="naqsh")}
+    check("'ok' dan keyin qayta tanlanmaydi", tid not in navbat2)
+
+
+# =====================================================================
+def test_yorliqlash():
+    """J. HUJJAT TURI yorlig'i — moslashtiruv ground truth i.
+
+    NEGA TASDIQLASH BILAN BIRGA: `compliance` moslashtiruvi
+    ("ISO 14001 talab etiladi" -> `doc_type='iso_14001'`) NOANIQ
+    vazifa, ya'ni o'z evalini talab qiladi. O'sha evalning manbai —
+    inson yorliqlagan to'plam.
+
+    Navbatni yorliqsiz yurgizsak, keyin O'SHA talablarni compliance
+    uchun QAYTADAN ko'rish kerak bo'lardi — inson vaqti ikki marta.
+    """
+    section("J. Hujjat turi yorlig'i")
+
+    # --- Lug'at CHEKLI va compliance bilan bir xil ---
+    from api import compliance
+    vocab = R.doc_type_vocab()
+    check("lug'at compliance.DOC_TYPES dan quriladi",
+          all(d["code"] in vocab for d in compliance.DOC_TYPES),
+          f"{len(vocab)} tur")
+    check("'yoq' va 'boshqa' bor",
+          "yoq" in vocab and "boshqa" in vocab, str(vocab[-3:]))
+    opts = R.doc_type_options()
+    check("har turda o'qiladigan nom bor",
+          all(o.get("label") for o in opts), str(opts[:1]))
+
+    # --- Yozish ---
+    A = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
+    tid = db.scalar("""SELECT t.id FROM tender t
+        WHERE NOT EXISTS (SELECT 1 FROM tender_requirement r
+                          WHERE r.tender_id = t.id) LIMIT 1""")
+    if not tid:
+        check("bo'sh tender topildi", False)
+        return
+    _yozilgan.append((A, tid))
+
+    db.execute_returning(R.SQL_UPSERT, {
+        "company_id": A, "tender_id": tid, "lot_id": None,
+        "source": "document", "method": "llm", "position_no": 1,
+        "name": "ISO 14001 sertifikati",
+        "attrs": '{"tur":"sertifikat","qiymat":"ISO 14001"}',
+        "qty": None, "unit": None, "delivery_days": None,
+        "is_mandatory": True, "confidence": 0.90, "raw_snippet": "matn",
+        "file_ref": "a.pdf", "char_start": 1, "char_end": 2,
+        "model": "sinov", "review_status": "pending"})
+
+    def olish():
+        return next(x for x in R.review_items(tid, A)
+                    if x["name"] == "ISO 14001 sertifikati")
+
+    check("yangi talabda doc_type NULL", olish()["doc_type"] is None)
+    check("NULL yorliqlangan to'plamga TUSHMAYDI",
+          all(x["requirement_id"] != olish()["id"] for x in R.labeled(A)))
+
+    kod = next(d["code"] for d in compliance.DOC_TYPES)
+    R.review_set(olish()["id"], A, "approved", by=A, doc_type=kod)
+    x = olish()
+    check("yorliq saqlandi", x["doc_type"] == kod, str(x["doc_type"]))
+    check("yorliqlangan to'plamga TUSHDI",
+          any(y["requirement_id"] == x["id"] for y in R.labeled(A)))
+
+    # --- Yorliq TASODIFAN o'chib ketmasin ---
+    R.review_set(x["id"], A, "approved", by=A)          # doc_type BERILMADI
+    check("doc_type berilmasa ESKISI qoladi",
+          olish()["doc_type"] == kod, str(olish()["doc_type"]))
+
+    # --- Noma'lum qiymat RAD ETILADI ---
+    try:
+        R.review_set(x["id"], A, "approved", by=A, doc_type="sehrli_hujjat")
+        check("noma'lum hujjat turi rad etiladi", False, "qabul qilindi")
+    except ValueError:
+        check("noma'lum hujjat turi rad etiladi", True)
+
+    # --- 'yoq' NULL DAN FARQ QILADI ---
+    # NULL = "hali so'ralmagan", 'yoq' = "inson qaradi va tegishli emas
+    # dedi". Bu farq §16.44 dagi "topilmadi va ajratilmagan" bilan
+    # bir sinf.
+    R.review_set(x["id"], A, "approved", by=A, doc_type="yoq")
+    check("'yoq' saqlanadi", olish()["doc_type"] == "yoq")
+    check("'yoq' ham YORLIQ — to'plamga tushadi",
+          any(y["requirement_id"] == x["id"] and y["doc_type"] == "yoq"
+              for y in R.labeled(A)),
+          "aks holda 'tegishli emas' javobi yo'qolib ketardi")
+
+
+# =====================================================================
+def test_qayta_ajratish():
+    """I. QAYTA AJRATISH insonning ishini buzmasinmi.
+
+    IKKI TUYNUK bor edi, ikkalasi ham `ON CONFLICT DO UPDATE` da:
+
+      1-TUYNUK: `review_status` EXCLUDED dan yangilansa, tasdiqlangan
+        talab yana `pending` ga tushardi — butun ko'rib chiqish ishi
+        bekor bo'lardi.
+
+      2-TUYNUK (XAVFLIROQ): faqat holatni saqlash YETARLI EMAS.
+        Hujjat yangilanib qiymat o'zgarsa, `approved` yorlig'i INSON
+        KO'RMAGAN qiymatga o'tadi — va bu navbatda KO'RINMAYDI.
+
+    Bu sinov ikkalasini ham qulflaydi.
+    """
+    section("I. Qayta ajratish va inson qarori")
+
+    A = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
+    tid = db.scalar("""SELECT t.id FROM tender t
+        WHERE NOT EXISTS (SELECT 1 FROM tender_requirement r
+                          WHERE r.tender_id = t.id) LIMIT 1""")
+    if not tid:
+        check("bo'sh tender topildi", False)
+        return
+    _yozilgan.append((A, tid))
+
+    def yoz(qiymat: str):
+        db.execute_returning(R.SQL_UPSERT, {
+            "company_id": A, "tender_id": tid, "lot_id": None,
+            "source": "document", "method": "llm", "position_no": 1,
+            "name": "Qayta sinov", "attrs":
+                '{"tur":"kafolat","qiymat":"' + qiymat + '"}',
+            "qty": None, "unit": None, "delivery_days": None,
+            "is_mandatory": True, "confidence": 0.90,
+            "raw_snippet": "matn", "file_ref": "a.pdf",
+            "char_start": 1, "char_end": 2, "model": "sinov",
+            "review_status": "pending"})
+
+    def olish():
+        return next(x for x in R.review_items(tid, A)
+                    if x["name"] == "Qayta sinov")
+
+    # --- 1-TUYNUK: qiymat O'ZGARMASA tasdiq SAQLANADI ---
+    yoz("12 oy")
+    R.review_set(olish()["id"], A, "approved", by=A)
+    yoz("12 oy")                                   # aynan o'sha qiymat
+    x = olish()
+    check("qiymat o'zgarmasa TASDIQ saqlanadi",
+          x["review_status"] == "approved", str(x["review_status"]))
+
+    # --- 2-TUYNUK: qiymat O'ZGARSA tasdiq BEKOR ---
+    yoz("24 oy")                                   # hujjat yangilandi
+    x = olish()
+    check("qiymat o'zgarsa tasdiq BEKOR bo'ladi",
+          x["review_status"] == "pending", str(x["review_status"]))
+    check("jurnalga 'qiymat_ozgardi' yozildi",
+          "qiymat_ozgardi" in (x["review_note"] or ""), str(x["review_note"]))
+    check("izohda ESKI va YANGI qiymat bor",
+          "12 oy" in (x["review_note"] or "")
+          and "24 oy" in (x["review_note"] or ""), str(x["review_note"]))
+    check("tender NAVBATGA QAYTDI",
+          tid in {q["tender_id"] for q in R.review_queue(A, 500)})
+
+    # --- TUZATILGAN qiymat qayta ajratishda YO'QOLMAYDI ---
+    R.review_set(olish()["id"], A, "corrected", corrected="36 oy", by=A)
+    yoz("48 oy")                                   # yana yangilandi
+    x = olish()
+    check("inson tuzatgan qiymat SAQLANADI",
+          x["corrected_value"] == "36 oy", str(x["corrected_value"]))
+    check("lekin qayta ko'rib chiqishga QAYTADI",
+          x["review_status"] == "pending", str(x["review_status"]))
+
+
+# =====================================================================
+def test_indeks_taqiqi():
+    """H. Sinov fayllarida INDEKS bo'yicha tanlash bo'lmasin.
+
+    QOIDA: `items[0]` emas, nom yoki id bo'yicha `next(...)`.
+
+    NEGA: tartib o'zgarsa indeks JIMGINA boshqa narsani o'lchaydi.
+    §16.44 da aynan shunday bo'ldi — `review_items()` ishonch bo'yicha
+    O'SISH tartibida qaytaradi, birinchi element esa men o'ylagan
+    talab emas edi. Sinov noto'g'ri qatorni belgilab, "rad etilgan
+    talab promptda qoldi" degan YOLG'ON xato berdi.
+
+    Tartib o'zgarsa sinov YIQILSIN, jimgina boshqa narsani o'lchamasin.
+    """
+    section("H. Sinov uslubi — indeks bo'yicha tanlash taqiqi")
+
+    NL = chr(10)
+    NAQSH = r"(review_items|list_for|review_queue)\([^)]*\)\[\d+\]"
+
+    xom = io.open(os.path.abspath(__file__), encoding="utf-8").read()
+    # IKKI XIL QATOR CHIQARILADI:
+    #
+    # 1. IZOHLAR — skaner NASRNI emas, KODNI tekshiradi. Birinchi
+    #    urinishda u o'z izohidagi misolni buzilish deb topdi.
+    #
+    # 2. `skaner-namuna` belgisi bor qatorlar — bu skanerning O'Z
+    #    sinov namunalari, ya'ni ATAYLAB buzuq misollar. Ularsiz
+    #    "skaner ishlayaptimi" degan savolga javob bo'lmaydi.
+    #    Belgi ANIQ va grep bilan topiladi — yashirin istisno emas.
+    manba = NL.join(q for q in xom.split(NL)
+                    if not q.lstrip().startswith("#")
+                    and "skaner-namuna" not in q)
+
+    yomon = re.findall(r"\b(items|rows|lst\d*|natijalar)\[(\d+)\]\[", manba)
+    check("DB ro'yxatidan indeks bo'yicha tanlash yo'q", not yomon,
+          f"topildi: {yomon[:5]}")
+
+    yomon2 = re.findall(NAQSH, manba)
+    check("funksiya natijasidan indeks bo'yicha tanlash yo'q", not yomon2,
+          f"topildi: {yomon2[:5]}")
+
+    # SKANERNING O'ZINI SINAYMIZ — u haqiqiy buzilishni TOPADIMI.
+    # Aks holda "0 ta buzilish" degani "skaner ishlamayapti" bo'lishi
+    # mumkin va biz buni bilmasdik. Bu bo'lim shu sinf uchun yozilgan.
+    yomon_misol = 'x = R.review_items(t, c)[0]["name"]'   # skaner-namuna
+    yaxshi_misol = ('x = next(i for i in R.review_items(t, c) '
+                    'if i["id"] == kutilgan)')
+    check("skaner haqiqiy buzilishni TOPADI",
+          bool(re.search(NAQSH, yomon_misol)), yomon_misol)
+    check("skaner to'g'ri uslubni tutmaydi",
+          not re.search(NAQSH, yaxshi_misol), yaxshi_misol)
+
+
+# =====================================================================
+def tozala():
+    n = 0
+    for cid, tid in set(_yozilgan):
+        db.execute_returning(
+            "DELETE FROM tender_requirement WHERE company_id=%(c)s "
+            "AND tender_id=%(t)s RETURNING id", {"c": cid, "t": tid})
+        db.execute_returning(
+            "DELETE FROM tender_requirement_run WHERE company_id=%(c)s "
+            "AND tender_id=%(t)s RETURNING company_id", {"c": cid, "t": tid})
+        n += 1
+    qoldiq = db.scalar("SELECT count(*) FROM tender_requirement")
+    print(f"\nTozalandi: {n} ta (kompaniya, tender) juftligi. "
+          f"Jadvalda qolgan: {qoldiq}")
+
+
+def main() -> None:
+    print("=" * 62)
+    print("J3 SINOVI — modelga chiqmaydi, PUL SARFLAMAYDI")
+    print("=" * 62)
+    db.init_pool()
+    try:
+        if not db.scalar("SELECT to_regclass('public.tender_requirement')"):
+            check("schema_patch_requirement.sql qo'llangan", False,
+                  "psql -d xtxarid -f schema_patch_requirement.sql")
+        else:
+            test_sinovni_sinash()
+            test_sxema()
+            test_statik()
+            test_amaliy()
+            test_hujjatdan()
+            test_naqsh()
+            test_isteemolchilar()
+            test_review()
+            test_kirish_yetib_boradimi()
+            test_inson_mehnati_olchovi()
+            test_pilot()
+            test_vaqt_olchovi()
+            test_eskirish()
+            test_yorliqlash()
+            test_qayta_ajratish()
+            test_indeks_taqiqi()
+    finally:
+        try:
+            tozala()
+        finally:
+            db.close_pool()
+
+    print("\n" + "=" * 62)
+    print(f"NATIJA: {PASS}/{PASS + FAIL} o'tdi")
+    print("=" * 62)
+    sys.exit(1 if FAIL else 0)
+
+
+if __name__ == "__main__":
+    main()

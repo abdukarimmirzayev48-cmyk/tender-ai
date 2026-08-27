@@ -26,7 +26,7 @@ TAYANCH FAKTLAR (grounding):
     Pythonда hisoblanib, promptga "FAKTLAR" bo'limi sifatida beriladi. Model
     ularni qayta hisoblamaydi — shu bilan sana/summa xatolari yo'qoladi.
 
-KESHLASH: `ai_analysis`, kind='gonogo_v1'. Kalit = tender + katalog + profil.
+KESHLASH: `ai_analysis`, kind='gonogo_v2'. Kalit = tender + HUJJAT MATNI + katalog + profil.
 """
 import datetime as _dt
 import hashlib
@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional
 from api import ai, ai_match
 
 MODEL = "claude-opus-5"
-KIND = "gonogo_v1"
+KIND = "gonogo_v2"   # v2: promptga biriktirilgan hujjat matni qo'shildi
 #: Fikrlash bu modelda default yoqiq va `max_tokens` fikrlash + javobni BIRGA
 #: cheklaydi. 11 mezonli javob uzun, shuning uchun byudjet kengroq.
 MAX_TOKENS = 10000
@@ -159,7 +159,20 @@ QAT'IY QOIDALAR:
 7. "FAKTLAR" bo'limidagi hisoblangan qiymatlarni QAYTA HISOBLAMA — ular
    aniq. Ularga tayan.
 8. Ma'lumotda yo'q talabni o'ylab topma. Tender matnida sertifikat talabi
-   ko'rsatilmagan bo'lsa, uni "kerak" deb faraz qilma."""
+   ko'rsatilmagan bo'lsa, uni "kerak" deb faraz qilma.
+9. BIRIKTIRILGAN HUJJAT MATNI berilgan bo'lsa — QAROR ASOSAN O'SHANGA
+   TAYANADI. Qatnashishga to'sqinlik qiladigan shartlar kartochkada
+   deyarli hech qachon bo'lmaydi; ular texnik topshiriq va shartnoma
+   loyihasida yoziladi. Hujjatdan AYNIQSA shularni qidir:
+   - malaka talablari (tajriba yillari, o'xshash shartnomalar, aylanma);
+   - majburiy sertifikat / litsenziya / ruxsatnoma;
+   - to'lov sharti (avans bormi, kechiktirilgan to'lov necha kun);
+   - jarima, penya, ta'minot puli (zalog) miqdori;
+   - bajarish muddati va bosqichlari.
+   Har `note_uz` da dalilni hujjat nomi bilan ko'rsat.
+10. Hujjat matni QISQARTIRILGAN yoki O'QILMAGAN deb ogohlantirilgan bo'lsa —
+   tegishli mezonni `malumot_yoq` qil va `missing_data` ga "hujjatni qo'lda
+   o'qish kerak" deb yoz. Bo'lakda ko'rinmagan narsani "yo'q" deb hisoblama."""
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +280,15 @@ def _facts(tender: Dict[str, Any], profile: Optional[Dict[str, Any]],
 
 def build_input(tender: Dict[str, Any], products: List[Dict[str, Any]],
                 profile: Optional[Dict[str, Any]] = None,
-                now: Optional[_dt.datetime] = None) -> str:
-    """Promptning to'liq matni: tender + katalog + kompaniya + hisoblangan faktlar."""
+                now: Optional[_dt.datetime] = None,
+                docs: str = "", talablar: str = "") -> str:
+    """Promptning to'liq matni: tender + hujjatlar + katalog + kompaniya + faktlar.
+
+    `docs` — `ai_docs.prompt_block()`. Go/No-Go uchun hujjat matni AYNIQSA
+    muhim: avans, jarima, ta'minot puli va malaka talablari kartochkada
+    deyarli hech qachon bo'lmaydi — ular texnik topshiriq va shartnoma
+    loyihasida yoziladi.
+    """
     parts = ["=== TENDER ===", ai.build_input(tender)]
 
     det = tender.get("detail") or {}
@@ -281,6 +301,16 @@ def build_input(tender: Dict[str, Any], products: List[Dict[str, Any]],
         extra.append(f"Takliflar qabuli: {det['offer_period']}")
     if extra:
         parts += ["", "=== TENDER SHARTLARI ==="] + extra
+
+    # TALABLAR XOM MATNDAN OLDIN. Sabab: bu yerda talab allaqachon
+    # ajratilgan, ISHONCH darajasi va IQTIBOS ko'rsatkichi bilan (J3).
+    # Model uni qayta ajratishi shart emas — faqat baholaydi. Xom matn
+    # esa QO'SHIMCHA sifatida qoladi: talablar ro'yxati hujjatning
+    # hammasi emas.
+    if talablar:
+        parts += ["", talablar]
+    if docs:
+        parts += ["", docs]
 
     parts += ["", "=== KOMPANIYA KATALOGI ===", ai_match._fmt_catalog(products)]
 
@@ -325,10 +355,12 @@ def normalize(result: Dict[str, Any]) -> Dict[str, Any]:
 
 def analyze(tender: Dict[str, Any], products: List[Dict[str, Any]],
             profile: Optional[Dict[str, Any]] = None,
-            effort: str = DEFAULT_EFFORT) -> Dict[str, Any]:
+            effort: str = DEFAULT_EFFORT,
+            docs: str = "", talablar: str = "") -> Dict[str, Any]:
     """Bitta tender uchun Go/No-Go tavsiyasi. Kesh chaqiruvchida."""
     client = ai.get_client()
-    text = build_input(tender, products, profile)
+    text = build_input(tender, products, profile, docs=docs,
+                       talablar=talablar)
 
     kwargs: Dict[str, Any] = {
         "model": MODEL,

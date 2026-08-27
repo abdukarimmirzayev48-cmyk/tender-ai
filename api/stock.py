@@ -31,6 +31,16 @@ DIZAYN
    (default 14) kundan eski bo'lsa yoki umuman yuklanmagan bo'lsa — natija
    `preliminary: true` ("dastlabki") deb belgilanadi va ogohlantirish
    qaytariladi (TZ talabi).
+
+5. QOLDIQNING EGASI — ERP (5B-1). Jurnal ERP da (`erp.stock_move`) va
+   qoldiq shundan hisoblanadi; bu yerdagi `catalog_product.stock_qty` esa
+   Excel importidan qolgan SURAT. `check_tender_stock()` ERP o'rnatilgan
+   bo'lsa qoldiqni `erp.v_stock_balance` dan oladi (`api/erp_stock.py`)
+   va javobga `stock.source` qo'shadi ('erp' | 'import'). ERP yo'q
+   bo'lsa hech narsa o'zgarmaydi.
+
+   MUHIMI: bu modulning HISOB-KITOB qismi (`build_check`) o'zgarmadi —
+   u qoldiq qayerdan kelganini bilmaydi va sinovlari ham o'sha-o'sha.
 """
 import os
 import re
@@ -39,7 +49,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
-from api import db, matching
+from api import db, erp_stock, matching
 
 # Qoldiq necha kundan keyin "eskirgan" hisoblanadi
 STALE_DAYS = int(os.environ.get("STOCK_STALE_DAYS", "14"))
@@ -176,10 +186,12 @@ WHERE tender_id = %(id)s
 ORDER BY lot_id, good_code
 """
 
+# KOMPANIYA KATALOGI (J1.6) — tannarx va qoldiq ijarachi siri.
 _PRODUCTS_SQL = """
 SELECT id, name, keywords, unit, stock_qty, stock_unit, stock_updated_at,
        cost_price, price, currency
 FROM catalog_product
+WHERE company_id = %(company_id)s
 ORDER BY id
 """
 
@@ -228,7 +240,7 @@ def _age_days(ts: Optional[datetime]) -> Optional[int]:
     return max(0, (now - ts).days)
 
 
-def check_tender_stock(tender_id: int) -> Optional[Dict[str, Any]]:
+def check_tender_stock(tender_id: int, company_id: int) -> Optional[Dict[str, Any]]:
     """Tender pozitsiyalarini katalog qoldig'iga solishtiradi.
 
     None qaytsa — bunday tender yo'q (chaqiruvchi 404 beradi).
@@ -243,9 +255,18 @@ def check_tender_stock(tender_id: int) -> Optional[Dict[str, Any]]:
         rows = db.query(_GOODS_SQL, {"id": tender_id})
         source = "tender_good"
 
-    products = db.query(_PRODUCTS_SQL)
+    products = db.query(_PRODUCTS_SQL, {"company_id": company_id})
+    # QOLDIQNING EGASI — ERP (5B-1, "A1" yo'li). Bu yerdagi `stock_qty`
+    # Excel importidan qolgan surat; ERP o'rnatilgan bo'lsa u jurnaldan
+    # hisoblangan qoldiq bilan ALMASHTIRILADI. ERP yo'q bo'lsa eski
+    # xatti-harakat saqlanadi. `api/erp_stock.py` ga qarang.
+    stock_source = erp_stock.apply_to_products(products)
 
-    return build_check(tender, rows, products, source=source)
+    out = build_check(tender, rows, products, source=source)
+    # Raqam QAYERDAN kelgani javobda ko'rinadi: "eski import" va "bugungi
+    # ombor jurnali" bir xil ishonchga ega emas.
+    out["stock"]["source"] = stock_source
+    return out
 
 
 def build_check(tender: Dict[str, Any], rows: List[Dict[str, Any]],

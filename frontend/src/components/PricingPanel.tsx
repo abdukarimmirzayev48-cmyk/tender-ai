@@ -3,6 +3,7 @@ import { api } from '@/api'
 import { calculate, DEFAULTS } from '@/pricing'
 import type { CalcInput, RawItem } from '@/pricing'
 import Icon from './Icon'
+import { useI18n } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -27,10 +28,6 @@ import type { TenderDetail } from '@/types'
 // hisoblaydi — bazaga yozilgani doim serverning natijasi (yagona haqiqat).
 //
 // AI YO'Q: bu sof arifmetika. Barcha izohlar `api/pricing.py` da.
-
-const nf = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 })
-const fmtNum = (v: number | null | undefined) =>
-  (v === null || v === undefined ? '—' : nf.format(v))
 
 // Foizda o'lchanadigan bosqichlar — qolganlari pul.
 const PERCENT_STEPS = new Set(['profit_percent', 'budget_ratio'])
@@ -61,6 +58,13 @@ function positionsFromTender(t: TenderDetail | null): RawItem[] {
 type Params = Omit<CalcInput, 'items' | 'manual_price' | 'budget' | 'budget_currency' | 'min_margin_percent'>
 
 export default function PricingPanel({ tender }: { tender: TenderDetail | null }) {
+  const { t, locale } = useI18n()
+  // Sonlar tanlangan lokal bo'yicha: "1 234,5" / "1,234.5"
+  const fmtNum = useMemo(() => {
+    const nf = new Intl.NumberFormat(locale, { maximumFractionDigits: 2 })
+    return (v: number | null | undefined) =>
+      (v === null || v === undefined ? '—' : nf.format(v))
+  }, [locale])
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -122,7 +126,7 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
     min_margin_percent: minMargin,
   }), [p, items, manual, tender, minMargin])
 
-  const res = useMemo(() => calculate(inputs), [inputs])
+  const res = useMemo(() => calculate(inputs, t), [inputs, t])
   const cur = res.currency || ''
 
   function setItem(i: number, field: keyof RawItem, value: string) {
@@ -154,9 +158,9 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
   if (!open) {
     return (
       <Button variant="outline" className="mb-4 w-full justify-start" onClick={() => setOpen(true)}
-        title="Tannarx, ustama va tavsiya etilgan taklif narxi">
+        title={t('pr.buttonTitle')}>
         <Icon name="stats" size={14} />
-        Narx hisobi
+        {t('pr.button')}
       </Button>
     )
   }
@@ -165,33 +169,33 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
     <Card className="mb-4 overflow-hidden">
       <div className="flex items-center gap-2 border-b px-3 py-2">
         <Icon name="stats" size={14} className="text-primary" />
-        <span className="text-[13px] font-semibold">Narx hisobi</span>
+        <span className="text-body font-semibold">{t('pr.button')}</span>
         <button
           className="ml-auto rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          title="Yopish" onClick={() => setOpen(false)}
+          aria-label={t('common.close')} title={t('common.close')} onClick={() => setOpen(false)}
         >
           <Icon name="close" size={14} />
         </button>
       </div>
 
       <div className="space-y-4 p-3">
-        {loading && <div className="text-[13px] text-muted-foreground">Yuklanmoqda…</div>}
+        {loading && <div className="text-body text-muted-foreground">{t('common.loading')}</div>}
 
         {/* ---- POZITSIYALAR ---- */}
-        <Section>Pozitsiyalar</Section>
+        <Section>{t('pr.positions')}</Section>
         <div className="overflow-x-auto">
-          <table className="w-full text-[12.5px]">
+          <table className="w-full text-caption">
             <thead>
-              <tr className="border-b text-[11px] text-muted-foreground">
-                <th className="p-1.5 text-left font-semibold">Nomi</th>
-                <th className="w-[86px] p-1.5 text-right font-semibold">Miqdor</th>
-                <th className="w-[74px] p-1.5 text-left font-semibold">Birlik</th>
-                <th className="w-[110px] p-1.5 text-right font-semibold">Tannarx</th>
+              <tr className="border-b text-micro text-muted-foreground">
+                <th className="p-1.5 text-left font-semibold">{t('pr.thName')}</th>
+                <th className="w-[86px] p-1.5 text-right font-semibold">{t('pr.thQty')}</th>
+                <th className="w-[74px] p-1.5 text-left font-semibold">{t('pr.thUnit')}</th>
+                <th className="w-[110px] p-1.5 text-right font-semibold">{t('pr.thCost')}</th>
                 <th className="w-[100px] p-1.5 text-right font-semibold"
-                  title="Buyurtmachi e'lon qilgan narx — mo'ljal uchun, hisobga kirmaydi">
-                  Tenderda
+                  title={t('pr.thInTenderTitle')}>
+                  {t('pr.thInTender')}
                 </th>
-                <th className="w-[110px] p-1.5 text-right font-semibold">Summa</th>
+                <th className="w-[110px] p-1.5 text-right font-semibold">{t('pr.thSum')}</th>
                 <th className="w-[30px]" />
               </tr>
             </thead>
@@ -199,21 +203,21 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
               {items.map((it, i) => (
                 <tr key={i} className="border-b border-border-soft">
                   <td className="p-1">
-                    <Input className="h-8 text-[12.5px]" value={String(it.name ?? '')}
-                      placeholder={`Pozitsiya ${i + 1}`}
+                    <Input className="h-8 text-caption" value={String(it.name ?? '')}
+                      placeholder={t('pr.positionN', { n: i + 1 })}
                       onChange={(e) => setItem(i, 'name', e.target.value)} />
                   </td>
                   <td className="p-1">
-                    <Input className="tabular h-8 text-right text-[12.5px]" type="number" step="any"
+                    <Input className="tabular h-8 text-right text-caption" type="number" step="any"
                       value={String(it.qty ?? '')}
                       onChange={(e) => setItem(i, 'qty', e.target.value)} />
                   </td>
                   <td className="p-1">
-                    <Input className="h-8 text-[12.5px]" value={String(it.unit ?? '')}
+                    <Input className="h-8 text-caption" value={String(it.unit ?? '')}
                       onChange={(e) => setItem(i, 'unit', e.target.value)} />
                   </td>
                   <td className="p-1">
-                    <Input className="tabular h-8 text-right text-[12.5px]" type="number" step="any"
+                    <Input className="tabular h-8 text-right text-caption" type="number" step="any"
                       value={String(it.unit_cost ?? '')}
                       onChange={(e) => setItem(i, 'unit_cost', e.target.value)} />
                   </td>
@@ -225,8 +229,8 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
                   </td>
                   <td className="p-1">
                     <button
-                      className="rounded p-1 text-muted-foreground transition-colors hover:bg-urgent-soft hover:text-urgent"
-                      title="O‘chirish"
+                      className="rounded p-1 text-muted-foreground transition-colors hover:bg-urgent-soft hover:text-urgent-strong"
+                      aria-label={t('common.delete')} title={t('common.delete')}
                       onClick={() => { setItems(items.filter((_, k) => k !== i)); setSaved(null) }}
                     >
                       <Icon name="trash" size={13} />
@@ -239,29 +243,29 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
         </div>
         <Button variant="ghost" size="sm"
           onClick={() => { setItems([...items, emptyRow()]); setSaved(null) }}>
-          <Icon name="plus" size={13} /> Pozitsiya qo‘shish
+          <Icon name="plus" size={13} /> {t('pr.addPosition')}
         </Button>
 
         {/* ---- PARAMETRLAR ---- */}
-        <Section>Parametrlar</Section>
+        <Section>{t('pr.params')}</Section>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Field label="Ustama, %" value={p.markup_percent}
+          <Field label={t('pr.markup')} value={p.markup_percent}
             onChange={(v) => setParam('markup_percent', v)} />
-          <Field label="Xavf zaxirasi, %" value={p.risk_reserve_percent}
+          <Field label={t('pr.riskPct')} value={p.risk_reserve_percent}
             onChange={(v) => setParam('risk_reserve_percent', v)} />
-          <Field label="Xavf zaxirasi, summa" value={p.risk_reserve_fixed}
+          <Field label={t('pr.riskFixed')} value={p.risk_reserve_fixed}
             onChange={(v) => setParam('risk_reserve_fixed', v)} />
-          <Field label="Logistika, %" value={p.logistics_percent}
+          <Field label={t('pr.logiPct')} value={p.logistics_percent}
             onChange={(v) => setParam('logistics_percent', v)} />
-          <Field label="Logistika, summa" value={p.logistics_fixed}
+          <Field label={t('pr.logiFixed')} value={p.logistics_fixed}
             onChange={(v) => setParam('logistics_fixed', v)} />
-          <Field label="QQS, %" value={p.vat_percent}
+          <Field label={t('pr.vat')} value={p.vat_percent}
             onChange={(v) => setParam('vat_percent', v)} />
           <label className="block">
-            <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">Valyuta</span>
+            <span className="mb-1 block text-micro font-semibold text-muted-foreground">{t('pr.currency')}</span>
             <Select value={p.currency || 'none'}
               onValueChange={(v) => setParam('currency', v === 'none' ? '' : v)}>
-              <SelectTrigger className="h-8 text-[12.5px]"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-8 text-caption"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">—</SelectItem>
                 <SelectItem value="UZS">UZS</SelectItem>
@@ -274,13 +278,13 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
         {/* ---- XATO / OGOHLANTIRISH ---- */}
         {res.errors.map((e) => (
           <div key={e.code}
-            className="rounded-md border border-urgent/40 bg-urgent-soft px-3 py-2 text-[12.5px] text-urgent">
+            className="rounded-md border border-urgent/40 bg-urgent-soft px-3 py-2 text-caption text-urgent-strong">
             {e.message}
           </div>
         ))}
         {res.warnings.map((w) => (
           <div key={w.code}
-            className="rounded-md border border-soon/40 bg-soon-soft px-3 py-2 text-[12.5px] text-soon">
+            className="rounded-md border border-soon/40 bg-soon-soft px-3 py-2 text-caption text-soon-strong">
             {w.message}
           </div>
         ))}
@@ -288,9 +292,9 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
         {/* ---- HISOB KETMA-KETLIGI — formulalar ko'rinadi ---- */}
         {res.ok && (
           <>
-            <Section>Hisob ketma-ketligi</Section>
+            <Section>{t('pr.steps')}</Section>
             <div className="overflow-x-auto">
-              <table className="w-full text-[12.5px]">
+              <table className="w-full text-caption">
                 <tbody>
                   {res.steps.map((s) => (
                     <tr key={s.key} className={cn(
@@ -299,11 +303,11 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
                     )}>
                       <td className="p-1.5 align-top">
                         {s.label}
-                        <span className="block text-[11px] font-normal text-muted-foreground">
+                        <span className="block text-micro font-normal text-muted-foreground">
                           {s.rule}
                         </span>
                       </td>
-                      <td className="tabular p-1.5 align-top text-[11.5px] text-muted-foreground">
+                      <td className="tabular p-1.5 align-top text-caption text-muted-foreground">
                         {s.formula}
                       </td>
                       <td className="tabular whitespace-nowrap p-1.5 text-right align-top">
@@ -320,19 +324,19 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
         )}
 
         {/* ---- BROKER QO'LDA NARX ---- */}
-        <Section>Broker narxi</Section>
+        <Section>{t('pr.brokerPrice')}</Section>
         <div className="grid gap-2 sm:grid-cols-[1fr_2fr]">
-          <label className="block" title="Bo‘sh qoldirilsa tizim tavsiyasi qabul qilinadi">
-            <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">
-              Qo‘lda narx
+          <label className="block" title={t('pr.manualTitle')}>
+            <span className="mb-1 block text-micro font-semibold text-muted-foreground">
+              {t('pr.manualPrice')}
             </span>
-            <Input className="tabular h-8 text-[12.5px]" type="number" step="any" value={manual}
+            <Input className="tabular h-8 text-caption" type="number" step="any" value={manual}
               placeholder={res.ok ? String(res.totals.recommended_price) : ''}
               onChange={(e) => { setManual(e.target.value); setSaved(null) }} />
           </label>
           <label className="block">
-            <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">Izoh</span>
-            <Input className="h-8 text-[12.5px]" value={note} placeholder="nega o‘zgartirildi"
+            <span className="mb-1 block text-micro font-semibold text-muted-foreground">{t('pr.note')}</span>
+            <Input className="h-8 text-caption" value={note} placeholder={t('pr.notePlaceholder')}
               onChange={(e) => { setNote(e.target.value); setSaved(null) }} />
           </label>
         </div>
@@ -340,18 +344,18 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
         {/* ---- YAKUN ---- */}
         {res.ok && (
           <div className="grid grid-cols-2 gap-2 lg:grid-cols-3">
-            <Sum label="Jami xarajat" value={`${fmtNum(res.totals.total_cost)} ${cur}`.trim()} />
-            <Sum label="Tavsiya" value={`${fmtNum(res.totals.recommended_price)} ${cur}`.trim()} accent />
-            <Sum label="Yakuniy narx" value={`${fmtNum(res.totals.final_price)} ${cur}`.trim()}
-              hint={res.totals.manual_used ? 'qo‘lda' : 'tavsiya'} />
-            <Sum label="Kutilayotgan foyda"
+            <Sum label={t('pr.totalCost')} value={`${fmtNum(res.totals.total_cost)} ${cur}`.trim()} />
+            <Sum label={t('pr.recommended')} value={`${fmtNum(res.totals.recommended_price)} ${cur}`.trim()} accent />
+            <Sum label={t('pr.finalPrice')} value={`${fmtNum(res.totals.final_price)} ${cur}`.trim()}
+              hint={t(res.totals.manual_used ? 'pr.manual' : 'pr.recommendedShort')} />
+            <Sum label={t('pr.profit')}
               value={`${fmtNum(res.totals.profit)} ${cur}`.trim()}
               hint={`${fmtNum(res.totals.profit_percent)}%`}
               tone={res.totals.profit > 0 ? 'ok' : res.totals.profit < 0 ? 'bad' : undefined} />
             {res.totals.budget_left !== null && (
-              <Sum label="Byudjet zaxirasi"
+              <Sum label={t('pr.budgetLeft')}
                 value={`${fmtNum(res.totals.budget_left)} ${cur}`.trim()}
-                hint={`byudjet ${fmtNum(res.totals.budget)}`}
+                hint={t('pr.budget', { v: fmtNum(res.totals.budget) })}
                 tone={res.totals.budget_left < 0 ? 'bad' : 'ok'} />
             )}
           </div>
@@ -359,14 +363,14 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
 
         <div className="flex flex-wrap items-center gap-3 border-t pt-3">
           <Button onClick={save} disabled={saving || !res.ok}>
-            {saving ? 'Saqlanmoqda…' : 'Smetani saqlash'}
+            {saving ? t('common.saving') : t('pr.saveEstimate')}
           </Button>
           {saved && (
-            <span className="flex items-center gap-1 text-[12.5px] text-ok">
-              <Icon name="check" size={12} /> saqlandi
+            <span className="flex items-center gap-1 text-caption text-ok-strong">
+              <Icon name="check" size={12} /> {t('common.saved')}
             </span>
           )}
-          {error && <span className="text-[12.5px] text-urgent">{error}</span>}
+          {error && <span className="text-caption text-urgent-strong">{error}</span>}
         </div>
       </div>
     </Card>
@@ -375,7 +379,7 @@ export default function PricingPanel({ tender }: { tender: TenderDetail | null }
 
 function Section({ children }: { children: React.ReactNode }) {
   return (
-    <div className="border-b pb-1 text-[11px] font-bold text-muted-foreground">
+    <div className="border-b pb-1 text-micro font-semibold text-muted-foreground">
       {children}
     </div>
   )
@@ -388,8 +392,8 @@ function Field({ label, value, onChange }: {
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">{label}</span>
-      <Input className="tabular h-8 text-[12.5px]" type="number" step="any"
+      <span className="mb-1 block text-micro font-semibold text-muted-foreground">{label}</span>
+      <Input className="tabular h-8 text-caption" type="number" step="any"
         value={value == null ? '' : String(value)}
         onChange={(e) => onChange(e.target.value)} />
     </label>
@@ -408,13 +412,13 @@ function Sum({ label, value, hint, accent, tone }: {
       'rounded-lg border px-3 py-2',
       accent ? 'border-primary bg-secondary' : 'bg-card',
     )}>
-      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="text-micro text-muted-foreground">{label}</div>
       <div className={cn(
-        'tabular text-[15px] font-bold',
-        tone === 'ok' && 'text-ok', tone === 'bad' && 'text-urgent',
+        'tabular text-lead font-semibold',
+        tone === 'ok' && 'text-ok-strong', tone === 'bad' && 'text-urgent-strong',
         accent && !tone && 'text-primary',
       )}>{value}</div>
-      {hint && <div className="text-[11px] text-muted-foreground">{hint}</div>}
+      {hint && <div className="text-micro text-muted-foreground">{hint}</div>}
     </div>
   )
 }

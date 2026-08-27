@@ -26,7 +26,9 @@ o'zgartirilmaydi va orkestrator FAQAT --limit 1 bilan yurgiziladi
 (to'liq yurish uzex TypeId=1 uchun ~10 daqiqa oladi).
 """
 import argparse
+import io
 import os
+import re
 import subprocess
 import sys
 
@@ -207,6 +209,328 @@ def test_orchestrator() -> None:
             print("        " + ln)
 
 
+#: Teskari qo'shtirnoq — IQTIBOS belgisi.
+BT = chr(96)
+
+#: Ochiq ish belgisi. `§` — hujjatdagi bo'limga HAVOLA.
+_TODO_RE = re.compile(r"(TODO|FIXME|XXX|HACK)\s*(\(([^)]*)\))?", re.I)
+
+
+def test_ochiq_ishlar_belgilangan() -> None:
+    """OCHIQ ISH IZOHDA EMAS, BELGIDA bo'lsin.
+
+    Muammoni izohda tasvirlash uni YOPILGANDEK ko'rsatadi.
+    `kodlash.py:39-43` da `v_review_disagreement` nosozligi to'liq
+    yozilgan edi — sana, ta'sir, misol bilan — va ko'rinish
+    tuzatilmagan. Yozilgani uchun ish bajarilgan kabi tuyulgan.
+
+    QOIDA: aniqlangan har muammo ikkitadan biri bo'lsin —
+      * `xfail` sinov (yiqilib turadi, tuzatilgach yashillanadi);
+      * `TODO(§16.xx)` — bo'limga HAVOLA bilan.
+
+    Bu sinov NOLGA TALAB QILMAYDI: ochiq ish bo'lishi normal.
+    U faqat ularni KO'RINADIGAN qiladi va havolasiz belgini
+    rad etadi.
+    """
+    print(chr(10) + "--- Ochiq ishlar belgilangan ---")
+
+    fayllar = []
+    for kat in ("api", ".", "_tests"):
+        d = os.path.join(ROOT, kat)
+        for nom in sorted(os.listdir(d)):
+            if nom.endswith(".py") and not nom.startswith("__"):
+                fayllar.append(os.path.join(d, nom))
+
+    belgilar, havolasiz = [], []
+    for p in fayllar:
+        for i, q in enumerate(io.open(p, encoding="utf-8").read().split(chr(10))):
+            t = q.strip()
+            # FAQAT izoh qatorlari — nasr skanerlanmaydi, lekin
+            # belgi ATAYLAB izohda turadi.
+            if not t.startswith("#"):
+                continue
+            m = _TODO_RE.search(t)
+            if not m:
+                continue
+            # Skanerning O'Z ta'rifi hisoblanmasin.
+            if "_TODO_RE" in t or "skaner-namuna" in t:
+                continue
+            # IQTIBOS BELGI EMAS.
+            #
+            # Uchinchi marta bir xil xato: skaner o'z tushuntirish
+            # izohini ochiq ish deb sanadi. Bu loyihada kod nomlari
+            # doim `backtick` ichida yoziladi, ya'ni
+            # `TODO(...)` — IQTIBOS, haqiqiy belgi esa
+            # backticksiz turadi.
+            if t[max(0, m.start() - 1)] == "`":
+                continue
+            yorliq = f"{os.path.basename(p)}:{i + 1}"
+            belgilar.append(yorliq)
+            if not (m.group(3) or "").strip().startswith("§"):
+                havolasiz.append(f"{yorliq}  {t[:56]}")
+
+    print(f"       ochiq ish belgilari: {len(belgilar)}")
+    for b in belgilar:
+        print(f"         {b}")
+
+    # HAVOLA MAJBURIY: `TODO(§16.xx)` — bo'limsiz belgi keyin
+    # nima uchun qo'yilgani unutiladi va yana izohga aylanadi.
+    check("har belgi bo'limga HAVOLA qiladi", not havolasiz,
+          "; ".join(havolasiz[:4]))
+
+    # SKANERNI SINAYMIZ.
+    check("skaner havolasiz belgini TOPADI",
+          bool(_TODO_RE.search("# TODO: keyinroq"))
+          and not (_TODO_RE.search("# TODO: keyinroq").group(3) or ""))
+    m2 = _TODO_RE.search("# TODO(§16.51): sabab")
+    check("skaner havolali belgini QABUL qiladi",
+          bool(m2) and (m2.group(3) or "").startswith("§"))
+
+    # IQTIBOS tutilmasin — aks holda skaner o'z nasrini sanaydi.
+    iqtibos = "# HAVOLA MAJBURIY: " + BT + "TODO(§16.xx)" + BT + " shakli"
+    m3 = _TODO_RE.search(iqtibos)
+    check("skaner IQTIBOSNI belgi deb sanamaydi",
+          bool(m3) and iqtibos[m3.start() - 1] == BT,
+          "backtick ichidagi TODO — iqtibos")
+
+
+def test_quvur_jimgina_otmasin() -> None:
+    """QUVUR KAMROQ ISH QILSA — BILINSIN.
+
+    Uch xato bir sinfdan edi: qadam yozilgan, ulangan, lekin AMALDA
+    BAJARILMAGAN — va yurish baribir "muvaffaqiyatli" deb tugagan.
+    """
+    print(chr(10) + "--- Quvur jimgina o'tmasin ---")
+
+    src = io.open(os.path.join(ROOT, "run_etl.py"), encoding="utf-8").read()
+
+    # 1. TARTIB. `sole_company_id()` `load_dotenv()` DAN KEYIN turishi
+    #    SHART. Aks holda DSN hali o'qilmagan bo'ladi, `init_pool()`
+    #    yiqiladi va `with_requirements` jimgina o'chiriladi. Amalda
+    #    HAR SOAT shunday bo'lgan.
+    i_env = src.find("load_dotenv(os.path.join(HERE")
+    i_com = src.find("auth.sole_company_id()")
+    check("load_dotenv() manba ichida topildi", i_env > 0)
+    check("sole_company_id() load_dotenv() DAN KEYIN",
+          0 < i_env < i_com,
+          f"load_dotenv@{i_env}, sole_company_id@{i_com}")
+
+    # 2. POST-QADAM XATOSI chiqish kodiga ta'sir qilsin. Avval `_ok`
+    #    tashlab yuborilardi: vektorlash yiqilsa ham "OK" derdi.
+    check("post-qadamlar xatosi yig'iladi",
+          "post_xatolar.append" in src,
+          "post-qadam `_ok` i tashlab yuborilmasin")
+    check("chiqish kodi post-qadamlarni hisobga oladi",
+          "all(results) and not post_xatolar" in src,
+          "`ok = all(results)` yolg'iz YETARLI EMAS")
+    n_post = src.count("emit([" + chr(34) + chr(92) + "n===== post:")
+    n_xato = src.count("post_xatolar.append")
+    check("HAR BIR post-qadam sanaladi",
+          n_xato >= n_post,
+          f"{n_post} ta qadam, {n_xato} ta xato yig'ish")
+
+    # 3. MAJBURAN TO'XTATILGAN bola bir marta qayta urinilsin.
+    #    Jurnalda 14 kunda 100 marta uchradi (~10% yurish) va yangi
+    #    tenderlar shu sababli yig'ilmay qolardi.
+    check("uzilish kodi nomlangan",
+          "UZILISH_KODI = 3221225786" in src)
+    check("qayta urinish HAQIQIY Ctrl+C da o'chadi",
+          "not _UZILDI" in src,
+          "foydalanuvchi to'xtatgan yurish o'jarlik bilan davom etmasin")
+
+
+def test_musbat_tasdiq(conn) -> None:
+    """YURISH ISH QILGANINI ISBOTLASIN — "yiqilmadim" demasin.
+
+    Bu loyihada UCHINCHI marta takrorlangan sinf:
+      - `_cheklov_xatosimi()` NOT NULL ni CHECK deb yutgani;
+      - skanerning "0 ta buzilish" i (o'zini o'lchagani);
+      - `all(results)` post-qadamlarni ko'rmagani.
+
+    Har uchalasida muvaffaqiyat signali SALBIY shartdan olingan
+    ("xato chiqmadi") va signalning O'ZI tekshirilmagan.
+    """
+    print(chr(10) + "--- Musbat tasdiq ---")
+
+    sys.path.insert(0, ROOT)
+    import run_etl
+
+    # 1. FUNKSIYA XULQI. Navbat bor edi-yu kamaymasa — XATO.
+    x = []
+    run_etl.siljish_tekshir("sinov", 10, 10, x)
+    check("navbat KAMAYMASA xato beriladi", len(x) == 1, str(x))
+    check("xabar sababni aytadi",
+          x and "ISH" in x[0].upper() and "10" in x[0], str(x))
+
+    x = []
+    run_etl.siljish_tekshir("sinov", 10, 4, x)
+    check("navbat kamaysa xato YO'Q", not x, str(x))
+
+    x = []
+    run_etl.siljish_tekshir("sinov", 0, 0, x)
+    check("navbat BO'SH bo'lsa xato yo'q", not x,
+          "qiladigan ish bo'lmasa — nosozlik emas")
+
+    # O'LCHOVSIZLIK ham xato: o'lchamasdan "muvaffaqiyat" deb
+    # bo'lmaydi. Aynan shu narsa ikki hafta yashirgan edi.
+    x = []
+    run_etl.siljish_tekshir("sinov", None, 5, x)
+    check("O'LCHANMAGAN holat ham XATO", len(x) == 1, str(x))
+    x = []
+    run_etl.siljish_tekshir("sinov", 5, None, x)
+    check("keyingi o'lchov yo'qligi ham XATO", len(x) == 1, str(x))
+
+    # 2. SO'ROV SINXRONMI. `run_etl.SQL_TALAB_QOLGAN` `api.requirement`
+    #    dagi `SQL_PENDING` bilan bir xil shartni sanashi kerak. Ular
+    #    ikki faylda yozilgan, ya'ni jimgina ajralib ketishi mumkin.
+    from api import db as apidb, requirement as R
+    apidb.init_pool()
+    cid = apidb.scalar("""SELECT company_id FROM v_requirement_review
+                          GROUP BY company_id ORDER BY count(*) DESC LIMIT 1""")
+    if cid:
+        with conn.cursor() as cur:
+            cur.execute(run_etl.SQL_TALAB_QOLGAN,
+                        {"company_id": cid, "method": "naqsh"})
+            n_etl = int(cur.fetchone()[0])
+        n_api = len(R.pending(cid, limit=100000, method="naqsh"))
+        check("run_etl va api.requirement BIR XIL navbatni ko'radi",
+              n_etl == n_api, f"run_etl={n_etl}, api={n_api}")
+
+    # 3. QUVUR ULARNI CHAQIRADIMI. Funksiya yozilib, ulanmasligi —
+    #    aynan shu bo'limdagi 3-nosozlik edi.
+    src = io.open(os.path.join(ROOT, "run_etl.py"), encoding="utf-8").read()
+    check("talab ajratishdan keyin siljish tekshiriladi",
+          'siljish_tekshir("talab ajratish"' in src)
+    check("vektorlashdan keyin siljish tekshiriladi",
+          'siljish_tekshir("vektorlash"' in src)
+    check("korpus o'sishi hisobga olinadi (`QUVIB YETDI`)",
+          "QUVIB YETDI" in src,
+          "korpus o'sib turadi — `tugadi` holati yo'q")
+
+
+def test_env_qulfi() -> None:
+    """IZOH EMAS, QULF.
+
+    1-nosozlikda izoh AYNAN o'sha xatoni tasvirlab turardi va kod
+    uning ustiga qo'yildi. Endi `.env` o'qilmasdan bazaga yo'l
+    ochilmaydi.
+    """
+    print(chr(10) + "--- .env qulfi ---")
+
+    sys.path.insert(0, ROOT)
+    import run_etl
+
+    eski = run_etl._ENV_YUKLANDI
+    try:
+        run_etl._ENV_YUKLANDI = False
+        xato = None
+        try:
+            run_etl.db()
+        except RuntimeError as e:
+            xato = str(e)
+        except Exception as e:                              # noqa: BLE001
+            xato = "NOTO'G'RI TUR: " + type(e).__name__
+        check(".env o'qilmasdan db() OCHILMAYDI", bool(xato), str(xato))
+        check("xato sababni tushuntiradi",
+              bool(xato) and "load_dotenv" in xato, str(xato)[:120])
+    finally:
+        run_etl._ENV_YUKLANDI = eski
+
+    # Bayroq YOQILGANDA yo'l ochiq bo'lsin — qulf ishni TO'SMASIN.
+    # (Sinov `main()` ni chaqirmaydi, ya'ni modul ichidagi
+    # `load_dotenv()` yurmagan — bayroqni qo'lda yoqamiz.)
+    run_etl._ENV_YUKLANDI = True
+    try:
+        conn2 = run_etl.db()
+        check("bayroq yoqilgach db() ISHLAYDI", conn2 is not None)
+        conn2.close()
+    except Exception as e:                                  # noqa: BLE001
+        check("bayroq yoqilgach db() ISHLAYDI", False, str(e)[:120])
+    finally:
+        run_etl._ENV_YUKLANDI = eski
+
+    src = io.open(os.path.join(ROOT, "run_etl.py"), encoding="utf-8").read()
+    check("sole_company_id() yo'li ham qulflangan",
+          'env_shart("sole_company_id()")' in src)
+
+    # CHIQISH YO'QOLMASIN: seans tugaganda ~5 soniya beriladi.
+    check("uzilishda jurnal diskka yuviladi",
+          "os.fsync(sys.stdout.fileno())" in src,
+          "flush() faqat OT buferigacha olib boradi")
+    check("chiqish qator-qator yuviladi",
+          "line_buffering=True" in src)
+    check("SIGBREAK ham tutiladi",
+          "SIGBREAK" in src,
+          "Windows'da CTRL_BREAK_EVENT shunga tushadi")
+
+
+def test_qayta_urinish() -> None:
+    """Qayta urinish AMALDA ishlaydimi — soxta bola bilan.
+
+    Statik tekshiruv "kod bor" deydi, "kod ishlaydi" demaydi.
+    """
+    print(chr(10) + "--- Qayta urinish (soxta bola) ---")
+
+    sys.path.insert(0, ROOT)
+    import run_etl
+
+    fix = os.path.join(ROOT, "_tests", "fixtures")
+    sanoq = os.path.join(fix, "_urinish.txt")
+    bola = os.path.join(fix, "_soxta_bola.py")
+    io.open(bola, "w", encoding="utf-8").write(
+        "import io, os, sys" + chr(10) +
+        "p = os.path.join(os.path.dirname(__file__), '_urinish.txt')" + chr(10) +
+        "n = int(io.open(p).read()) if os.path.exists(p) else 0" + chr(10) +
+        "io.open(p, 'w').write(str(n + 1))" + chr(10) +
+        "print('urinish', n + 1)" + chr(10) +
+        "sys.exit(3221225786 if n == 0 else 0)" + chr(10))
+    try:
+        # 1-urinish o'ldiriladi, 2-si o'tadi.
+        if os.path.exists(sanoq):
+            os.remove(sanoq)
+        run_etl._UZILDI = False
+        ok, err, _dt, out = run_etl.run_script(
+            os.path.join("_tests", "fixtures", "_soxta_bola.py"), [])
+        check("majburan to'xtatilgan bola QAYTA urinildi", ok,
+              f"err={err}, out={out}")
+        check("qayta urinish jurnalda ko'rinadi",
+              any("qayta urinilmoqda" in x for x in out), str(out))
+        check("sanoq 2 ga yetdi",
+              io.open(sanoq).read().strip() == "2",
+              io.open(sanoq).read())
+
+        # HAQIQIY Ctrl+C dan keyin qayta urinilmasin.
+        os.remove(sanoq)
+        run_etl._UZILDI = True
+        ok2, _err2, _dt2, out2 = run_etl.run_script(
+            os.path.join("_tests", "fixtures", "_soxta_bola.py"), [])
+        check("Ctrl+C dan keyin QAYTA URINILMAYDI", not ok2,
+              "foydalanuvchi to'xtatgan yurish davom etmasin")
+        check("faqat bir marta yurgizildi",
+              io.open(sanoq).read().strip() == "1",
+              io.open(sanoq).read())
+
+        # Oddiy xato (kod 1) qayta urinilmasin — vaqt behuda ketmasin.
+        io.open(bola, "w", encoding="utf-8").write(
+            "import io, os, sys" + chr(10) +
+            "p = os.path.join(os.path.dirname(__file__), '_urinish.txt')" + chr(10) +
+            "n = int(io.open(p).read()) if os.path.exists(p) else 0" + chr(10) +
+            "io.open(p, 'w').write(str(n + 1))" + chr(10) +
+            "sys.exit(1)" + chr(10))
+        os.remove(sanoq)
+        run_etl._UZILDI = False
+        run_etl.run_script(os.path.join("_tests", "fixtures",
+                                        "_soxta_bola.py"), [])
+        check("oddiy xato QAYTA URINILMAYDI",
+              io.open(sanoq).read().strip() == "1",
+              "faqat majburiy to'xtatish qayta urinilsin")
+    finally:
+        run_etl._UZILDI = False
+        for f in (bola, sanoq):
+            if os.path.exists(f):
+                os.remove(f)
+
+
 def test_etl_run_log(conn) -> None:
     print("\n[7] etl_run jurnali — oxirgi yurishlar sog'lom")
     with conn.cursor() as cur:
@@ -247,6 +571,11 @@ def main() -> None:
         test_id_collisions(conn, args.offline)
         if not (args.skip_orchestrator or args.offline):
             test_orchestrator()
+        test_ochiq_ishlar_belgilangan()
+        test_quvur_jimgina_otmasin()
+        test_musbat_tasdiq(conn)
+        test_env_qulfi()
+        test_qayta_urinish()
         test_etl_run_log(conn)
     finally:
         conn.close()

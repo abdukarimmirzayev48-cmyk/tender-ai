@@ -166,10 +166,15 @@ class _TgPatch:
             "RETURNING chat_id")
         if self.with_subscriber:
             db.execute_returning(
-                "INSERT INTO notify_telegram_subscriber (chat_id, title, chat_type) "
-                "VALUES (%(c)s, 'Sinov obunachisi', 'supergroup') "
-                "ON CONFLICT (chat_id) DO UPDATE SET enabled = true "
-                "RETURNING chat_id", {"c": TEST_CHAT})
+                # PK (company_id, chat_id) — J1 dan keyin. `company_id`
+                # ko'rsatilmaydi: ustunda DEFAULT bor, lekin ON CONFLICT
+                # nishoni indeks bilan AYNAN mos kelishi shart.
+                "INSERT INTO notify_telegram_subscriber "
+                "(chat_id, company_id, title, chat_type) "
+                "VALUES (%(c)s, %(cid)s, 'Sinov obunachisi', 'supergroup') "
+                "ON CONFLICT (company_id, chat_id) DO UPDATE SET enabled = true "
+                "RETURNING chat_id",
+                {"c": TEST_CHAT, "cid": _test_company_id()})
         return FakeTelegram
 
     def __exit__(self, *exc):
@@ -225,6 +230,14 @@ TEST_BASE = "http://localhost:5173"
 
 TEST_CHAT = "-100123456789"
 
+
+def _test_company_id() -> int:
+    """J1.6: sinov yozuvlari QAYSI kompaniyaga tegishli.
+    Yagona faol hisob — `auth.sole_company_id()` bilan bir xil qoida."""
+    from api import auth
+    return auth.sole_company_id()
+
+
 # Telegram ATAYIN O'CHIRIQ: sinovlarning ko'pchiligi email haqida va ular
 # tasodifan HAQIQIY chatga xabar yubormasligi kerak. Telegram sinovlari uni
 # o'zi yoqib oladi (`_TgPatch` bilan birga).
@@ -232,6 +245,9 @@ TEST_SETTINGS = {
     "enabled": True, "email": TEST_EMAIL, "min_score": 70,
     "base_url": TEST_BASE,
     "telegram_enabled": False, "telegram_chat_id": None,
+    # Xabar tili — sinovlar standart tilда kutadi (til sinovi uni o'zi
+    # almashtirib, oxirида shu holatga qaytaradi).
+    "lang": "uz",
 }
 
 # SMTP endi PLATFORMA sozlamasi (.env), foydalanuvchi formasida emas.
@@ -250,16 +266,25 @@ _ORIGINAL_SMTP_ENV = {}
 # Sinov davomida yaratilgan notify_sent qatorlari — oxirida o'chiriladi
 CREATED_SENT = set()
 _ORIGINAL_SETTINGS = None
+#: "Asl holat" ning o'zi sinov qoldig'imi.
+_QOLDIQ_TOPILDI = False
 
 
-def fake_tender(tid=99, name="Насос va kompyuter xaridi", cats=None, goods=""):
-    """`_product_matches`/`score_tender` kutadigan minimal nomzod qatori."""
+def fake_tender(tid=99, name="Насос va kompyuter xaridi", cats=None, goods="",
+                good_codes=None):
+    """`_product_matches`/`score_tender` kutadigan minimal nomzod qatori.
+
+    `good_codes` — rasmiy tasniflagich kodlari. Moslashtirishning
+    BIRLAMCHI kaliti (`matching.product_matches`), shuning uchun
+    soxta nomzodda ham bo'lishi kerak.
+    """
     return {
         "id": tid, "name": name, "company_name": "Sinov buyurtmachi",
         "totalcost": 1000000, "currency": "UZS", "region_name": "Toshkent shahri",
         "area_path": "33.2137", "close_at": None, "publicated_at": None,
         "source_platform": "xt-xarid",
         "category_codes": cats or [], "goods_blob": goods,
+        "good_codes": good_codes or [],
     }
 
 
@@ -268,22 +293,51 @@ def fake_tender(tid=99, name="Насос va kompyuter xaridi", cats=None, goods=
 # ---------------------------------------------------------------------------
 @case
 def test_ball_shkalasi():
-    """Ball /catalog/match shkalasi bilan bir xil: kategoriya=100, nom=70."""
+    """Ball /catalog/match shkalasi bilan bir xil: kod=100, nom=60.
+
+    SHKALA O'ZGARDI (2026-08). Ilgari `kategoriya=100` edi. O'lchandi:
+    206 katalog mosligining 131 tasi AYNAN kategoriya orqali kelardi va
+    ular asosan soxta edi — "Andijon GES kuch transformatorini
+    ta'mirlash" tibbiy muzlatgich sotuvchiga 100 ball bilan borardi,
+    4 kategoriyali maktab tenderi esa 25 mahsulotdan 23 tasiga mos
+    chiqardi. Kategoriya endi moslik DALILI EMAS (u filtr bo'lib
+    qoladi) — `api/matching.product_matches()`.
+    """
     prod = {"id": 1, "name": "kompyuter", "category_code": "elektronika",
-            "keywords": [], "notify": True}
+            "keywords": [], "notify": True, "codes": ["26.20"]}
 
+    # KOD mosligi — rasmiy tasniflagich, inson tasdiqlagan -> 100
+    by_code = notify.score_candidate(
+        fake_tender(cats=["qurilish"], good_codes=["26.20.11.000-00001"]),
+        [prod], None)
+    eq(by_code["score"], 100, "kod mosligi")
+    eq(by_code["by"], "katalog", "manba")
+
+    # KATEGORIYA endi MOSLIK EMAS: kodi bor mahsulot uchun kategoriya
+    # tengligi hech narsa bermaydi.
+    kodsiz_prod = dict(prod, codes=[])
     by_cat = notify.score_candidate(
-        fake_tender(cats=["elektronika/kompyuter"]), [prod], None)
-    eq(by_cat["score"], 100, "kategoriya mosligi")
-    eq(by_cat["by"], "katalog", "manba")
+        fake_tender(name="Beton va g'isht xaridi",
+                    cats=["elektronika/kompyuter"], goods="beton g'isht"),
+        [kodsiz_prod], None)
+    eq(by_cat["score"], 0, "kategoriya tengligi MOSLIK EMAS")
 
+    # NOM mosligi — matn, morfologik jihatdan mo'rt -> 60
     by_name = notify.score_candidate(
-        fake_tender(name="Kompyuter xaridi", cats=["qurilish"]), [prod], None)
-    eq(by_name["score"], 70, "nom mosligi")
+        fake_tender(name="Kompyuter xaridi", cats=["qurilish"]),
+        [kodsiz_prod], None)
+    eq(by_name["score"], 60, "nom mosligi")
+
+    # SO'Z CHEGARASI: "kompyuter" so'zining O'RTASIDAN topilmasin.
+    ichki = notify.score_candidate(
+        fake_tender(name="Superkompyuter markazi", cats=["qurilish"],
+                    goods="xizmat"),
+        [kodsiz_prod], None)
+    eq(ichki["score"], 0, "so'z o'rtasidan moslik YO'Q")
 
     no_match = notify.score_candidate(
         fake_tender(name="Non va sut", cats=["oziq-ovqat"], goods="non sut"),
-        [prod], None)
+        [kodsiz_prod], None)
     eq(no_match["score"], 0, "moslik yo'q")
 
 
@@ -396,6 +450,99 @@ def test_matn_va_html_tarkibi():
        "matn versiyasi HTML-escape qilingan")
     # Apostrof HTML da ham o'qiladigan holida qolsin (&#x27; emas)
     ok("&#x27;" not in html, "HTML da apostrof escape qilinib qolgan")
+
+
+@case
+def test_xabar_platforma_tilida():
+    """TZ: bildirishnoma PLATFORMA TILIDA keladi.
+
+    Bir xil tender uch tilda chizilganда: matn, mavzu, moslik sabablari,
+    summa va sana formati o'zgaradi; HAVOLA va tender NOMI (ma'lumot) esa
+    o'zgarmaydi. Sabablar `reason_keys` dan quriladi — ya'ni tarjima
+    tayyor matnni "qidirib almashtirish" bilan emas, manbadan bo'ladi.
+    """
+    t = {"id": 77, "name": "Planshet xaridi", "company_name": "Taminot DUK",
+         "totalcost": 15938332700, "currency": "UZS",
+         "region_name": "Toshkent shahri",
+         "close_at": datetime(2026, 8, 4, 14, 45), "score": 85,
+         "by_key": "by.profile",
+         "reason_keys": [{"key": "reason.keywords",
+                          "vars": {"n": 2, "items": "nasos, quvur"}}]}
+
+    kutilgan = {
+        # til: (matndagi maydon nomi, HTML dagi maydon nomi, summa, sana, sabab)
+        # HTML da buyurtmachi YORLIQSIZ chiqadi (nomning o'zi), shuning uchun
+        # u yerda "Summa" yorlig'i tekshiriladi.
+        "uz": ("Buyurtmachi", "Summa", "15 938 332 700 UZS", "04.08.2026 14:45",
+               "2 ta kalit so‘z mos"),
+        "ru": ("Заказчик", "Сумма", "15 938 332 700 UZS", "04.08.2026 14:45",
+               "Совпало 2 ключевых слова"),
+        "en": ("Buyer", "Amount", "15,938,332,700 UZS", "2026-08-04 14:45",
+               "2 keywords matched"),
+    }
+    for lang, (matn_yorliq, html_yorliq, pul, sana, sabab) in kutilgan.items():
+        subj, text, html = notify.render([t], TEST_BASE, 70, lang)
+        head, blocks, _ = notify.render_telegram([t], TEST_BASE, 70, lang)
+        yorliq = {"matn": matn_yorliq, "html": html_yorliq}
+        for kesim, nom in ((text, "matn"), (html, "html"), (blocks[0], "telegram")):
+            # Telegramда maydon nomi o'rnida emoji — tarjima talab qilinmaydi
+            if nom in yorliq:
+                ok(yorliq[nom] in kesim,
+                   f"{lang}/{nom}: maydon nomi tarjima qilinmadi")
+            ok(pul in kesim, f"{lang}/{nom}: summa formati noto‘g‘ri")
+            ok(sana in kesim, f"{lang}/{nom}: sana formati noto‘g‘ri")
+            ok(sabab in kesim, f"{lang}/{nom}: sabab tarjima qilinmadi")
+            # Ma'lumot — tarjima qilinmaydi
+            ok("Planshet xaridi" in kesim, f"{lang}/{nom}: tender nomi yo‘qoldi")
+            ok(f"{TEST_BASE}/?tender=77" in kesim, f"{lang}/{nom}: havola yo‘qoldi")
+        ok("Tender AI" in subj and "85" in subj, f"{lang}: mavzu noto‘g‘ri: {subj}")
+        ok("85" in head or "70" in head, f"{lang}: TG sarlavhasida chegara yo‘q")
+
+    # Boshqa til — boshqa MATN (jimgina o'zbekchada qolib ketmasin)
+    uz_text = notify.render([t], TEST_BASE, 70, "uz")[1]
+    for lang in ("ru", "en"):
+        ok(notify.render([t], TEST_BASE, 70, lang)[1] != uz_text,
+           f"{lang}: xabar o'zbekchada qolib ketdi")
+
+    # Noma'lum/bo'sh til — o'zbekchaga tushadi, XATO BERMAYDI
+    for yaroqsiz in ("de", "", None, "uz-Latn-UZ", "RU"):
+        kutilgani = notify.render([t], TEST_BASE, 70,
+                                  "ru" if yaroqsiz == "RU" else "uz")[1]
+        eq(notify.render([t], TEST_BASE, 70, yaroqsiz)[1], kutilgani,
+           f"{yaroqsiz!r}: til kodi noto‘g‘ri keltirildi")
+
+
+@case
+def test_til_sozlamada_saqlanadi():
+    """Til BAZADA turadi (brauzerда emas) — xabarni server yuboradi.
+
+    Patch qo'llanmagan bazada esa saqlanmaydi, lekin sozlama saqlash
+    YIQILMAYDI: til yumshoq afzallik, uni deb butun forma ishlamay
+    qolmasligi kerak.
+    """
+    st = notify.save_settings(dict(TEST_SETTINGS, lang="ru"))
+    if not notify.lang_column_ready():
+        eq(st["lang"], "uz", "patchsiz bazada standart til kutilgandi")
+        eq(st["lang_ready"], False, "lang_ready noto‘g‘ri")
+        return
+
+    eq(st["lang"], "ru", "til saqlanmadi")
+    eq(notify.get_settings()["lang"], "ru", "til bazadan qaytmadi")
+    # Yaroqsiz kod XATO bermaydi — standart tilga keltiriladi
+    eq(notify.save_settings({"lang": "klingon"})["lang"], "uz",
+       "yaroqsiz til kodi standart tilga keltirilmadi")
+    # Faqat `lang` yuborilsa qolgan maydonlar TEGILMAYDI
+    eq(notify.save_settings({"lang": "en"})["min_score"],
+       TEST_SETTINGS["min_score"], "til saqlash boshqa maydonni o‘zgartirdi")
+
+    # To'liq tsikl xabarni AYNAN SHU tilda quradi
+    notify.save_settings({"lang": "en"})
+    res = notify.run(min_score=0, limit=2, dry_run=True, since_hours=87600)
+    eq(res["lang"], "en", "tsikl sozlamadagi tilni olmadi")
+    if res.get("text"):
+        ok("Match threshold" in res["text"],
+           f"xabar ingliz tilida emas: {res['text'][:80]}")
+    notify.save_settings(TEST_SETTINGS)
 
 
 @case
@@ -515,7 +662,10 @@ def test_smtp_sozlanmagan_aniq_xato():
 def test_qabul_qiluvchi_yoq_aniq_xato():
     """Email ham sozlamada, ham profilda yo'q -> NotifyError."""
     st = dict(notify.get_settings(), email=None)
-    profil_email = db.scalar(notify.PROFILE_EMAIL_SQL)
+    # J1.6: profil KOMPANIYAGA bog'landi — SQL endi `company_id` talab qiladi.
+    from api import auth
+    profil_email = db.scalar(notify.PROFILE_EMAIL_SQL,
+                             {"company_id": auth.sole_company_id()})
     if profil_email:
         # Profilda email bor — zaxira manba ISHLASHI kerak
         eq(notify.recipient(st), profil_email, "profil emaili ishlatilmadi")
@@ -685,6 +835,51 @@ def test_telegram_toliq_tsikl():
         finally:
             smtplib.SMTP = orig
             notify.save_settings(TEST_SETTINGS)
+
+
+@case
+def test_telegram_sinov_platforma_tilida():
+    """Telegram SINOV xabari ham PLATFORMA TILIDA ketadi — haqiqiy
+    bildirishnoma bilan bir xil. Til almashsa — xabar ham almashadi.
+
+    BITTA xabar: sinov "haqiqiy xabar qanday keladi" ni ko'rsatadi, ya'ni
+    ulardan soni bilan ham farq qilmasligi kerak.
+    """
+    with _TgPatch() as tg:
+        # Jurnal SINOVGACHA (oldingi sinovlar yozgan bo'lishi mumkin)
+        jurnal_oldin = notify.sent_ids(notify.tg_kind(TEST_CHAT))
+
+        kutilgan = {
+            "uz": ("Sinov xabari —", "Toshkent shahri", "[SINOV]"),
+            "ru": ("Проверочное сообщение", "город Ташкент", "[ПРОВЕРКА]"),
+            "en": ("Test message —", "Tashkent city", "[TEST]"),
+        }
+        for lang, (nom, hudud, teg) in kutilgan.items():
+            tg.reset()
+            notify.save_settings(dict(TEST_SETTINGS, lang=lang))
+            res = notify.send_telegram_test()
+
+            eq(res["lang"], lang, "sinov boshqa tilda ketdi")
+            eq(len(tg.sent), 1, f"{lang}: BITTA xabar kutilgandi, "
+                                f"{len(tg.sent)} ta ketdi")
+            eq(res["errors"], [], f"{lang}: xato: {res['errors']}")
+            eq(res["chats"], [TEST_CHAT], "boshqa obunachiga ketdi")
+
+            matn = tg.sent[0][1]
+            ok(nom in matn, f"{lang}: namuna tender nomi tarjima qilinmadi")
+            ok(hudud in matn, f"{lang}: hudud tarjima qilinmadi")
+            ok(teg in matn, f"{lang}: [SINOV] belgisi tarjima qilinmadi")
+            ok("🧪" in matn, f"{lang}: sinov belgisi yo‘q")
+            ok(f"{TEST_BASE}/?tender=0" in matn, f"{lang}: namuna havolasi yo‘q")
+            # Boshqa tillarning matni ARALASHIB ketmasin
+            for boshqa, (n2, _, _) in kutilgan.items():
+                if boshqa != lang:
+                    ok(n2 not in matn, f"{lang}: xabarда {boshqa} matni bor")
+
+        # SINOV JURNALGA YOZILMAYDI (haqiqiy bildirishnomaga xalaqit bermasin)
+        eq(notify.sent_ids(notify.tg_kind(TEST_CHAT)), jurnal_oldin,
+           "sinov xabari notify_sent ga yozildi")
+        notify.save_settings(TEST_SETTINGS)
 
 
 @case
@@ -947,8 +1142,41 @@ def setup():
     for k, v in TEST_SMTP_ENV.items():
         _ORIGINAL_SMTP_ENV[k] = os.environ.get(k)
         os.environ[k] = v
-    row = db.query_one(notify.SETTINGS_GET_SQL)
+    # SQL bazada HAQIQATDA bor ustunlardan quriladi (Telegram/til patchlari
+    # qo'llanmagan bo'lishi mumkin) — shuning uchun konstanta emas, funksiya.
+    from api import auth
+    row = db.query_one(notify.settings_get_sql(),
+                       {"company_id": auth.sole_company_id()})
     _ORIGINAL_SETTINGS = dict(row) if row else None
+
+    # QOLDIQNI TANIYMIZ.
+    #
+    # Agar "asl holat" ning O'ZI sinov fiksturasi bo'lsa — bu oldingi
+    # yurish o'ldirilib qolgan qoldiq. Uni "asl" deb qaytarish
+    # QOLDIQNI ABADIYLASHTIRADI: har yurish uni suratga oladi va
+    # sodiqlik bilan tiklaydi.
+    #
+    # HAQIQATAN SODIR BO'LDI: `notify_settings.email` da
+    # `sinov@example.invalid` va `enabled = true` turgan edi, jurnal
+    # tarixida esa doim `enabled=false`.
+    global _QOLDIQ_TOPILDI
+    # BELGI FAQAT `TEST_EMAIL`.
+    #
+    # `TEST_BASE = "http://localhost:5173"` HAM ishlatilgan edi va u
+    # SOXTA topilma berdi: bu haqiqiy Vite manzili, ya'ni ishlab
+    # chiqarish uchun ham to'g'ri qiymat.
+    #
+    # QOIDA: belgi QONUNIY QIYMAT BO'LA OLMAYDIGAN narsa bo'lsin.
+    # `sinov@example.invalid` — RFC 2606 bo'yicha ataylab mavjud
+    # emas, ya'ni haqiqiy sozlamada UCHRAY OLMAYDI.
+    _QOLDIQ_TOPILDI = bool(
+        _ORIGINAL_SETTINGS
+        and _ORIGINAL_SETTINGS.get("email") == TEST_EMAIL)
+    if _QOLDIQ_TOPILDI:
+        print("[!] QOLDIQ TOPILDI: `notify_settings` da sinov qiymatlari "
+              "turibdi — oldingi yurish o'ldirilgan.")
+        print("    Tiklashda ASL holat emas, XAVFSIZ holat qo'yiladi "
+              "(enabled=false, email bo'sh).")
     notify.save_settings(TEST_SETTINGS)
 
 
@@ -971,11 +1199,29 @@ def teardown():
         else:
             os.environ[k] = v
 
-    if _ORIGINAL_SETTINGS:
+    if _QOLDIQ_TOPILDI:
+        # ASL HOLAT EMAS — u qoldiq edi. Xavfsiz holatga qo'yamiz:
+        # o'chirilgan va manzilsiz. Bu ishlab chiqarish uchun ham
+        # to'g'ri: yetkazib bo'lmaydigan manzil bilan yoqilgan
+        # bildirishnoma har tsiklda xato beradi.
+        notify.save_settings({"enabled": False, "email": None})
+        print("[i] sinov qoldig'i o'rniga XAVFSIZ holat qo'yildi.")
+    elif _ORIGINAL_SETTINGS:
         notify.save_settings(_ORIGINAL_SETTINGS)
     else:
         db.execute_returning(
             "DELETE FROM notify_settings WHERE id=1 RETURNING id")
+
+    # MUSBAT TASDIQ: oxirgi holat SINOV QIYMATI EMASLIGI.
+    #
+    # "Xato chiqmadi" yetarli emas — tiklash ishlaganini ISBOTLAYMIZ.
+    oxirgi = db.query_one("SELECT enabled, email, base_url "
+                          "FROM notify_settings WHERE id=1")
+    if oxirgi:
+        # FAQAT emaildan tekshiramiz — `base_url` qonuniy qiymat
+        # bo'lishi mumkin va uni tekshirish soxta xato berardi.
+        ok(oxirgi["email"] != TEST_EMAIL,
+           f"sinov emaili bazada QOLMADI (email={oxirgi['email']})")
     qoldi = int(db.scalar("SELECT count(*) FROM notify_sent WHERE email=%(e)s",
                           {"e": TEST_EMAIL}) or 0)
     print(f"\nTozalandi: {len(CREATED_SENT)} ta notify_sent yozuvi o'chirildi "

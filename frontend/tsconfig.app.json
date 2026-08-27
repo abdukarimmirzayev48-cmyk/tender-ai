@@ -21,10 +21,13 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
 
-    /* Vengeance UI komponentlari `@/lib/utils` dan import qiladi.
+    /* shadcn uslubidagi komponentlar `@/lib/utils` dan import qiladi.
        TypeScript 7 da `baseUrl` OLIB TASHLANGAN — `paths` endi tsconfig
        joylashgan katalogga nisbatan hisoblanadi. */
     "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Sinov fayli NODE skripti (jsdom, process) - brauzer buildiga
+  // kirmasligi kerak. U tsconfig.node.json da tekshiriladi.
+  "exclude": ["src/**/*.test.ts"]
 }

@@ -1,0 +1,430 @@
+/**
+ * BROKER NAVBATI — "bu tender kimga tegishli va u nima qildi?"
+ *
+ * `RequirementReview` DAN FARQI: u talabni TASDIQLASH uchun. Bu esa
+ * QATNASHISH QARORI uchun — broker "olindi / rad / kutilsin" deydi.
+ *
+ * UCHTA QOIDA INTERFEYSDA HAM AMAL QILADI
+ * ═══════════════════════════════════════
+ *
+ * 1. QAMROV KO'RINADI. `ball = 1.000` "mukammal" deb o'qiladi,
+ *    holbuki 7 mezondan 4 tasi UMUMAN o'lchanmagan bo'lishi mumkin.
+ *    Shuning uchun har qatorda "o'lchandi N/7" yoziladi.
+ *
+ * 2. SINOV PROFILI YORLIG'I YO'QOLMAYDI. Profil o'ylab topilgan
+ *    qiymatlar bilan to'ldirilgan bo'lsa, butun panel tepasida
+ *    ogohlantirish turadi — aks holda raqamlar haqiqiy deb
+ *    o'qilardi.
+ *
+ * 3. ESKIRGAN QAROR ENG TEPADA VA QIZIL. Broker allaqachon qaror
+ *    bergan, lekin tahlil o'zgargan — u YOLG'ON ISHONCH bilan
+ *    yuribdi. Bu navbatdagi eng shoshilinch holat.
+ */
+import { useCallback, useEffect, useState } from 'react'
+
+import { api } from '@/api'
+import { useI18n } from '@/i18n'
+import { cn } from '@/lib/utils'
+import { useFormat } from '@/format'
+import type {
+  AiQaror, InsonQaror, MalakaNatija, MalakaHolat, RoutingItem, RoutingMoslik,
+} from '@/types'
+
+import Icon from './Icon'
+import { Badge } from './ui/badge'
+import { Button } from './ui/button'
+import { Card } from './ui/card'
+import { Skeleton } from './ui/skeleton'
+
+/** AI qarorining rangi. `no_go` navbatga tushmaydi, lekin to'liqlik uchun. */
+const QAROR_RANG: Record<AiQaror, string> = {
+  go:     'bg-ok-soft text-ok-strong border-ok/30',
+  review: 'bg-soon-soft text-soon-strong border-soon/30',
+  no_go:  'bg-urgent-soft text-urgent-strong border-urgent/30',
+}
+
+/** Mezon hukmi rangi. `malumot_yoq` ATAYLAB kulrang — u xato emas. */
+const HOLAT_RANG: Record<MalakaHolat, string> = {
+  ok:          'text-ok',
+  risk:        'text-soon',
+  fail:        'text-urgent',
+  malumot_yoq: 'text-muted-foreground',
+}
+
+export default function BrokerQueue({
+  onOpenTender,
+}: {
+  onOpenTender?: (tenderId: number) => void
+}) {
+  const { t } = useI18n()
+  const fmt = useFormat()
+  const [items, setItems] = useState<RoutingItem[]>([])
+  const [moslik, setMoslik] = useState<RoutingMoslik | null>(null)
+  const [yuklanmoqda, setYuklanmoqda] = useState(true)
+  const [xato, setXato] = useState<string | null>(null)
+  const [ochilgan, setOchilgan] = useState<number | null>(null)
+  const [malaka, setMalaka] = useState<MalakaNatija | null>(null)
+  const [malakaYuk, setMalakaYuk] = useState(false)
+  const [izoh, setIzoh] = useState('')
+  const [band, setBand] = useState(false)
+
+  const yukla = useCallback(async () => {
+    setYuklanmoqda(true)
+    setXato(null)
+    try {
+      const r = await api.brokerNavbat(undefined, 100)
+      setItems(r.items)
+      setMoslik(r.moslik)
+    } catch (e) {
+      setXato(e instanceof Error ? e.message : String(e))
+    } finally {
+      setYuklanmoqda(false)
+    }
+  }, [])
+
+  useEffect(() => { void yukla() }, [yukla])
+
+  async function och(it: RoutingItem) {
+    if (ochilgan === it.id) { setOchilgan(null); setMalaka(null); return }
+    setOchilgan(it.id)
+    setIzoh('')
+    setMalaka(null)
+    setMalakaYuk(true)
+    try {
+      // VAQT O'LCHOVI shu yerdan boshlanadi. `yopildi` yozuv qayta
+      // ochilmaydi — server 404 qaytaradi va bu XATO EMAS.
+      if (it.holat === 'yangi') await api.brokerOch(it.id).catch(() => null)
+      setMalaka(await api.malaka(it.tender_id))
+    } catch (e) {
+      setXato(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMalakaYuk(false)
+    }
+  }
+
+  async function qaror(it: RoutingItem, q: InsonQaror) {
+    setBand(true)
+    try {
+      await api.brokerQaror(it.id, { qaror: q, izoh: izoh || undefined })
+      setOchilgan(null)
+      setMalaka(null)
+      setIzoh('')
+      await yukla()
+    } catch (e) {
+      setXato(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBand(false)
+    }
+  }
+
+  async function yangila() {
+    setBand(true)
+    try {
+      await api.brokerYangila()
+      await yukla()
+    } catch (e) {
+      setXato(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBand(false)
+    }
+  }
+
+  if (yuklanmoqda) return <Skeleton className="h-[420px] w-full rounded-xl" />
+
+  const eskirgan = items.filter((x) => x.ai_ozgardi).length
+
+  return (
+    <div className="space-y-3">
+      {/* SINOV PROFILI — eng tepada va yo'qolmaydi.
+          "147 ta tender navbatda" degan raqam o'ylab topilgan
+          qiymatlarni o'lchaydi; yorliqsiz u haqiqiy deb o'qilardi. */}
+      {moslik?.is_sample && (
+        <div className="flex items-start gap-2 rounded-lg border
+                        border-soon/40 bg-soon-soft px-3 py-2
+                        text-caption text-soon-strong">
+          <Icon name="alert" size={15} className="mt-px shrink-0" />
+          <div>
+            <b>{t('broker.sampleTitle')}</b> {t('broker.sampleBody')}
+          </div>
+        </div>
+      )}
+
+      {xato && (
+        <div className="rounded-lg border border-urgent/40 bg-urgent-soft
+                        px-3 py-2 text-caption text-urgent-strong">
+          {xato}
+        </div>
+      )}
+
+      <Card className="p-0">
+        <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
+          <Icon name="send" size={16} className="text-accent" />
+          <div className="text-body font-medium">{t('broker.title')}</div>
+          <span className="text-xs text-muted-foreground">
+            {t('broker.count', { n: items.length })}
+          </span>
+          {/* ESKIRGAN QAROR — eng shoshilinch raqam. */}
+          {eskirgan > 0 && (
+            <Badge className="border-urgent/30 bg-urgent-soft
+                              text-urgent-strong">
+              {t('broker.staleCount', { n: eskirgan })}
+            </Badge>
+          )}
+          <Button variant="ghost" size="sm" className="ml-auto"
+                  disabled={band} onClick={() => void yangila()}>
+            <Icon name="refresh" size={14} className="mr-1" />
+            {t('broker.refresh')}
+          </Button>
+        </div>
+
+        {/* MOSLIK — o'lchanmagan bo'lsa "0%" EMAS, "o'lchanmagan". */}
+        {moslik && (
+          <div className="border-b bg-muted/40 px-4 py-2 text-xs
+                          text-muted-foreground">
+            {moslik.olchandi ? (
+              <>
+                {t('broker.agreement', { n: moslik.inson_qarorlari })}
+                {moslik.qatorlar.map((r) => (
+                  <span key={`${r.ai_manba}-${r.ai_qaror}`} className="ml-2">
+                    {r.ai_qaror}: <b className="tabular text-foreground">
+                      {r.moslik_foiz ?? 0}%
+                    </b>
+                  </span>
+                ))}
+              </>
+            ) : (
+              // BITTA QARORDAN FOIZ CHIQMAYDI. `olchandi` false
+              // bo'lsa `qatorlar` ham bo'sh keladi — server tomonda.
+              <span>
+                {t('broker.notMeasured')}
+                {moslik.inson_qarorlari > 0 && (
+                  <> {t('broker.needMore', {
+                    n: moslik.inson_qarorlari,
+                    kerak: moslik.kerakli_qaror })}</>
+                )}
+              </span>
+            )}
+          </div>
+        )}
+
+        {items.length === 0 ? (
+          <div className="px-4 py-8 text-center text-body
+                          text-muted-foreground">
+            {t('broker.empty')}
+          </div>
+        ) : (
+          <ul className="divide-y">
+            {items.map((it) => (
+              <li key={it.id} className={cn(
+                'px-4 py-3',
+                it.ai_ozgardi && 'bg-urgent-soft/40')}>
+                <button
+                  type="button"
+                  className="flex w-full items-start gap-3 text-left"
+                  onClick={() => void och(it)}
+                >
+                  <div className="min-w-0 flex-1">
+                    {/* ESKIRGAN QAROR — nima o'zgargani AYNAN ko'rsatiladi.
+                        "Nimadir o'zgardi" foydasiz ogohlantirish. */}
+                    {it.ai_ozgardi && (
+                      <div className="mb-1 flex items-center gap-1.5
+                                      text-caption font-medium
+                                      text-urgent-strong">
+                        <Icon name="alert" size={13} />
+                        {t('broker.stale', {
+                          eski: it.ai_qaror_eski ?? '—',
+                          yangi: it.ai_qaror ?? '—',
+                          qaror: it.inson_qaror ?? '—',
+                        })}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {it.ai_qaror && (
+                        <Badge className={QAROR_RANG[it.ai_qaror]}>
+                          {t(`broker.decision.${it.ai_qaror}`)}
+                        </Badge>
+                      )}
+                      {it.ai_ball != null && (
+                        <span className="tabular text-micro
+                                         text-muted-foreground">
+                          {it.ai_ball.toFixed(2)}
+                        </span>
+                      )}
+                      {it.inson_qaror && (
+                        <Badge className="border-border bg-muted
+                                          text-muted-foreground">
+                          {t(`broker.human.${it.inson_qaror}`)}
+                        </Badge>
+                      )}
+                      {/* `erp_bor` GLOBAL bayroq — "integratsiya
+                          mavjudmi". `erp_ish` esa AYNAN SHU tender
+                          ERP da ochilganmi. Ilgari birinchisi
+                          ishlatilardi va har yopilgan qatorga
+                          "ERP da bor" yozilardi. */}
+                      {it.erp_ish && (
+                        <span className="text-micro text-muted-foreground">
+                          {t('broker.erp')}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 truncate text-body">
+                      {it.tender_name || `#${it.tender_id}`}
+                    </div>
+                    {/* SABAB qamrovni ham aytadi:
+                        "3/3 mezon o'tdi, 4 ta O'LCHANMADI" */}
+                    {it.ai_sabab && (
+                      <div className="mt-0.5 text-caption
+                                      text-muted-foreground">
+                        {it.ai_sabab}
+                      </div>
+                    )}
+                  </div>
+                  <div className="shrink-0 text-right text-caption
+                                  text-muted-foreground">
+                    {it.kun_qoldi != null && (
+                      <div className={cn('tabular',
+                        it.kun_qoldi < 3 && 'font-medium text-urgent')}>
+                        {t('broker.daysLeft', {
+                          n: Math.max(0, Math.round(it.kun_qoldi)) })}
+                      </div>
+                    )}
+                    {it.close_at && (
+                      <div className="tabular">{fmt.dateFmt(it.close_at)}</div>
+                    )}
+                    {it.totalcost != null && (
+                      <div className="tabular">
+                        {fmt.shortMoney(it.totalcost, it.currency)}
+                      </div>
+                    )}
+                  </div>
+                </button>
+
+                {ochilgan === it.id && (
+                  <div className="mt-3 rounded-lg border bg-muted/30 p-3">
+                    {malakaYuk && <Skeleton className="h-32 w-full" />}
+                    {malaka && <MalakaJadval n={malaka} />}
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <input
+                        className="min-w-40 flex-1 rounded-md border
+                                   bg-background px-2 py-1.5 text-caption"
+                        placeholder={t('broker.notePlaceholder')}
+                        value={izoh}
+                        onChange={(e) => setIzoh(e.target.value)}
+                      />
+                      {onOpenTender && (
+                        <Button variant="ghost" size="sm"
+                                onClick={() => onOpenTender(it.tender_id)}>
+                          <Icon name="external" size={14} className="mr-1" />
+                          {t('broker.openTender')}
+                        </Button>
+                      )}
+                      <Button size="sm" disabled={band}
+                              onClick={() => void qaror(it, 'olindi')}>
+                        {t('broker.human.olindi')}
+                      </Button>
+                      <Button variant="outline" size="sm" disabled={band}
+                              onClick={() => void qaror(it, 'kutilsin')}>
+                        {t('broker.human.kutilsin')}
+                      </Button>
+                      <Button variant="outline" size="sm" disabled={band}
+                              onClick={() => void qaror(it, 'rad')}>
+                        {t('broker.human.rad')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    </div>
+  )
+}
+
+
+/**
+ * Malaka mezonlari jadvali.
+ *
+ * QAMROV TEPADA: "o'lchandi 3/7" birinchi ko'rinadigan narsa
+ * bo'lishi kerak, aks holda `ok` belgilari to'liq tekshiruv
+ * taassurotini berardi.
+ */
+function MalakaJadval({ n }: { n: MalakaNatija }) {
+  const { t } = useI18n()
+  return (
+    <div>
+      <div className="mb-2 flex flex-wrap items-center gap-2
+                      text-caption text-muted-foreground">
+        <span>
+          {t('broker.measured', {
+            n: n.olchandi, jami: n.jami_mezon })}
+        </span>
+        <span>·</span>
+        <span className="text-ok">{t('broker.okN', { n: n.ok })}</span>
+        {n.risk > 0 && (
+          <span className="text-soon">
+            {t('broker.riskN', { n: n.risk })}
+          </span>
+        )}
+        {n.fail > 0 && (
+          <span className="text-urgent">
+            {t('broker.failN', { n: n.fail })}
+          </span>
+        )}
+        {n.profil_toldirilgan != null && (
+          <>
+            <span>·</span>
+            <span>
+              {t('broker.profile', {
+                n: n.profil_toldirilgan, jami: n.profil_jami ?? 0 })}
+            </span>
+          </>
+        )}
+      </div>
+
+      <ul className="space-y-1.5">
+        {n.criteria.map((m) => (
+          <li key={m.key} className="text-caption">
+            <div className="flex items-start gap-2">
+              <span className={cn('w-24 shrink-0 font-medium',
+                                  HOLAT_RANG[m.status])}>
+                {t(`broker.status.${m.status}`)}
+              </span>
+              <span className="w-40 shrink-0">{m.label}</span>
+              <span className="min-w-0 flex-1 text-muted-foreground">
+                {m.izoh}
+              </span>
+            </div>
+            {/* DALIL — hukm QAYSI talabdan kelgani. Busiz broker
+                "nega no_go?" degan savolga javob topolmasdi. */}
+            {m.dalillar.length > 0 && (
+              <div className="ml-26 mt-0.5 space-y-0.5 pl-2">
+                {m.dalillar.slice(0, 3).map((d) => (
+                  <div key={d.requirement_id}
+                       className="text-micro text-muted-foreground">
+                    · {d.name}
+                    {d.qiymat ? `: ${d.qiymat}` : ''}
+                    {/* TASDIQLANMAGAN talab — hukm kuchi past.
+                        Buni yashirish yolg'on ishonch berardi. */}
+                    {d.tasdiqlanmagan && (
+                      <span className="ml-1 text-soon">
+                        {t('broker.unconfirmed')}
+                      </span>
+                    )}
+                  </div>
+                ))}
+                {m.dalillar.length > 3 && (
+                  <div className="text-micro text-muted-foreground">
+                    +{m.dalillar.length - 3}
+                  </div>
+                )}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}

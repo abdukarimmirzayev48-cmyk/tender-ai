@@ -147,10 +147,41 @@ shuning uchun `export`/`set` qilish shart emas.
 
 ```bash
 python run_etl.py                 # tez: barcha reyestrlar + kategoriyalar
-python run_etl.py --with-docs     # + hujjatlar (sekinroq)
+python run_etl.py --with-docs     # + hujjat MATNI (sekinroq)
+python run_etl.py --only-rag      # FAQAT RAG quvuri (manba ETL siz)
 python run_etl.py --limit 3       # SINOV: har manbadan 3 yozuv (tez)
 python run_etl.py --sequential    # parallelsiz (nosozlikni izlashda)
 ```
+
+### RAG quvuri — chat YANGI tenderni ko'rishi uchun
+
+Chat hujjatga tayanadi. Hujjat matni chiqarilmasa, bo'lakka bo'linmasa
+yoki vektorlanmasa — chat o'sha tender haqida HECH NARSA bilmaydi.
+
+```bash
+python run_etl.py --only-rag --vector-budget 1000
+```
+
+Uch qadam ketma-ket: hujjat matni -> bo'laklash -> vektorlash
+(+ tender darajasidagi vektorlar).
+
+| Bayroq | Ma'nosi |
+|---|---|
+| `--with-rag` | RAG qadamlarini oddiy yurishga qo'shadi |
+| `--only-rag` | FAQAT RAG: manba ETL, kategoriya, bildirishnoma o'tkaziladi |
+| `--vector-budget N` | bir yurishda N ta bo'lak (standart 3000). 0 = vektorlashsiz |
+| `--docs-catalog` | ESKI tor qamrov (2026-08 da amalda tugagan) |
+
+**Nega alohida vazifa:** vektorlash ~3 bo'lak/s, ya'ni soatlar oladi.
+Soatlik yurishga qo'shilsa BILDIRISHNOMA o'shancha kechikadi.
+
+**Nega byudjet:** tanlash sharti `embedding IS NULL` — uzilgan yurish
+qolganidan davom etadi. 1000 bo'lak ~5 daqiqa; soat sayin yurgizilsa
+kuniga 24 000, ya'ni tekis yuk.
+
+**Bir vaqtda ikki yurish:** `pg_try_advisory_lock` himoya qiladi —
+ikkinchisi kutmasdan chiqadi. Ketma-ket 3 martadan ko'p o'tkazilsa
+jurnalga `!! OGOHLANTIRISH` yoziladi (osilib qolgan jarayon belgisi).
 
 **Sinov to'plami:**
 ```bash
@@ -176,7 +207,52 @@ psql "dbname=xtxarid user=a1234 host=localhost" -c \
 ## Sozlash
 
 - **Chastota:** `com.birja.etl.plist` da `StartInterval` (soniyada). 3600 = soatlik.
-- **Hujjatlar ham:** wrapper `run_etl.py` ni `--with-docs` bilan chaqirishi uchun
-  `run_etl.sh` da o'zgartiring (sekinroq bo'ladi).
+- **Hujjatlar va RAG:** alohida vazifa sifatida yurgiziladi (yuqoriga
+  qarang), soatlik yurishga qo'shilmaydi — aks holda bildirishnoma
+  kechikadi.
+- **Windows jadvali:**
+  ```
+  TenderAI-ETL-Hourly   soat boshida   run_etl.py
+  TenderAI-RAG          soat :30 da    run_etl.py --only-rag --vector-budget 3000
+  ```
+  `:30` ATAYLAB: advisory qulf ikkita RAG yurishini himoya qiladi,
+  lekin manba ETL bilan CPU raqobatini emas.
+
+  **Ikkalasi ham `register_task.ps1` DAN ro'yxatdan o'tkaziladi:**
+
+  ```powershell
+  .\register_task.ps1                          # ETL, soat boshida
+  .\register_task.ps1 -Rag -VectorBudget 3000  # RAG, soat :30 da
+  ```
+
+  RAG vazifasi avval QO'LDA yaratilgan edi va shu sababli STANDART
+  sozlamalarni olgan: `DisallowStartIfOnBatteries=True`,
+  `StopIfGoingOnBatteries=True`, `WakeToRun=False`. Noutbuk rozetkadan
+  uzilishi bilan yurish o'lardi. Jurnalda uchta "RAG boshlandi" bor
+  edi, **bitta ham "RAG tugadi" yo'q**, va vektorlash 38 242 da
+  muzlab qolgandi. Endi sozlama bir manbadan keladi.
+
+  **Byudjet 1000 dan 3000 ga oshirildi.** O'lchandi: to'liq RAG
+  yurishi 1000 lik byudjet bilan 5 daqiqa (vektorlash 2.8 daqiqa),
+  ya'ni 50 daqiqalik oynaning 90% i behuda turardi. 3000 bilan ~9
+  daqiqa va navbat 37 soat o'rniga ~12 soatda tugaydi. Vektorlash
+  uzilsa xavf yo'q: `embedding IS NULL` sharti tanlaydi, ya'ni
+  keyingi yurish qolganidan davom etadi.
+
+- **CHEKLOV — `LogonType = Interactive`.** Ikkala vazifa ham FAQAT
+  siz tizimga kirgan holda yuradi. Tizimdan chiqilsa yoki seans
+  uzilsa bola-jarayonlar `0xC000013A` bilan o'ladi. Jurnalda bu
+  14 kunda 100 marta uchradi (~10% yurish, uchta har xil skriptda,
+  kunning har soatida) — ehtimoliy sabab aynan shu, lekin **isbotlanmagan**.
+
+  Doimiy ishlashi uchun ADMIN huquqi kerak:
+
+  ```powershell
+  .\register_task.ps1 -RunWhenLoggedOff          # ETL
+  .\register_task.ps1 -Rag -RunWhenLoggedOff     # RAG
+  ```
+
+  Vaqtinchalik yumshatish: `run_etl.py` majburan to'xtatilgan bolani
+  BIR MARTA qayta urinadi (haqiqiy `Ctrl+C` bo'lmasa).
 - **Buzilish ogohlantirishi:** `etl_run.status='error'` bo'lsa dashboard
   ko'rsatkichi qizil bo'ladi. Email/Telegram ogohlantirish — keyingi qadam.

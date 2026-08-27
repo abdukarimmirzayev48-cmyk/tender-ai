@@ -33,7 +33,7 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
-from api import db
+from api import db, erp_stock
 
 # ---------------------------------------------------------------------------
 # 1. Ustun sarlavhalarini tanish
@@ -112,10 +112,15 @@ _APOSTROPHES = "‘’ʻʼ`´"   # ‘ ’ ʻ ʼ ` ´
 _SPACES = "    "                     # NBSP va boshqa probellar
 
 
-def _norm_header(s: Any) -> str:
+def norm_header(s: Any) -> str:
     """Sarlavhani solishtirishga tayyorlaydi: kichik harf, apostroflarni
     yagona ' ga keltirish, qavs ichini olib tashlash, ortiqcha belgilarni
-    tozalash. "Tannarx (UZS)*" -> "tannarx"."""
+    tozalash. "Tannarx (UZS)*" -> "tannarx".
+
+    OCHIQ (nomi `_` siz): `api/compliance.py` dagi hujjatlar importi ham shu
+    quvurni ishlatadi — sarlavhani tanish qoidasi ikki joyda ayrilib
+    ketmasligi uchun.
+    """
     if s is None:
         return ""
     t = unicodedata.normalize("NFKC", str(s)).strip().lower()
@@ -132,7 +137,7 @@ def _norm_header(s: Any) -> str:
 
 # Eng uzun alias birinchi — "tannarx" "narx" dan ustun bo'lishi uchun
 _ALIAS_INDEX: List[Tuple[str, str]] = sorted(
-    ((_norm_header(a), f) for f, al in COLUMN_ALIASES.items() for a in al),
+    ((norm_header(a), f) for f, al in COLUMN_ALIASES.items() for a in al),
     key=lambda x: -len(x[0]),
 )
 
@@ -140,7 +145,7 @@ _ALIAS_INDEX: List[Tuple[str, str]] = sorted(
 def _match_alias(header: str) -> Optional[str]:
     """Sarlavha -> maydon nomi. Avval aniq moslik, keyin ichiga kirish
     (eng uzun alias g'olib: "Tannarx, so'm" -> cost_price, "narx" emas)."""
-    h = _norm_header(header)
+    h = norm_header(header)
     if not h:
         return None
     for alias, field in _ALIAS_INDEX:
@@ -260,7 +265,7 @@ def _split_keywords(raw: Any) -> List[str]:
 _NAZORAT_BELGI = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
-def _cell_text(raw: Any) -> Optional[str]:
+def cell_text(raw: Any) -> Optional[str]:
     if raw is None:
         return None
     v = _NAZORAT_BELGI.sub("", str(raw)).strip()
@@ -390,7 +395,7 @@ def parse_rows(rows: List[List[Any]], mapping: Dict[str, int], header_idx: int,
         row_errors: List[Dict] = []
 
         # --- Nomi (majburiy) ---
-        name = _cell_text(cell(row, "name"))
+        name = cell_text(cell(row, "name"))
         if not name:
             row_errors.append(_err(row_no, "name", None,
                                    "Mahsulot nomi bo‘sh — qator qabul qilinmadi."))
@@ -419,7 +424,7 @@ def parse_rows(rows: List[List[Any]], mapping: Dict[str, int], header_idx: int,
                 nums[field] = val
 
         # --- Valyuta ---
-        currency = _cell_text(cell(row, "currency"))
+        currency = cell_text(cell(row, "currency"))
         if currency:
             currency = currency.upper()[:8]
             if not re.fullmatch(r"[A-Z]{3}", currency):
@@ -428,7 +433,7 @@ def parse_rows(rows: List[List[Any]], mapping: Dict[str, int], header_idx: int,
                 currency = None
 
         # --- Kategoriya (xato emas — ogohlantirish) ---
-        category = _cell_text(cell(row, "category_code"))
+        category = cell_text(cell(row, "category_code"))
         if category and known_categories is not None and category not in known_categories:
             warnings.append(_err(
                 row_no, "category_code", category,
@@ -451,7 +456,7 @@ def parse_rows(rows: List[List[Any]], mapping: Dict[str, int], header_idx: int,
             "row": row_no,
             "name": name,
             "keywords": _split_keywords(cell(row, "keywords")),
-            "unit": _cell_text(cell(row, "unit")),
+            "unit": cell_text(cell(row, "unit")),
             "stock_qty": nums.get("stock_qty"),
             "cost_price": nums.get("cost_price"),
             "price": nums.get("price"),
@@ -466,29 +471,29 @@ def parse_rows(rows: List[List[Any]], mapping: Dict[str, int], header_idx: int,
 # 5. Bazaga yozish
 # ---------------------------------------------------------------------------
 _BATCH_INSERT_SQL = """
-INSERT INTO catalog_import_batch (id, filename, source, rows_total, rows_ok,
-                                  rows_error, inserted, updated, errors)
-VALUES (%(id)s, %(filename)s, %(source)s, %(rows_total)s, %(rows_ok)s,
-        %(rows_error)s, 0, 0, %(errors)s)
+INSERT INTO catalog_import_batch (id, company_id, filename, source, rows_total,
+                                  rows_ok, rows_error, inserted, updated, errors)
+VALUES (%(id)s, %(company_id)s, %(filename)s, %(source)s, %(rows_total)s,
+        %(rows_ok)s, %(rows_error)s, 0, 0, %(errors)s)
 """
 
 _BATCH_FINISH_SQL = """
 UPDATE catalog_import_batch SET inserted=%(inserted)s, updated=%(updated)s
-WHERE id=%(id)s
+WHERE id=%(id)s AND company_id=%(company_id)s
 """
 
 _FIND_SQL = """
 SELECT id FROM catalog_product
-WHERE lower(name) = lower(%(name)s)
+WHERE lower(name) = lower(%(name)s) AND company_id = %(company_id)s
 ORDER BY id LIMIT 1
 """
 
 _INSERT_SQL = """
 INSERT INTO catalog_product
-    (name, category_code, keywords, unit, price, currency, notify,
+    (company_id, name, category_code, keywords, unit, price, currency, notify,
      stock_qty, stock_unit, stock_updated_at, cost_price, import_batch_id)
 VALUES
-    (%(name)s, %(category_code)s, %(keywords)s, %(unit)s, %(price)s,
+    (%(company_id)s, %(name)s, %(category_code)s, %(keywords)s, %(unit)s, %(price)s,
      %(currency)s, TRUE, %(stock_qty)s, %(stock_unit)s,
      CASE WHEN %(stock_qty)s IS NULL THEN NULL ELSE now() END,
      %(cost_price)s, %(batch_id)s)
@@ -514,7 +519,7 @@ UPDATE catalog_product SET
                             THEN stock_updated_at ELSE now() END,
     import_batch_id  = %(batch_id)s,
     updated_at       = now()
-WHERE id = %(id)s
+WHERE id = %(id)s AND company_id = %(company_id)s
 """
 
 
@@ -528,7 +533,8 @@ def _known_categories() -> Optional[set]:
         return None
 
 
-def import_catalog(data: bytes, filename: str, *, dry_run: bool = True) -> Dict[str, Any]:
+def import_catalog(data: bytes, filename: str, company_id: int,
+                   *, dry_run: bool = True) -> Dict[str, Any]:
     """P0-4 asosiy kirish nuqtasi.
 
     dry_run=True  — faqat tekshiradi, bazaga HECH NARSA yozilmaydi
@@ -537,6 +543,10 @@ def import_catalog(data: bytes, filename: str, *, dry_run: bool = True) -> Dict[
 
     Mavjud mahsulot bilan moslashtirish: NOM bo'yicha, katta-kichik harf
     farqsiz. Topilsa yangilanadi, topilmasa qo'shiladi.
+
+    `company_id` (J1.6) — import FAQAT shu kompaniya katalogiga tegadi.
+    Dublikat qidirish ham shu doirada: ikki kompaniyada bir xil nomli
+    mahsulot bo'lishi MUMKIN va ular birlashtirilmaydi.
     """
     rows, fmt = read_table(data, filename)
     if not rows:
@@ -570,10 +580,24 @@ def import_catalog(data: bytes, filename: str, *, dry_run: bool = True) -> Dict[
         "preview": [_preview(r) for r in ok[:50]],
     }
 
+    # QOLDIQNING EGASI — ERP (5B-1). Excel dagi "Qoldiq" ustuni bazaga
+    # yoziladi (u bizning ustunimiz va boshlang'ich qoldiq uchun manba
+    # bo'lib qoladi), lekin ENDI U KO'RSATILMAYDI: interfeys va cheklist
+    # ERP jurnalidan hisoblangan qoldiqni oladi.
+    #
+    # Buni JIM QOLDIRIB BO'LMAYDI: odam Excel dan 500 dona yuklab,
+    # ro'yxatda boshqa raqamni ko'rsa importni buzuq deb o'ylardi.
+    if "stock_qty" in mapping and erp_stock.in_use():
+        result["stock_note"] = (
+            "Qoldiq endi ERP omborida yuritiladi. Fayldagi \"Qoldiq\" ustuni "
+            "saqlanadi, lekin ro‘yxatda ERP jurnalidan hisoblangan qoldiq "
+            "ko‘rsatiladi. Boshlang‘ich qoldiqni ERP → Ombor bo‘limida "
+            "bir marta ko‘chirib olishingiz mumkin.")
+
     if dry_run or not ok:
         # Dry-run: nima bo'lishini OLDINDAN aytamiz (yozmasdan)
         if ok:
-            result["inserted"], result["updated"] = _forecast(ok)
+            result["inserted"], result["updated"] = _forecast(ok, company_id)
         return result
 
     batch_id = str(uuid.uuid4())
@@ -583,15 +607,18 @@ def import_catalog(data: bytes, filename: str, *, dry_run: bool = True) -> Dict[
         try:
             with conn.cursor() as cur:
                 cur.execute(_BATCH_INSERT_SQL, {
-                    "id": batch_id, "filename": filename, "source": fmt,
+                    "id": batch_id, "company_id": company_id,
+                    "filename": filename, "source": fmt,
                     "rows_total": result["rows_total"], "rows_ok": result["rows_ok"],
                     "rows_error": result["rows_error"],
                     "errors": _json.dumps(errors, ensure_ascii=False),
                 })
                 for r in ok:
-                    cur.execute(_FIND_SQL, {"name": r["name"]})
+                    cur.execute(_FIND_SQL, {"name": r["name"],
+                                            "company_id": company_id})
                     found = cur.fetchone()
                     params = {
+                        "company_id": company_id,
                         "name": r["name"],
                         "category_code": r["category_code"],
                         "keywords": r["keywords"],
@@ -612,7 +639,8 @@ def import_catalog(data: bytes, filename: str, *, dry_run: bool = True) -> Dict[
                         cur.execute(_INSERT_SQL, params)
                         inserted += 1
                 cur.execute(_BATCH_FINISH_SQL, {
-                    "id": batch_id, "inserted": inserted, "updated": updated})
+                    "id": batch_id, "company_id": company_id,
+                    "inserted": inserted, "updated": updated})
             conn.commit()
         except Exception:
             conn.rollback()
@@ -624,10 +652,11 @@ def import_catalog(data: bytes, filename: str, *, dry_run: bool = True) -> Dict[
     return result
 
 
-def _forecast(ok: List[Dict[str, Any]]) -> Tuple[int, int]:
+def _forecast(ok: List[Dict[str, Any]], company_id: int) -> Tuple[int, int]:
     """Dry-run uchun: nechtasi qo'shiladi / nechtasi yangilanadi."""
     try:
-        rows = db.query("SELECT lower(name) AS n FROM catalog_product")
+        rows = db.query("SELECT lower(name) AS n FROM catalog_product "
+                        "WHERE company_id = %(company_id)s", {"company_id": company_id})
     except Exception:
         return len(ok), 0
     existing = {r["n"] for r in rows}

@@ -1,0 +1,169 @@
+/**
+ * SINOV: O'LIK RANG SINFLARI
+ * ══════════════════════════
+ * Nega alohida sinov: Tailwind v4 mavjud bo'lmagan tokendan sinf
+ * YARATMAYDI va XATO HAM BERMAYDI. `text-danger` yozilsa, element
+ * shunchaki meros rangda qoladi — hech qayerda hech narsa aytilmaydi.
+ *
+ * HAQIQATAN SODIR BO'LDI. `index.css` da `--color-ok`, `--color-soon`,
+ * `--color-urgent` bor; `danger` va `warn` YO'Q. Lekin uchta komponent
+ * ularni ishlatardi:
+ *
+ *     ChatPanel.tsx         3 ta
+ *     RequirementReview.tsx 8 ta
+ *     ToolBadge.tsx         3 ta
+ *
+ * Qurilgan CSS da tekshirildi: `text-ok` BOR, `text-danger` YO'Q.
+ * Ya'ni OGOHLANTIRISH va XATO signallari rangsiz chiqardi — aynan
+ * ko'rinishi eng zarur joyda.
+ *
+ * Ishga tushirish (loyiha ildizidan):
+ *     cd frontend && npm run test:colors
+ */
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const SRC = join(fileURLToPath(new URL('.', import.meta.url)))
+
+let pass = 0
+let fail = 0
+
+function check(nom: string, shart: boolean, izoh = ''): void {
+  if (shart) {
+    pass++
+    console.log(`  OK   ${nom}`)
+  } else {
+    fail++
+    console.log(`  XATO ${nom}${izoh ? `\n       ${izoh}` : ''}`)
+  }
+}
+
+/** Barcha `.tsx` / `.ts` fayllar (sinovlardan tashqari). */
+function fayllar(dir: string, out: string[] = []): string[] {
+  for (const nom of readdirSync(dir)) {
+    const p = join(dir, nom)
+    if (statSync(p).isDirectory()) {
+      fayllar(p, out)
+    } else if (/\.tsx?$/.test(nom) && !/\.test\.tsx?$/.test(nom)) {
+      out.push(p)
+    }
+  }
+  return out
+}
+
+/**
+ * `index.css` dagi `@theme` blokida e'lon qilingan rang tokenlari.
+ *
+ * FAQAT `@theme` bloki: yuqoridagi `:root` da `--ok`, `--soon` kabi
+ * XOM o'zgaruvchilar ham bor, lekin Tailwind sinfni `--color-*` dan
+ * yaratadi. Ikkalasini aralashtirish sinovni yolg'on qilardi —
+ * `--ok` bor, `--color-ok` yo'q bo'lsa ham "joyida" derdi.
+ */
+function tokenlar(prefiks: string): Set<string> {
+  const css = readFileSync(join(SRC, 'index.css'), 'utf8')
+  const i = css.indexOf('@theme')
+  if (i < 0) return new Set()
+  const blok = css.slice(i)
+  const out = new Set<string>()
+  const re = new RegExp(`--${prefiks}-([a-z0-9-]+)\\s*:`, 'g')
+  for (const m of blok.matchAll(re)) out.add(m[1])
+  return out
+}
+
+/**
+ * Kodda ishlatilgan rang sinflari.
+ *
+ * `-soft` / `-strong` qo'shimchasi va `/40` shaffofligi olib
+ * tashlanadi — Tailwind ularni asosiy tokendan yasaydi.
+ */
+const SINF_RE =
+  /\b(text|bg|border|ring|fill|stroke|from|via|to|divide|outline|shadow)-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?:\/\d+)?\b/g
+
+/**
+ * YO'NALISH qo'shimchalari: `border-l-ok` da token `ok`, `l-ok` emas.
+ * Birinchi yurishda skaner aynan shu sababli `l-ok`, `l-soon`,
+ * `l-urgent`, `l-primary`, `l-border` deb SOXTA xato bergan edi.
+ */
+const YONALISH = /^(?:l|r|t|b|x|y|s|e|se|ss|ee|es)-/
+
+/** Tailwind'ning O'Z so'zlari — token emas. */
+const OLDINDAN = new Set([
+  'transparent', 'current', 'inherit', 'white', 'black', 'auto', 'none',
+  'left', 'right', 'top', 'bottom', 'center', 'x', 'y', 'b', 't', 'l', 'r',
+  'clip', 'ellipsis', 'nowrap', 'wrap', 'balance', 'pretty',
+  'sm', 'md', 'lg', 'xl', 'full', 'px', 'dashed', 'dotted', 'solid',
+  'hidden', 'visible', 'scroll', 'contain', 'cover', 'start', 'end',
+  'micro', 'caption', 'body', 'xs', '2xl', '3xl', 'base', 'inner',
+  'inset', 'offset', 'width', 'reverse', 'opacity',
+])
+
+function main(): void {
+  console.log('='.repeat(62))
+  console.log("RANG SINFLARI — o'lik sinf CSS bermaydi va XATO ham bermaydi")
+  console.log('='.repeat(62))
+
+  const bor = tokenlar('color')
+  // SHRIFT o'lchamlari ham `text-` prefiksi bilan yoziladi
+  // (`text-lead`, `text-caption`) — ular rang EMAS.
+  const shrift = tokenlar('text')
+  check('@theme blokida rang tokenlari topildi', bor.size > 10,
+        `${bor.size} ta rang, ${shrift.size} ta shrift o'lchami`)
+  // MUSBAT TASDIQ: sinov haqiqatan token o'qiyaptimi.
+  for (const kutilgan of ['ok', 'soon', 'urgent', 'accent', 'muted']) {
+    check(`token e'lon qilingan: ${kutilgan}`, bor.has(kutilgan))
+  }
+
+  // Ma'lum O'LIK nomlar — ular QAYTIB KELMASIN.
+  for (const olik of ['danger', 'warn']) {
+    check(`\`${olik}\` tokeni YO'Q (kutilgan holat)`, !bor.has(olik),
+          "agar qo'shilgan bo'lsa, bu sinov yangilansin")
+  }
+
+  const ishlatilgan = new Map<string, string[]>()
+  for (const p of fayllar(SRC)) {
+    const src = readFileSync(p, 'utf8')
+    for (const m of src.matchAll(SINF_RE)) {
+      const yordamchi = m[1]
+      // YO'NALISH qo'shimchasi olib tashlanadi: `border-l-ok` -> `ok`.
+      const toliq = m[2].replace(YONALISH, '')
+      // `-soft` / `-strong` qo'shimchasini olib tashlaymiz.
+      const asos = toliq.replace(/-(soft|strong|foreground)$/, '')
+      if (OLDINDAN.has(asos) || /^\[|\d/.test(asos)) continue
+      // `text-lead` SHRIFT o'lchami, rang emas.
+      if (yordamchi === 'text' && shrift.has(asos)) continue
+      const ro = ishlatilgan.get(asos) ?? []
+      if (!ro.includes(p)) ro.push(p)
+      ishlatilgan.set(asos, ro)
+    }
+  }
+
+  check('kodda rang sinflari topildi', ishlatilgan.size > 3,
+        `${ishlatilgan.size} ta token ishlatilgan`)
+
+  const olik: string[] = []
+  for (const [tok, joylar] of ishlatilgan) {
+    if (!bor.has(tok)) {
+      olik.push(`${tok} (${joylar.length} fayl: `
+                + joylar.map((x) => x.split(/[\\/]/).pop()).join(', ') + ')')
+    }
+  }
+  check("HAR ishlatilgan rang tokeni @theme da E'LON QILINGAN",
+        olik.length === 0,
+        olik.length ? olik.join('\n       ') : '')
+
+  // SKANERNI SINAYMIZ. Salbiy sinov jimgina "o'tib" ketishi eng oson.
+  const soxta = 'className="text-qqqfake bg-ok-soft"'
+  const topilgan = [...soxta.matchAll(SINF_RE)].map((m) => m[2])
+  check('skaner soxta tokenni TOPADI', topilgan.includes('qqqfake'),
+        topilgan.join(', '))
+  check('skaner haqiqiy tokenni ham ko`radi',
+        topilgan.includes('ok-soft'), topilgan.join(', '))
+
+  console.log('\n' + '='.repeat(62))
+  console.log(`NATIJA: ${pass}/${pass + fail} o'tdi`)
+  console.log('='.repeat(62))
+  process.exit(fail ? 1 : 0)
+}
+
+main()

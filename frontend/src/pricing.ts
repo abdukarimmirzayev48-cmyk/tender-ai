@@ -61,6 +61,11 @@ export interface CalcInput {
   min_margin_percent?: Raw
 }
 
+import type { TKey, TVars } from './i18n'
+
+/** Tarjima funksiyasi — `useI18n().t`. */
+export type T = (key: TKey, vars?: TVars) => string
+
 export interface CalcItem {
   name: string
   unit: string | null
@@ -164,8 +169,16 @@ function fmt(x: number): string {
   return s
 }
 
-const step = (key: string, label: string, rule: string, formula: string, value: number): CalcStep => ({
-  key, label, rule, formula, value: round2(value),
+// Bosqich matnlari tilga bog'liq, lekin HISOB emas — shuning uchun `t`
+// modulga PARAMETR sifatida kiradi (`calculate(inp, t)`). Modul darajasidagi
+// "joriy til" o'zgaruvchisi bo'lganda funksiya sof bo'lmasdi va uni tilsiz
+// sinash ham qiyinlashardi.
+const step = (t: T, key: string, formula: string, value: number): CalcStep => ({
+  key,
+  label: t(`prc.s.${key}` as TKey),
+  rule: t(`prc.r.${key}` as TKey),
+  formula,
+  value: round2(value),
 })
 const msg = (code: string, message: string): CalcMessage => ({ code, message })
 
@@ -179,7 +192,7 @@ function emptyTotals(): CalcTotals {
   }
 }
 
-export function calculate(inp: CalcInput = {}): CalcResult {
+export function calculate(inp: CalcInput = {}, t: T): CalcResult {
   inp = inp || {}
   const errors: CalcMessage[] = []
   const warnings: CalcMessage[] = []
@@ -194,15 +207,15 @@ export function calculate(inp: CalcInput = {}): CalcResult {
     const qty = num(raw.qty)
     const unitCost = num(raw.unit_cost)
     const cur = String(raw.currency || '').trim().toUpperCase() || null
-    const name = raw.name || `Pozitsiya ${i + 1}`
+    const name = raw.name || t('prc.item', { n: i + 1 })
     if (cur && !seen.includes(cur)) seen.push(cur)
     if (qty < 0) {
       errors.push(msg('qty_negative',
-        `«${name}»: miqdor manfiy (${fmt(qty)}) — bo'lishi mumkin emas.`))
+        t('prc.err.qtyNegative', { name, v: fmt(qty) })))
     }
     if (unitCost < 0) {
       errors.push(msg('cost_negative',
-        `«${name}»: birlik tannarxi manfiy (${fmt(unitCost)}) — bo'lishi mumkin emas.`))
+        t('prc.err.costNegative', { name, v: fmt(unitCost) })))
     }
     items.push({
       name,
@@ -220,8 +233,7 @@ export function calculate(inp: CalcInput = {}): CalcResult {
   if (seen.length > 1 || (currency && seen.length > 0 && seen.some((c) => c !== currency))) {
     const all = Array.from(new Set(currency ? seen.concat([currency]) : seen)).sort()
     errors.push(msg('currency_mix',
-      `Valyutalar aralashgan (${all.join(', ')}). Tizimda kurs konvertatsiyasi ` +
-      "yo'q — turli valyutali summalar qo'shilmaydi. Bitta valyutaga keltiring."))
+      t('prc.err.currencyMix', { list: all.join(', ') })))
   }
 
   // --- 3. Parametrlar ---
@@ -232,22 +244,22 @@ export function calculate(inp: CalcInput = {}): CalcResult {
   const logFix = num(inp.logistics_fixed, DEFAULTS.logistics_fixed)
   const vat = num(inp.vat_percent, DEFAULTS.vat_percent)
 
-  const checks: [string, number, string][] = [
-    ['markup_percent', markup, 'Ustama'],
-    ['risk_reserve_percent', riskPct, 'Xavf zaxirasi (%)'],
-    ['risk_reserve_fixed', riskFix, 'Xavf zaxirasi (summa)'],
-    ['logistics_percent', logPct, 'Logistika (%)'],
-    ['logistics_fixed', logFix, 'Logistika (summa)'],
-    ['vat_percent', vat, 'QQS'],
+  const checks: [string, number, TKey][] = [
+    ['markup_percent', markup, 'prc.p.markup'],
+    ['risk_reserve_percent', riskPct, 'prc.p.riskPct'],
+    ['risk_reserve_fixed', riskFix, 'prc.p.riskFixed'],
+    ['logistics_percent', logPct, 'prc.p.logiPct'],
+    ['logistics_fixed', logFix, 'prc.p.logiFixed'],
+    ['vat_percent', vat, 'prc.p.vat'],
   ]
   for (const [key, val, label] of checks) {
     if (val < 0) {
       errors.push(msg(`${key}_negative`,
-        `${label} manfiy (${fmt(val)}) — bo'lishi mumkin emas.`))
+        t('prc.err.paramNegative', { label: t(label), v: fmt(val) })))
     }
   }
   if (vat > 100) {
-    errors.push(msg('vat_range', `QQS ${fmt(vat)}% — 100% dan katta bo'la olmaydi.`))
+    errors.push(msg('vat_range', t('prc.err.vatRange', { v: fmt(vat) })))
   }
 
   let manual: number | null = null
@@ -255,7 +267,7 @@ export function calculate(inp: CalcInput = {}): CalcResult {
     manual = round2(num(inp.manual_price))
     if (manual < 0) {
       errors.push(msg('manual_negative',
-        `Qo'lda kiritilgan narx manfiy (${fmt(manual)}).`))
+        t('prc.err.manualNegative', { v: fmt(manual) })))
     }
   }
 
@@ -282,8 +294,7 @@ export function calculate(inp: CalcInput = {}): CalcResult {
   }
 
   if (!items.length) {
-    warnings.push(msg('no_items',
-      "Pozitsiya kiritilmagan — tannarx 0 deb olindi. Hisob faqat sozlamalar bo'yicha ishlaydi."))
+    warnings.push(msg('no_items', t('prc.warn.noItems')))
   }
 
   // --- 4. Bosqichlar ---
@@ -293,70 +304,53 @@ export function calculate(inp: CalcInput = {}): CalcResult {
   const parts = items.slice(0, MAX_FORMULA_ITEMS)
     .map((it) => `${fmt(it.qty)} × ${fmt(it.unit_cost)}`)
   if (items.length > MAX_FORMULA_ITEMS) {
-    parts.push(`…(yana ${items.length - MAX_FORMULA_ITEMS} ta)`)
+    parts.push(t('prc.f.more', { n: items.length - MAX_FORMULA_ITEMS }))
   }
-  steps.push(step('cost_base', 'Tannarx (pozitsiyalar)',
-    'Σ (miqdor × birlik tannarxi)',
-    parts.length ? parts.join(' + ') : '0', costBase))
+  steps.push(step(t, 'cost_base', parts.length ? parts.join(' + ') : '0', costBase))
 
   const logistics = round2((costBase * logPct) / 100 + logFix)
-  steps.push(step('logistics', 'Logistika',
-    'tannarx × logistika% + logistika (belgilangan)',
+  steps.push(step(t, 'logistics',
     `${fmt(costBase)} × ${fmt(logPct)}% + ${fmt(logFix)}`, logistics))
 
   const riskBase = round2(costBase + logistics)
   const risk = round2((riskBase * riskPct) / 100 + riskFix)
-  steps.push(step('risk_reserve', 'Xavf zaxirasi',
-    '(tannarx + logistika) × zaxira% + zaxira (belgilangan)',
+  steps.push(step(t, 'risk_reserve',
     `(${fmt(costBase)} + ${fmt(logistics)}) × ${fmt(riskPct)}% + ${fmt(riskFix)}`, risk))
 
   const totalCost = round2(costBase + logistics + risk)
-  steps.push(step('total_cost', 'Jami xarajat',
-    'tannarx + logistika + xavf zaxirasi',
+  steps.push(step(t, 'total_cost',
     `${fmt(costBase)} + ${fmt(logistics)} + ${fmt(risk)}`, totalCost))
 
   const markupSum = round2((totalCost * markup) / 100)
-  steps.push(step('markup', "Ustama (ko'zlangan foyda)",
-    'jami xarajat × ustama%',
-    `${fmt(totalCost)} × ${fmt(markup)}%`, markupSum))
+  steps.push(step(t, 'markup', `${fmt(totalCost)} × ${fmt(markup)}%`, markupSum))
 
   const priceExVat = round2(totalCost + markupSum)
-  steps.push(step('price_ex_vat', 'Taklif narxi (QQSsiz)',
-    'jami xarajat + ustama',
+  steps.push(step(t, 'price_ex_vat',
     `${fmt(totalCost)} + ${fmt(markupSum)}`, priceExVat))
 
   const vatSum = round2((priceExVat * vat) / 100)
-  steps.push(step('vat', 'QQS',
-    'taklif narxi (QQSsiz) × QQS%',
-    `${fmt(priceExVat)} × ${fmt(vat)}%`, vatSum))
+  steps.push(step(t, 'vat', `${fmt(priceExVat)} × ${fmt(vat)}%`, vatSum))
 
   const recommended = round2(priceExVat + vatSum)
-  steps.push(step('recommended_price', 'Tavsiya etilgan taklif narxi',
-    'taklif narxi (QQSsiz) + QQS',
+  steps.push(step(t, 'recommended_price',
     `${fmt(priceExVat)} + ${fmt(vatSum)}`, recommended))
 
   const manualUsed = manual !== null
   const finalPrice = manualUsed ? manual! : recommended
-  steps.push(step('final_price', 'Yakuniy narx',
-    "qo'lda kiritilgan narx (bo'lmasa — tavsiya etilgan)",
-    manualUsed ? `qo'lda: ${fmt(finalPrice)}` : `tavsiya: ${fmt(finalPrice)}`,
+  steps.push(step(t, 'final_price',
+    t(manualUsed ? 'prc.f.manual' : 'prc.f.recommended', { v: fmt(finalPrice) }),
     finalPrice))
 
   const finalExVat = round2(finalPrice / (1 + vat / 100))
-  steps.push(step('final_ex_vat', 'Yakuniy narx (QQSsiz)',
-    'yakuniy narx ÷ (1 + QQS%)',
+  steps.push(step(t, 'final_ex_vat',
     `${fmt(finalPrice)} ÷ (1 + ${fmt(vat)}%)`, finalExVat))
 
   const profit = round2(finalExVat - totalCost)
-  steps.push(step('profit', 'Kutilayotgan foyda',
-    'yakuniy narx (QQSsiz) − jami xarajat',
-    `${fmt(finalExVat)} − ${fmt(totalCost)}`, profit))
+  steps.push(step(t, 'profit', `${fmt(finalExVat)} − ${fmt(totalCost)}`, profit))
 
   const profitPercent = finalExVat ? round2((profit / finalExVat) * 100) : 0
-  steps.push(step('profit_percent', 'Foyda ulushi, %',
-    'foyda ÷ yakuniy narx (QQSsiz) × 100',
-    finalExVat ? `${fmt(profit)} ÷ ${fmt(finalExVat)} × 100`
-      : 'narx 0 — ulush hisoblanmaydi',
+  steps.push(step(t, 'profit_percent',
+    finalExVat ? `${fmt(profit)} ÷ ${fmt(finalExVat)} × 100` : t('prc.f.zeroPrice'),
     profitPercent))
 
   // --- 5. Byudjetga nisbat ---
@@ -366,37 +360,33 @@ export function calculate(inp: CalcInput = {}): CalcResult {
   if (budget !== null && budgetCurrency && currency && budgetCurrency !== currency) {
     comparable = false
     warnings.push(msg('budget_currency',
-      `Tender byudjeti ${budgetCurrency}, smeta ${currency} — kurs ` +
-      "konvertatsiyasi yo'q, taqqoslanmadi."))
+      t('prc.warn.budgetCurrency', { bcur: budgetCurrency, cur: currency })))
   }
   if (comparable && budget !== null) {
     budgetLeft = round2(budget - finalPrice)
-    steps.push(step('budget_left', 'Byudjet zaxirasi',
-      'tender byudjeti − yakuniy narx',
+    steps.push(step(t, 'budget_left',
       `${fmt(budget)} − ${fmt(finalPrice)}`, budgetLeft))
     budgetRatio = budget ? round2((finalPrice / budget) * 100) : 0
-    steps.push(step('budget_ratio', 'Byudjetga nisbatan, %',
-      'yakuniy narx ÷ tender byudjeti × 100',
-      budget ? `${fmt(finalPrice)} ÷ ${fmt(budget)} × 100`
-        : 'byudjet 0 — nisbat hisoblanmaydi',
+    steps.push(step(t, 'budget_ratio',
+      budget ? `${fmt(finalPrice)} ÷ ${fmt(budget)} × 100` : t('prc.f.zeroBudget'),
       budgetRatio))
     if (budgetLeft < 0) {
       warnings.push(msg('over_budget',
-        `Yakuniy narx tender byudjetidan ${fmt(Math.abs(budgetLeft))} ${currency || ''} ga yuqori — taklif rad etilishi mumkin.`
+        t('prc.warn.overBudget', { v: fmt(Math.abs(budgetLeft)), cur: currency || '' })
           .replace(/ {2}/g, ' ')))
     }
   }
 
   // --- 6. Ogohlantirishlar ---
   if (profit < 0) {
-    warnings.push(msg('loss', `Zarar: foyda ${fmt(profit)} ${currency || ''}`.trim() + '.'))
+    warnings.push(msg('loss',
+      t('prc.warn.loss', { v: fmt(profit), cur: currency || '' }).replace(/ {2}/g, ' ')))
   } else if (profit === 0) {
-    warnings.push(msg('zero_profit', 'Foyda nolga teng — narx aynan tannarx darajasida.'))
+    warnings.push(msg('zero_profit', t('prc.warn.zeroProfit')))
   }
   if (minMargin !== null && profitPercent < minMargin) {
     warnings.push(msg('below_min_margin',
-      `Foyda ulushi ${fmt(profitPercent)}% — kompaniya profilidagi ` +
-      `minimal maqbul chegara ${fmt(minMargin)}% dan past.`))
+      t('prc.warn.belowMinMargin', { v: fmt(profitPercent), min: fmt(minMargin) })))
   }
 
   const totals: CalcTotals = {

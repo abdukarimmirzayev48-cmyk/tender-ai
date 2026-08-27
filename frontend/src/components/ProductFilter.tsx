@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '@/api'
 import Icon from './Icon'
+import { useT } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 import type { ProductSuggestion } from '@/types'
 
@@ -29,18 +31,10 @@ interface ProductFilterProps {
 export default function ProductFilter({
   value = [], status, kind = 'product', label0, icon, placeholder, onChange,
 }: ProductFilterProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [items, setItems] = useState<ProductSuggestion[]>([])
-  const boxRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const onDoc = (e: MouseEvent) => {
-      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -59,67 +53,77 @@ export default function ProductFilter({
 
   const label = value.length === 0 ? label0
     : value.length === 1 ? value[0]
-      : `${value.length} ta`
+      : t('common.pcs', { n: value.length })
 
   return (
-    <div className="relative" ref={boxRef}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className={cn(
-          'inline-flex h-9 max-w-[220px] items-center gap-2 rounded-md border bg-card px-3',
-          'text-[13px] transition-colors hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none',
-          value.length ? 'border-primary text-primary' : 'border-input text-foreground',
-        )}
-      >
-        <Icon name={icon} size={14} />
-        <span className="truncate">{label}</span>
-        {value.length > 0 && (
-          <span
-            role="button"
-            tabIndex={0}
-            title="Tozalash"
-            className="-mr-1 ml-0.5 rounded px-1 text-base leading-none hover:bg-secondary"
-            onClick={(e) => { e.stopPropagation(); onChange([]) }}
-            onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onChange([]) } }}
-          >×</span>
-        )}
-      </button>
+    // TOZALASH TUGMASI PANEL TASHQARISIDA. Avval u ochish tugmasi ICHIDA,
+    // `role="button"` bilan yozilgan `<span>` edi — tugma ichida tugma
+    // HTML'da haqiqiy emas, va bosilganda `stopPropagation` bo'lmasa panel
+    // ham ochilib ketardi. Endi ikkalasi yonma-yon, ikkalasi ham `<button>`.
+    <div className={cn(
+      'inline-flex h-9 items-center rounded-md border bg-card transition-colors',
+      value.length ? 'border-primary text-primary' : 'border-input text-foreground',
+    )}>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              'inline-flex h-full max-w-[200px] items-center gap-2 rounded-md px-3 text-body',
+              'transition-colors hover:bg-accent',
+            )}
+          >
+            <Icon name={icon} size={14} />
+            <span className="truncate">{label}</span>
+          </button>
+        </PopoverTrigger>
 
-      {open && (
-        <div className="absolute left-0 top-[calc(100%+4px)] z-50 w-[300px] overflow-hidden rounded-lg border bg-popover shadow-lg">
+        <PopoverContent className="w-[19rem] max-w-[calc(100vw-2rem)]">
           <input
-            className="w-full border-b bg-transparent px-3 py-2 text-[13px] outline-none placeholder:text-muted-foreground"
+            className="w-full border-b bg-transparent px-3 py-2 text-base md:text-body outline-none placeholder:text-muted-foreground"
             type="text"
             autoFocus
+            aria-label={placeholder}
             placeholder={placeholder}
             value={text}
             onChange={(e) => setText(e.target.value)}
           />
-          <ul className="max-h-[300px] overflow-y-auto p-1.5">
+          <ul className="max-h-[18rem] overflow-y-auto p-1.5">
             {items.length === 0 && (
-              <li className="px-3 py-4 text-center text-[13px] text-muted-foreground">Topilmadi</li>
+              <li className="px-3 py-4 text-center text-body text-muted-foreground">{t('common.notFound')}</li>
             )}
             {items.map((p) => (
               <li key={p.name}>
-                <label className="flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] hover:bg-accent">
+                <label className="flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-body hover:bg-accent">
                   <Checkbox
                     checked={value.includes(p.name)}
                     onCheckedChange={() => toggle(p.name)}
                   />
-                  <span className="flex-1 truncate">{p.name}</span>
-                  <span className="tabular text-[11px] text-muted-foreground">{p.tender_count}</span>
+                  <span className="flex-1 truncate" title={p.name}>{p.name}</span>
+                  <span className="tabular text-micro text-muted-foreground">{p.tender_count}</span>
                 </label>
               </li>
             ))}
           </ul>
           {value.length > 0 && (
-            <div className="flex items-center justify-between border-t px-3 py-2 text-[12px] text-muted-foreground">
-              <span>{value.length} ta tanlandi</span>
-              <Button variant="ghost" size="sm" onClick={() => onChange([])}>Tozalash</Button>
+            <div className="flex items-center justify-between gap-2 border-t px-3 py-2 text-caption text-muted-foreground">
+              <span>{t('common.selectedN', { n: value.length })}</span>
+              <Button variant="ghost" size="sm" onClick={() => onChange([])}>{t('common.clear')}</Button>
             </div>
           )}
-        </div>
+        </PopoverContent>
+      </Popover>
+
+      {value.length > 0 && (
+        <button
+          type="button"
+          aria-label={t('filters.clearOne', { name: label0 })}
+          title={t('common.clear')}
+          className="mr-1 flex size-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-secondary"
+          onClick={() => onChange([])}
+        >
+          <Icon name="close" size={12} />
+        </button>
       )}
     </div>
   )

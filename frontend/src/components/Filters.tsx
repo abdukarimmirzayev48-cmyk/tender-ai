@@ -2,16 +2,18 @@ import { useEffect, useState } from 'react'
 import Icon from './Icon'
 import CategoryFilter from './CategoryFilter'
 import ProductFilter from './ProductFilter'
+import { useT } from '@/i18n'
+import type { TKey } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import type { Category, Region, Status } from '@/types'
 
-const SORT_OPTIONS = [
-  { value: 'close_at', label: 'Deadline (yaqin)' },
-  { value: '-totalcost', label: 'Summa (katta)' },
-  { value: '-publicated_at', label: 'Yangi e’lon' },
+const SORT_OPTIONS: { value: string; label: TKey }[] = [
+  { value: 'close_at', label: 'filters.sort.deadline' },
+  { value: '-totalcost', label: 'filters.sort.cost' },
+  { value: '-publicated_at', label: 'filters.sort.new' },
 ]
 
 // `Select` bo'sh qatorni qiymat sifatida qabul qilmaydi (Radix cheklovi:
@@ -46,6 +48,7 @@ interface FiltersProps {
 export default function Filters({
   filters, regions, statuses, categories, onChange, onReset, showSort = true,
 }: FiltersProps) {
+  const t = useT()
   const [q, setQ] = useState(filters.q || '')
   useEffect(() => { setQ(filters.q || '') }, [filters.q])
   useEffect(() => {
@@ -54,7 +57,7 @@ export default function Filters({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q])
 
-  const trigger = 'h-9 w-auto min-w-[130px] bg-card text-[13px]'
+  const trigger = 'h-9 w-auto min-w-[130px] bg-card text-body'
 
   return (
     <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -64,9 +67,9 @@ export default function Filters({
         <Icon name="search" size={15}
           className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
         <input
-          className="h-9 w-full rounded-md border border-input bg-card pl-9 pr-3 text-[13px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring placeholder:text-muted-foreground"
+          className="h-9 w-full rounded-md border border-input bg-card pl-9 pr-3 text-base md:text-body outline-none transition-colors focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring placeholder:text-muted-foreground"
           type="search"
-          placeholder="Tender, buyurtmachi, tovar…"
+          placeholder={t('filters.searchPlaceholder')}
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
@@ -74,13 +77,13 @@ export default function Filters({
 
       <ProductFilter
         value={filters.products} status={filters.status}
-        kind="product" label0="Mahsulot" icon="box"
-        placeholder="Mahsulot nomi — lotin yoki kirill"
+        kind="product" label0={t('filters.products')} icon="box"
+        placeholder={t('filters.productPlaceholder')}
         onChange={(products) => onChange({ products })} />
       <ProductFilter
         value={filters.services} status={filters.status}
-        kind="service" label0="Xizmatlar" icon="wrench"
-        placeholder="Xizmat nomi — lotin yoki kirill"
+        kind="service" label0={t('filters.services')} icon="wrench"
+        placeholder={t('filters.servicePlaceholder')}
         onChange={(services) => onChange({ services })} />
 
       <CategoryFilter tree={categories} value={filters.category}
@@ -90,7 +93,7 @@ export default function Filters({
         onValueChange={(v) => onChange({ status: toFilter(v) })}>
         <SelectTrigger className={trigger}><SelectValue /></SelectTrigger>
         <SelectContent>
-          <SelectItem value={ALL}>Barcha statuslar</SelectItem>
+          <SelectItem value={ALL}>{t('filters.allStatuses')}</SelectItem>
           {statuses.map((s) => (
             <SelectItem key={s.status_code} value={s.status_code}>
               {s.name || s.status_code}
@@ -103,7 +106,7 @@ export default function Filters({
         onValueChange={(v) => onChange({ region: toFilter(v) })}>
         <SelectTrigger className={trigger}><SelectValue /></SelectTrigger>
         <SelectContent>
-          <SelectItem value={ALL}>Butun respublika</SelectItem>
+          <SelectItem value={ALL}>{t('filters.allRegions')}</SelectItem>
           {regions.map((r) => (
             <SelectItem key={r.area_id} value={r.area_id}>{r.name || r.area_id}</SelectItem>
           ))}
@@ -112,11 +115,11 @@ export default function Filters({
 
       <Select value={toSelect(filters.currency)}
         onValueChange={(v) => onChange({ currency: toFilter(v) })}>
-        <SelectTrigger className="h-9 w-auto min-w-[110px] bg-card text-[13px]">
+        <SelectTrigger className="h-9 w-auto min-w-[110px] bg-card text-body">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value={ALL}>Valyuta</SelectItem>
+          <SelectItem value={ALL}>{t('filters.currency')}</SelectItem>
           <SelectItem value="UZS">UZS</SelectItem>
           <SelectItem value="USD">USD</SelectItem>
         </SelectContent>
@@ -127,13 +130,13 @@ export default function Filters({
           <SelectTrigger className={trigger}><SelectValue /></SelectTrigger>
           <SelectContent>
             {SORT_OPTIONS.map((o) => (
-              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+              <SelectItem key={o.value} value={o.value}>{t(o.label)}</SelectItem>
             ))}
           </SelectContent>
         </Select>
       )}
 
-      <Button variant="ghost" size="sm" onClick={onReset}>Tozalash</Button>
+      <Button variant="ghost" size="sm" onClick={onReset}>{t('common.clear')}</Button>
     </div>
   )
 }

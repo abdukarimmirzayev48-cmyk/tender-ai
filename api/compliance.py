@@ -40,7 +40,9 @@ ANIQLIK (precision) ustuvor: yalang'och kalit so'z juda ko'p soxta natija
         "аккредит"    -> "аккредитива" (akkreditiv, akkreditatsiya emas)
     Shuning uchun qoida bitta so'z emas, O'ZAKLAR YAQINLIGI + ISTISNOLAR.
 """
+import csv
 import datetime as _dt
+import io
 import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -531,7 +533,8 @@ def _pick_best(docs: Sequence[Dict[str, Any]],
     return sorted(docs, key=key)[0]
 
 
-def shape_document(r: Dict[str, Any]) -> Dict[str, Any]:
+def shape_document(r: Dict[str, Any],
+                   today: Optional[_dt.date] = None) -> Dict[str, Any]:
     """DB qatorini JSON ga tayyorlaydi (endpoint ham, cheklist ham ishlatadi)."""
     def iso(v):
         d = _as_date(v)
@@ -547,14 +550,22 @@ def shape_document(r: Dict[str, Any]) -> Dict[str, Any]:
         "file_name": r.get("file_name"),
         "file_ref": r.get("file_ref"),
         "note": r.get("note"),
-        "status": doc_status(r),
-        "days_left": _days_left(r.get("valid_until")),
+        "status": doc_status(r, today),
+        "days_left": _days_left(r.get("valid_until"), today),
     }
 
 
-def _days_left(valid_until: Any) -> Optional[int]:
+def _days_left(valid_until: Any,
+               today: Optional[_dt.date] = None) -> Optional[int]:
+    """Muddatgacha qolgan kunlar. `today` — SINOV uchun: `doc_status()` va
+    `build_checklist()` sanani parametr sifatida oladi, bu funksiya esa
+    avval har doim haqiqiy bugundan hisoblardi. Natijada bitta javob ichida
+    `status` bir sanaga, `days_left` boshqasiga qarab hisoblanib, sinov
+    fixture'lari eskirgach ular bir-biriga zid bo'lib qolardi."""
     vu = _as_date(valid_until)
-    return None if vu is None else (vu - _dt.date.today()).days
+    if vu is None:
+        return None
+    return (vu - (today or _dt.date.today())).days
 
 
 def build_checklist(detected: Sequence[Dict[str, Any]],
@@ -593,9 +604,10 @@ def build_checklist(detected: Sequence[Dict[str, Any]],
             "evidence_source": hit["source"] if hit else None,
             "confidence": hit["confidence"] if hit else None,
             "in_base": best is not None,
-            "document": shape_document(best) if best else None,
+            "document": shape_document(best, today) if best else None,
             "status": st,
-            "days_left": _days_left(best.get("valid_until")) if best else None,
+            "days_left": (_days_left(best.get("valid_until"), today)
+                          if best else None),
         })
 
     # Kompaniyada bor, lekin cheklistга kirmagan hujjatlar — ularni ham
@@ -610,7 +622,7 @@ def build_checklist(detected: Sequence[Dict[str, Any]],
         extra.append({
             "doc_type": code,
             "label": (BY_CODE.get(code) or {}).get("label") or code,
-            "document": shape_document(best) if best else None,
+            "document": shape_document(best, today) if best else None,
             "status": doc_status(best, today),
         })
     extra.sort(key=lambda x: x["label"])
@@ -692,13 +704,18 @@ _TEXT_LABELS = {
 _DOC_COLS = ("id, doc_type, name, number, issued_at, valid_until, "
              "file_name, file_ref, note, created_at, updated_at")
 
-DOCS_LIST_SQL = f"SELECT {_DOC_COLS} FROM company_document ORDER BY doc_type, id"
+# KOMPANIYA HUJJATLARI — ijarachi siri (J1.6). Har so'rovda `company_id`.
+# `id` bo'yicha murojaatda ham filtr bor: begona hujjatni taxmin qilib
+# tahrirlash/o'chirish mumkin bo'lmasin (IDOR) — javob 404 bo'ladi.
+DOCS_LIST_SQL = (f"SELECT {_DOC_COLS} FROM company_document "
+                 "WHERE company_id = %(company_id)s ORDER BY doc_type, id")
 
 DOC_INSERT_SQL = f"""
 INSERT INTO company_document
-    (doc_type, name, number, issued_at, valid_until, file_name, file_ref, note)
-VALUES (%(doc_type)s, %(name)s, %(number)s, %(issued_at)s, %(valid_until)s,
-        %(file_name)s, %(file_ref)s, %(note)s)
+    (company_id, doc_type, name, number, issued_at, valid_until,
+     file_name, file_ref, note)
+VALUES (%(company_id)s, %(doc_type)s, %(name)s, %(number)s, %(issued_at)s,
+        %(valid_until)s, %(file_name)s, %(file_ref)s, %(note)s)
 RETURNING {_DOC_COLS}
 """
 
@@ -708,11 +725,12 @@ UPDATE company_document SET
     issued_at=%(issued_at)s, valid_until=%(valid_until)s,
     file_name=%(file_name)s, file_ref=%(file_ref)s, note=%(note)s,
     updated_at=now()
-WHERE id=%(id)s
+WHERE id=%(id)s AND company_id=%(company_id)s
 RETURNING {_DOC_COLS}
 """
 
-DOC_DELETE_SQL = "DELETE FROM company_document WHERE id=%(id)s RETURNING id"
+DOC_DELETE_SQL = ("DELETE FROM company_document "
+                  "WHERE id=%(id)s AND company_id=%(company_id)s RETURNING id")
 
 
 def tender_texts(tender_id: int) -> List[Dict[str, str]]:
@@ -735,13 +753,721 @@ def tender_texts(tender_id: int) -> List[Dict[str, str]]:
     return out
 
 
-def check(tender_id: int) -> Dict[str, Any]:
-    """Tender bo'yicha to'liq cheklist — endpoint shuni qaytaradi."""
+def check(tender_id: int,
+          docs: Optional[Sequence[Dict[str, Any]]] = None,
+          company_id: Optional[int] = None) -> Dict[str, Any]:
+    """Tender bo'yicha to'liq cheklist — endpoint shuni qaytaradi.
+
+    `docs` — hujjatlar MANBASI. Berilmasa (odatiy hol) BROKER kompaniyasining
+    hujjatlari (`company_document`) olinadi — eski xatti-harakat o'zgarmaydi.
+
+    ERP 2-bosqichi buni MIJOZ nomidan qatnashish uchun ishlatadi: opportunity
+    kartasi o'z mijozining hujjatlarini uzatadi va cheklist o'shalarga qarab
+    hisoblanadi. Qoidalar (`detect_required`, `build_checklist`) o'zgarmaydi —
+    ular allaqachon manbadan mustaqil, sof funksiyalar.
+
+    NEGA `docs`, `client_id` EMAS: ERP — ALOHIDA loyiha va o'z bazasidagi
+    mijoz hujjatlarini o'zi biladi. `client_id` qabul qilinsa shu modul erp
+    sxemasidan o'qishi kerak bo'lardi; `docs` bilan esa u hech qanday tashqi
+    tizimni bilmaydi — kirish oddiy ro'yxat, qoidalar shu yerda qoladi.
+    """
     from api import db
 
     texts = tender_texts(tender_id)
-    docs = db.query(DOCS_LIST_SQL)
+    if docs is None:
+        # J1.6: hujjatlar SHU kompaniyaniki. `company_id` berilmasa —
+        # sessiyasiz chaqiruv (sinov, ERP): yagona faol hisob olinadi.
+        if company_id is None:
+            from api import auth
+            company_id = auth.sole_company_id()
+        docs = db.query(DOCS_LIST_SQL, {"company_id": company_id})
     res = build_checklist(detect_required(texts), docs)
     res["tender_id"] = tender_id
     res["text_sources"] = [t["source"] for t in texts]
     return res
+
+
+# ---------------------------------------------------------------------------
+# HUJJATLAR SHABLONI — yuklab olish va to'ldirilgan holda qaytarib yuklash
+# ===========================================================================
+# NEGA SHABLON FAYL, ekranda ro'yxat emas: hujjatlar bazasini birinchi marta
+# to'ldirish — 11 ta formani qo'lda kiritish demakdir. Shablon esa TALAB
+# ETILADIGAN HUJJATLAR RO'YXATI bilan OLDINDAN TO'LDIRILGAN holda keladi:
+# broker faqat raqam va sanalarni yozadi. Sinov ma'lumotini kiritish ham
+# shu yo'l bilan bir marta bajariladi.
+#
+# Ro'yxat DOC_TYPES dan olinadi — cheklist AYNAN shu turlarni tekshiradi,
+# ya'ni shablonni to'ldirish = cheklistni yopish. Ikkinchi (qo'lda yozilgan)
+# ro'yxat bo'lsa, ular vaqt o'tib bir-biridan ajralib ketardi.
+#
+# FORMAT: .xlsx / .csv — `api/importer.py` bilan bir xil quvur (o'sha
+# `read_table`, `norm_header`, `cell_text`). Katalog importi bilan bir xil
+# tajriba: dry-run -> ko'rish -> tasdiqlash.
+# ---------------------------------------------------------------------------
+#: Shablon ustunlari: (maydon, sarlavha, tanish uchun aliaslar)
+#: Ustunlar TARTIBI muhim emas — sarlavha bo'yicha tanilaadi (katalog importi
+#: bilan bir xil qoida), lekin fayldagi tartib shu ro'yxatga teng.
+TEMPLATE_COLUMNS: List[Tuple[str, str, Tuple[str, ...]]] = [
+    ("doc_type", "Hujjat turi", (
+        "hujjat turi", "tur", "turi", "tip", "тип документа", "тип",
+        "вид документа", "doc type", "type")),
+    ("name", "Hujjat nomi", (
+        "hujjat nomi", "nomi", "nom", "nomlanishi", "наименование",
+        "название документа", "название", "name", "document name")),
+    ("number", "Raqami", (
+        "raqami", "raqam", "seriya raqami", "номер", "№", "number", "no")),
+    ("issued_at", "Berilgan sana", (
+        "berilgan sana", "berilgan", "berilgan sanasi", "дата выдачи",
+        "выдан", "issued", "issue date", "issued at")),
+    ("valid_until", "Amal qiladi (gacha)", (
+        "amal qiladi", "amal qilish muddati", "muddati", "amal qiladi gacha",
+        "срок действия", "действует до", "годен до", "valid until",
+        "expiry", "expires")),
+    ("file_name", "Fayl nomi", (
+        "fayl nomi", "fayl", "имя файла", "файл", "file", "file name")),
+    ("file_ref", "Havola / yo‘l", (
+        "havola", "havola yo'l", "yo'l", "manzil", "ссылка", "путь",
+        "link", "url", "path", "file ref")),
+    ("note", "Izoh", (
+        "izoh", "izohlar", "примечание", "комментарий", "note", "comment")),
+]
+
+TEMPLATE_HEADERS: List[str] = [h for _, h, _ in TEMPLATE_COLUMNS]
+
+#: Sarlavha -> maydon. Eng uzun alias birinchi (katalog importidagi qoida:
+#: "amal qilish muddati" "muddati" dan ustun bo'lsin).
+_COL_ALIASES: List[Tuple[str, str]] = []
+
+#: "Amal qiladi" ustunidagi MUDDATSIZ so'zlari. Bo'sh katak ham muddatsiz
+#: degani (`valid_until = NULL`), lekin so'z bilan yozish aniqroq.
+PERPETUAL_WORDS = ("muddatsiz", "мудатсиз", "муддатсиз", "бессрочно",
+                   "бессрочный", "бессрочная", "cheklanmagan", "doimiy",
+                   "perpetual", "unlimited", "no expiry")
+
+#: Sana formatlari — Excel'dan matn sifatida kelganda.
+_DATE_FORMATS = ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y",
+                 "%Y/%m/%d", "%d.%m.%y")
+
+
+def _build_col_aliases() -> None:
+    pairs = []
+    for field, header, aliases in TEMPLATE_COLUMNS:
+        for a in (header, field) + aliases:
+            pairs.append((_importer().norm_header(a), field))
+    _COL_ALIASES[:] = sorted(set(pairs), key=lambda x: -len(x[0]))
+
+
+def _importer():
+    from api import importer  # kech import: compliance DB/openpyxl'siz yuklansin
+    return importer
+
+
+def _match_column(header: Any) -> Optional[str]:
+    """Sarlavha -> maydon nomi (aniq moslik, keyin ichiga kirish)."""
+    if not _COL_ALIASES:
+        _build_col_aliases()
+    h = _importer().norm_header(header)
+    if not h:
+        return None
+    for alias, field in _COL_ALIASES:
+        if h == alias:
+            return field
+    for alias, field in _COL_ALIASES:
+        if len(alias) >= 4 and alias in h:
+            return field
+    return None
+
+
+# --- "Hujjat turi" katagini kanonik kodga keltirish -------------------------
+#: canon(matn) -> doc_type kodi. Kod ("license"), o'zbekcha nom va uning
+#: qisqartmalari qabul qilinadi.
+#:
+#: Har kalit ALIFBO VARIANTLARI bilan indekslanadi (_stem_variants —
+#: aniqlash naqshlaridagi o'sha quvur): shablon Excel'da tahrirlanganda
+#: broker turni o'z yozuvida qayta yozishi mumkin — "Литсензия" (o'zbek
+#: kirill), "Litsenziya" (lotin), "Лицензия" (rus) uchalasi bir kodga
+#: tushishi kerak. Alifbo bilan bog'lanmagan atamalar (guvohnoma <->
+#: свидетельство) esa quyida ALOHIDA yoziladi — translit tarjimon emas.
+_TYPE_INDEX: Dict[str, str] = {}
+
+
+def _index_type(key: str, code: str) -> None:
+    for v in (canon(key),) + _stem_variants(key):
+        if v:
+            _TYPE_INDEX.setdefault(v, code)
+
+
+def _build_type_index() -> None:
+    for d in DOC_TYPES:
+        for key in (d["code"], d["label"]):
+            _index_type(key, d["code"])
+    # Qo'lda yoziladigan qisqa nomlar — broker to'liq nomni ko'chirmasligi mumkin
+    for alias, code in (
+        ("guvohnoma", "reg_certificate"),
+        ("davlat royxatidan otganlik guvohnomasi", "reg_certificate"),
+        ("свидетельство о регистрации", "reg_certificate"),
+        ("ishonchnoma", "power_of_attorney"),
+        ("доверенность", "power_of_attorney"),
+        ("litsenziya", "license"),
+        ("лицензия", "license"),
+        ("sertifikat", "conformity_certificate"),
+        ("muvofiqlik sertifikati", "conformity_certificate"),
+        ("сертификат соответствия", "conformity_certificate"),
+        ("kafolat xati", "guarantee_letter"),
+        ("гарантийное письмо", "guarantee_letter"),
+        ("bank rekvizitlari", "bank_details"),
+        ("банковские реквизиты", "bank_details"),
+        ("soliq malumotnomasi", "tax_reference"),
+        ("налоговая справка", "tax_reference"),
+        ("ustav", "charter"),
+        ("устав", "charter"),
+        ("moliyaviy hisobot", "financial_report"),
+        ("финансовая отчетность", "financial_report"),
+        ("texnik taklif", "technical_proposal"),
+        ("техническое предложение", "technical_proposal"),
+        ("narx taklifi", "price_offer"),
+        ("ценовое предложение", "price_offer"),
+    ):
+        _index_type(alias, code)
+
+
+def match_doc_type(raw: Any) -> Optional[str]:
+    """"Muvofiqlik sertifikati" / "conformity_certificate" -> kod.
+
+    Topilmasa None — qator xatoga tushadi. TAXMIN QILINMAYDI: noto'g'ri
+    turga tushgan hujjat cheklistda ko'rinmay qolardi, bu esa jimgina
+    yo'qotish bo'lardi.
+    """
+    if not _TYPE_INDEX:
+        _build_type_index()
+    text = str(raw or "").strip()
+    if not text:
+        return None
+
+    forms = [f for f in ((canon(text),) + _stem_variants(text)) if f]
+    for f in forms:
+        if f in _TYPE_INDEX:
+            return _TYPE_INDEX[f]
+    # Qavs ichidagi izoh yoki ortiqcha so'z bo'lsa — ichiga kirish bo'yicha.
+    # Eng UZUN kalit g'olib: "Litsenziya" "Muvofiqlik sertifikati" ichida
+    # yo'q, lekin qisqa kalitlar bir-birining ichiga tushib qolmasin.
+    for key in sorted(_TYPE_INDEX, key=len, reverse=True):
+        if len(key) >= 8 and any(key in f for f in forms):
+            return _TYPE_INDEX[key]
+    return None
+
+
+def parse_date(raw: Any) -> Tuple[Optional[_dt.date], Optional[str], bool]:
+    """Katakdan sana. Qaytaradi: (sana, xato, muddatsizmi).
+
+    Bo'sh katak -> (None, None, False): "ko'rsatilmagan". Bu MUDDATSIZ bilan
+    bir xil emas — chaqiruvchi ularni ajratadi (bo'sh "Amal qiladi" ustuni
+    ogohlantirish beradi, chunki cheklist NULL ni "cheklanmagan" deb o'qiydi).
+    """
+    if raw is None:
+        return None, None, False
+    if isinstance(raw, _dt.datetime):
+        return raw.date(), None, False
+    if isinstance(raw, _dt.date):
+        return raw, None, False
+
+    s = re.sub(r"\s+", " ", str(raw)).strip()
+    if not s:
+        return None, None, False
+    if canon(s) in {canon(w) for w in PERPETUAL_WORDS}:
+        return None, None, True
+    for fmt in _DATE_FORMATS:
+        try:
+            return _dt.datetime.strptime(s, fmt).date(), None, False
+        except ValueError:
+            continue
+    # Excel ba'zan sanani seriya raqami sifatida beradi (1899-12-30 dan kunlar)
+    if re.fullmatch(r"\d{5}", s):
+        try:
+            return (_dt.date(1899, 12, 30) + _dt.timedelta(days=int(s))), None, False
+        except (ValueError, OverflowError):
+            pass
+    return None, (f"sana o‘qilmadi: “{s}” — 31.12.2026 yoki 2026-12-31 "
+                  f"ko‘rinishida yozing (yoki “muddatsiz”)"), False
+
+
+# --- Shablon fayllarini yasash ---------------------------------------------
+#: Shablonning BIRINCHI qatori — TO'LDIRILGAN misol. Qolgan qatorlar
+#: DOC_TYPES dan avtomatik yasaladi, ya'ni shablon ro'yxat o'zgarsa
+#: o'z-o'zidan yangilanadi.
+_EXAMPLE_ROW = ["Davlat ro‘yxatidan o‘tganlik guvohnomasi",
+                "Davlat ro‘yxatidan o‘tganlik guvohnomasi",
+                "AA 1234567", "12.03.2019", "muddatsiz",
+                "guvohnoma.pdf", "https://disk.example/guvohnoma.pdf",
+                "misol qator — o‘chirib, o‘zingiznikini yozing"]
+
+TEMPLATE_HELP = [
+    "SHABLONNI QANDAY TO‘LDIRASIZ",
+    "",
+    "1. “Hujjat turi” ustuniga TEGMANG — u oldindan to‘ldirilgan. Bu ro‘yxat",
+    "   tender cheklisti tekshiradigan hujjatlarning to‘liq ro‘yxati.",
+    "2. O‘zingizda BOR hujjatlar qatorini to‘ldiring: raqami, sanalari, havolasi.",
+    "3. Hujjat YO‘Q bo‘lsa — qatorni BO‘SH qoldiring. Bo‘sh qator import",
+    "   qilinmaydi va cheklistda “yo‘q” bo‘lib turaveradi.",
+    "4. Bitta turda bir nechta hujjat bo‘lsa (masalan 2 ta litsenziya) —",
+    "   qatorni nusxalab, “Hujjat nomi” ni har xil yozing.",
+    "",
+    "USTUNLAR",
+    "   Hujjat turi         — o‘zgartirmang (kanonik ro‘yxat).",
+    "   Hujjat nomi         — hujjatning haqiqiy nomi. MAJBURIY.",
+    "   Raqami              — seriya/raqam, masalan “AA 1234567”.",
+    "   Berilgan sana       — 31.12.2026 yoki 2026-12-31.",
+    "   Amal qiladi (gacha) — muddat tugash sanasi yoki “muddatsiz”.",
+    "   Fayl nomi / Havola  — MVP da fayl saqlanmaydi, faqat nom va havola.",
+    "   Izoh                — ixtiyoriy.",
+    "",
+    "DIQQAT — “Amal qiladi” ustuni eng muhimi:",
+    "   Cheklist hujjat BOR-YO‘QLIGINI va MUDDATINI tekshiradi. Bo‘sh",
+    "   qoldirilsa muddat CHEKLANMAGAN deb o‘qiladi va hujjat doim yaroqli",
+    "   ko‘rinadi. Muddati bo‘lsa — albatta yozing.",
+    "",
+    "QAYTA YUKLASH",
+    "   Bir xil “Hujjat turi” + “Hujjat nomi” juftligi bazada topilsa qator",
+    "   YANGILANADI, topilmasa QO‘SHILADI. Ya'ni shablonni to‘ldirib qayta",
+    "   yuklash xavfsiz — nusxa ko‘paymaydi.",
+    "",
+    "FORMAT",
+    "   .xlsx yoki .csv. Google Sheets: Fayl > Yuklab olish > CSV.",
+]
+
+
+def _template_rows() -> List[List[Any]]:
+    """Shablon qatorlari: misol qator + har kanonik tur uchun bo'sh qator."""
+    rows: List[List[Any]] = [list(_EXAMPLE_ROW)]
+    for d in DOC_TYPES:
+        rows.append([d["label"], d["label"], "", "", "", "", "",
+                     "Bazaviy — deyarli har tenderda so‘raladi" if d["base"]
+                     else "Tenderga qarab so‘raladi"])
+    return rows
+
+
+def template_xlsx() -> bytes:
+    """Namunaviy .xlsx shablon: 1-varaq — hujjatlar, 2-varaq — yo'riqnoma."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Hujjatlar"
+    ws.append(TEMPLATE_HEADERS)
+    head_fill = PatternFill("solid", fgColor="E8EEF7")
+    for c in ws[1]:
+        c.font = Font(bold=True)
+        c.fill = head_fill
+        c.alignment = Alignment(vertical="center")
+
+    rows = _template_rows()
+    for r in rows:
+        ws.append(r)
+
+    # Misol qator — kulrang kursiv: to'ldirilishi kerak bo'lgan qatorlardan
+    # ko'rinib tursin (foydalanuvchi uni o'chiradi).
+    for c in ws[2]:
+        c.font = Font(italic=True, color="8A94A6")
+    # Bazaviy turlar — quyuqroq fon: qaysi biri deyarli har doim kerakligi
+    # faylning O'ZIDA ko'rinsin (ekranga qaytish shart bo'lmasin).
+    base_fill = PatternFill("solid", fgColor="F3F7FF")
+    for i, d in enumerate(DOC_TYPES, start=3):   # 1-sarlavha, 2-misol
+        if d["base"]:
+            for c in ws[i]:
+                c.fill = base_fill
+        ws.cell(row=i, column=1).font = Font(bold=True)
+
+    for i, w in enumerate([38, 38, 18, 16, 20, 20, 34, 40], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+
+    info = wb.create_sheet("Yo‘riqnoma")
+    for line in TEMPLATE_HELP:
+        info.append([line])
+    info.column_dimensions["A"].width = 82
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def template_csv() -> bytes:
+    """Namunaviy .csv shablon (Excel uchun BOM bilan — kirill buzilmasin)."""
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";", lineterminator="\r\n")
+    w.writerow(TEMPLATE_HEADERS)
+    for r in _template_rows():
+        w.writerow(r)
+    # Yo'riqnomani CSV ga qo'sha olmaymiz (bitta varaq) — izoh qatorlari
+    # bo'lib yozamiz. Import sarlavhani qidirganda ularni tashlab ketadi.
+    w.writerow([])
+    for line in TEMPLATE_HELP:
+        w.writerow(["# " + line if line else ""])
+    return buf.getvalue().encode("utf-8-sig")
+
+
+# --- To'ldirilgan shablonni o'qish ------------------------------------------
+def _find_header(rows: List[List[Any]], limit: int = 10
+                 ) -> Tuple[int, Dict[str, int], List[str]]:
+    """Sarlavha qatorini topadi. Shart: `doc_type` va `name` tanilgan bo'lsin."""
+    best: Optional[Tuple[int, Dict[str, int], List[str]]] = None
+    for i, row in enumerate(rows[:limit]):
+        if not row:
+            continue
+        mapping: Dict[str, int] = {}
+        unknown: List[str] = []
+        for idx, h in enumerate(row):
+            if h is None or str(h).strip() == "":
+                continue
+            f = _match_column(h)
+            if f and f not in mapping:
+                mapping[f] = idx
+            elif f is None:
+                unknown.append(str(h).strip())
+        if "doc_type" in mapping and "name" in mapping:
+            if best is None or len(mapping) > len(best[1]):
+                best = (i, mapping, unknown)
+    if best is None:
+        raise _importer().ImportFormatError(
+            "Sarlavha qatori topilmadi: “Hujjat turi” va “Hujjat nomi” "
+            "ustunlari bo‘lishi shart. Shablonni yuklab olib, o‘shani "
+            "to‘ldiring.")
+    return best
+
+
+#: Shablondagi TO'LDIRILMAGAN qatorni aniqlash uchun: bu maydonlardan
+#: hech biri bo'lmasa, qator "hali to'ldirilmagan" deb o'tkazib yuboriladi.
+#: NEGA: shablon 11 ta qator bilan keladi. Ularni "bor" deb import qilsak,
+#: cheklist hammasini YASHIL qilib qo'yardi — hujjat aslida yo'q bo'lsa ham.
+#: Bu jimgina yolg'on bo'lardi, shuning uchun bo'sh qator import QILINMAYDI.
+_FILLED_FIELDS = ("number", "issued_at", "valid_until", "file_name", "file_ref")
+
+
+def _is_example_row(row: Sequence[Any], mapping: Dict[str, int]) -> bool:
+    """Shablonning O'ZGARTIRILMAGAN misol qatorimi?
+
+    Misol qator TO'LDIRILGAN holda keladi (raqam, sanalar, havola) — aks
+    holda uni qanday to'ldirish kerakligi ko'rinmasdi. Lekin shu sababli u
+    "to'ldirilgan qator" tekshiruvidan o'tib ketadi va foydalanuvchi uni
+    o'chirishni unutsa, bazaga SOXTA hujjat yozilardi ("AA 1234567",
+    "https://disk.example/…"). O'lchangan holat: shablon o'zgartirilmasdan
+    yuklanganda bazada haqiqiy guvohnoma paydo bo'ldi.
+
+    Shuning uchun BARCHA kataklari misol bilan bir xil bo'lgan qator
+    o'tkazib yuboriladi. BITTA katakni tahrirlash yetarli — u holda qator
+    foydalanuvchining ma'lumoti hisoblanadi va normal import bo'ladi.
+    """
+    for i, field in enumerate(f for f, _, _ in TEMPLATE_COLUMNS):
+        idx = mapping.get(field)
+        got = "" if idx is None or idx >= len(row) or row[idx] is None else str(row[idx])
+        want = _EXAMPLE_ROW[i]
+        # Sana Excel'da date obyektiga aylanib qolishi mumkin — ikkalasini
+        # ham kanonik shaklga keltirib solishtiramiz.
+        if field in ("issued_at", "valid_until"):
+            d_got, _e, perp_got = parse_date(row[idx] if idx is not None
+                                             and idx < len(row) else None)
+            d_want, _e2, perp_want = parse_date(want)
+            if (d_got, perp_got) != (d_want, perp_want):
+                return False
+        elif canon(got).strip() != canon(str(want)).strip():
+            return False
+    return True
+
+
+def parse_document_rows(rows: List[List[Any]], mapping: Dict[str, int],
+                        header_idx: int
+                        ) -> Tuple[List[Dict[str, Any]], List[Dict], List[Dict]]:
+    """Xom jadvaldan tozalangan hujjatlar + xatolar + ogohlantirishlar.
+
+    `row` — FAYLDAGI qator raqami (Excel'da ko'rinadigani bilan bir xil).
+    """
+    imp = _importer()
+    ok: List[Dict[str, Any]] = []
+    errors: List[Dict] = []
+    warnings: List[Dict] = []
+    seen: Dict[Tuple[str, str], int] = {}
+
+    def cell(row: List[Any], field: str) -> Any:
+        idx = mapping.get(field)
+        if idx is None or idx >= len(row):
+            return None
+        v = row[idx]
+        return v if not isinstance(v, str) or v.strip() else None
+
+    def err(row_no: int, field: Optional[str], value: Any, message: str) -> Dict:
+        label = next((h for f, h, _ in TEMPLATE_COLUMNS if f == field), field or "—")
+        return {"row": row_no, "column": label, "field": field,
+                "value": None if value is None else str(value)[:120],
+                "message": message}
+
+    skipped: List[str] = []          # to'ldirilmagan shablon qatorlari
+    example_skipped = False          # o'zgartirilmagan misol qator uchramadimi
+
+    for i in range(header_idx + 1, len(rows)):
+        row = rows[i]
+        row_no = i + 1
+        if not row or all(c is None or str(c).strip() == "" for c in row):
+            continue
+
+        # CSV shablonining oxiridagi yo'riqnoma qatorlari ("# ...") — izoh.
+        # Ular xato ham, ogohlantirish ham emas: fayl shunday yasалgan.
+        first = next((str(c).strip() for c in row if c is not None
+                      and str(c).strip()), "")
+        if first.startswith("#"):
+            continue
+
+        # O'zgartirilmagan misol qator — foydalanuvchining ma'lumoti emas
+        if _is_example_row(row, mapping):
+            example_skipped = True
+            continue
+
+        raw_type = cell(row, "doc_type")
+        name = imp.cell_text(cell(row, "name"))
+
+        # To'ldirilmagan shablon qatori — o'tkazamiz. Shablon 11 ta qator
+        # bilan keladi, ularning ko'pi bo'sh qolishi ODATIY hol, shuning
+        # uchun har biriga alohida ogohlantirish emas — oxirida BITTA
+        # yig'ma xabar (aks holda hisobot shovqinga to'lardi).
+        if not any(cell(row, f) is not None for f in _FILLED_FIELDS):
+            skipped.append(imp.cell_text(raw_type) or name or f"{row_no}-qator")
+            continue
+
+        row_errors: List[Dict] = []
+
+        doc_type = match_doc_type(raw_type)
+        if not doc_type:
+            row_errors.append(err(
+                row_no, "doc_type", raw_type,
+                "Hujjat turi tanilmadi. Shablondagi tayyor nomlardan birini "
+                "qoldiring (masalan “Litsenziya / faoliyat ruxsatnomasi”)."))
+        if not name:
+            row_errors.append(err(row_no, "name", None,
+                                  "Hujjat nomi bo‘sh — qator qabul qilinmadi."))
+        elif len(name) > 300:
+            row_errors.append(err(row_no, "name", name,
+                                  "Nom juda uzun (300 belgidan ko‘p)."))
+
+        issued, e_iss, _ = parse_date(cell(row, "issued_at"))
+        if e_iss:
+            row_errors.append(err(row_no, "issued_at", cell(row, "issued_at"),
+                                  f"Berilgan sana — {e_iss}."))
+        valid, e_val, perpetual = parse_date(cell(row, "valid_until"))
+        if e_val:
+            row_errors.append(err(row_no, "valid_until", cell(row, "valid_until"),
+                                  f"Amal qilish muddati — {e_val}."))
+
+        if issued and valid and valid < issued:
+            row_errors.append(err(
+                row_no, "valid_until", cell(row, "valid_until"),
+                "Amal qilish muddati berilgan sanadan oldin — sanalarni "
+                "tekshiring."))
+
+        key = (doc_type or "", (name or "").lower())
+        if not row_errors and key in seen:
+            row_errors.append(err(
+                row_no, "name", name,
+                f"Bu tur va nom faylda takrorlangan ({seen[key]}-qatorda ham "
+                f"bor). Nomini farqlang yoki qatorni o‘chiring."))
+
+        if row_errors:
+            errors.extend(row_errors)
+            continue
+
+        seen[key] = row_no
+
+        # Muddat KO'RSATILMAGAN (bo'sh, "muddatsiz" ham yozilmagan) — cheklist
+        # buni "cheklanmagan" deb o'qiydi va hujjat doim yaroqli ko'rinadi.
+        # Jim qolmaymiz: bu foydalanuvchi kutmagan natija bo'lishi mumkin.
+        if valid is None and not perpetual:
+            warnings.append(err(
+                row_no, "valid_until", None,
+                "Amal qilish muddati ko‘rsatilmagan — hujjat MUDDATSIZ deb "
+                "hisoblanadi va cheklistda hech qachon “tugagan” bo‘lmaydi."))
+
+        ok.append({
+            "row": row_no,
+            "doc_type": doc_type,
+            "label": BY_CODE[doc_type]["label"],
+            "name": name,
+            "number": imp.cell_text(cell(row, "number")),
+            "issued_at": issued,
+            "valid_until": valid,
+            "file_name": imp.cell_text(cell(row, "file_name")),
+            "file_ref": imp.cell_text(cell(row, "file_ref")),
+            "note": imp.cell_text(cell(row, "note")),
+        })
+
+    if example_skipped:
+        warnings.append({
+            "row": 0, "column": "—", "field": None, "value": None,
+            "message": ("Shablondagi namunaviy misol qator o‘tkazib yuborildi "
+                        "(u o‘zgartirilmagan). Uni o‘chirib qo‘yishingiz "
+                        "mumkin."),
+        })
+
+    if skipped:
+        shown = ", ".join(skipped[:6]) + ("…" if len(skipped) > 6 else "")
+        warnings.append({
+            "row": 0, "column": "—", "field": None, "value": None,
+            "message": (f"{len(skipped)} ta qator to‘ldirilmagan va o‘tkazib "
+                        f"yuborildi ({shown}). Ular cheklistda “yo‘q” bo‘lib "
+                        f"qoladi."),
+        })
+
+    return ok, errors, warnings
+
+
+#: Qayta yuklashda nusxa ko'paymasin: tur + nom (harf registri farqsiz).
+DOC_FIND_SQL = """
+SELECT id FROM company_document
+WHERE doc_type = %(doc_type)s AND lower(name) = lower(%(name)s)
+  AND company_id = %(company_id)s
+ORDER BY id LIMIT 1
+"""
+
+DOC_IMPORT_UPDATE_SQL = """
+UPDATE company_document SET
+    number       = COALESCE(%(number)s, number),
+    issued_at    = COALESCE(%(issued_at)s, issued_at),
+    -- Muddat ATAYIN COALESCE emas: shablonda bo'sh qoldirilgan "Amal qiladi"
+    -- MUDDATSIZ degani. COALESCE bo'lsa eski (tugagan) sana qolib ketardi va
+    -- foydalanuvchi yangilaganini ko'rmasdi.
+    valid_until  = %(valid_until)s,
+    file_name    = COALESCE(%(file_name)s, file_name),
+    file_ref     = COALESCE(%(file_ref)s, file_ref),
+    note         = COALESCE(%(note)s, note),
+    updated_at   = now()
+WHERE id = %(id)s AND company_id = %(company_id)s
+"""
+
+
+def parse_document_file(data: bytes, filename: str) -> Tuple[List[Dict[str, Any]],
+                                                             Dict[str, Any]]:
+    """To'ldirilgan shablonni O'QIYDI va tekshiradi — BAZAGA TEGMAYDI.
+
+    Qaytaradi: (tozalangan qatorlar, hisobot). Hisobotda ustunlar tanilgani,
+    xatolar, ogohlantirishlar va ko'rish uchun namuna bor.
+
+    NEGA ALOHIDA: shablon va uning qoidalari (sarlavhalarni tanish, sana
+    formatlari, hujjat turini aniqlash) SHU MODULDA yashaydi, lekin natijani
+    KIM saqlashi har xil bo'lishi mumkin — kompaniya hujjatlari
+    (`company_document`) yoki tashqi tizim (ERP mijoz korxonalari).
+    Parser ikkinchi marta yozilmasligi uchun yozish qismidan ajratilgan.
+    """
+    imp = _importer()
+    rows, fmt = imp.read_table(data, filename)
+    if not rows:
+        raise imp.ImportFormatError("Fayl bo‘sh.")
+
+    header_idx, mapping, unknown = _find_header(rows)
+    ok, errors, warnings = parse_document_rows(rows, mapping, header_idx)
+
+    report: Dict[str, Any] = {
+        "filename": filename,
+        "format": fmt,
+        "columns": {
+            "detected": {
+                next(h for f, h, _ in TEMPLATE_COLUMNS if f == field):
+                    (rows[header_idx][i] if i < len(rows[header_idx]) else None)
+                for field, i in mapping.items()},
+            "unknown": unknown,
+            "missing": [h for f, h, _ in TEMPLATE_COLUMNS
+                        if f in ("doc_type", "name") and f not in mapping],
+        },
+        "header_row": header_idx + 1,
+        "rows_total": len(ok) + len({e["row"] for e in errors}),
+        "rows_ok": len(ok),
+        "rows_error": len({e["row"] for e in errors}),
+        "errors": errors,
+        "warnings": warnings,
+        "preview": [_import_preview(r) for r in ok[:50]],
+    }
+    return ok, report
+
+
+def import_documents(data: bytes, filename: str, company_id: int, *,
+                     dry_run: bool = True) -> Dict[str, Any]:
+    """To'ldirilgan shablonni o'qiydi va KOMPANIYA hujjatlariga yozadi.
+
+    dry_run=True  — faqat tekshiradi, bazaga HECH NARSA yozilmaydi.
+    dry_run=False — to'g'ri qatorlar bitta tranzaksiyada yoziladi.
+
+    Katalog importi (P0-4) bilan bir xil shartnoma: xato BITTA QATORNI
+    to'xtatadi, importni emas.
+    """
+    from api import db
+
+    ok, report = parse_document_file(data, filename)
+    result: Dict[str, Any] = {"dry_run": dry_run, **report,
+                              "inserted": 0, "updated": 0}
+
+    if dry_run or not ok:
+        if ok:
+            result["inserted"], result["updated"] = _import_forecast(ok, company_id)
+        return result
+
+    inserted = updated = 0
+    with db.get_conn() as conn:
+        try:
+            with conn.cursor() as cur:
+                for r in ok:
+                    params = {"company_id": company_id}
+                    params.update({k: r[k] for k in
+                                   ("doc_type", "name", "number", "issued_at",
+                                    "valid_until", "file_name", "file_ref",
+                                    "note")})
+                    cur.execute(DOC_FIND_SQL, params)
+                    found = cur.fetchone()
+                    if found:
+                        cur.execute(DOC_IMPORT_UPDATE_SQL,
+                                    {**params, "id": found["id"]})
+                        updated += 1
+                    else:
+                        cur.execute(DOC_INSERT_SQL, params)
+                        inserted += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    result["inserted"] = inserted
+    result["updated"] = updated
+    return result
+
+
+def _import_forecast(ok: List[Dict[str, Any]], company_id: int) -> Tuple[int, int]:
+    """Dry-run uchun: nechtasi qo'shiladi / nechtasi yangilanadi."""
+    from api import db
+    try:
+        rows = db.query("SELECT doc_type, lower(name) AS n FROM company_document "
+                        "WHERE company_id = %(company_id)s",
+                        {"company_id": company_id})
+    except Exception:
+        return len(ok), 0
+    existing = {(r["doc_type"], r["n"]) for r in rows}
+    upd = sum(1 for r in ok if (r["doc_type"], r["name"].lower()) in existing)
+    return len(ok) - upd, upd
+
+
+def rows_json(ok: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Tozalangan qatorlar -> JSON (sanalar ISO satr). Parser xizmat sifatida
+    berilganda (`POST /company/documents/parse`) chaqiruvchi shu ro'yxatni
+    oladi va O'Z bazasiga yozadi."""
+    return [_import_preview(r) for r in ok]
+
+
+def _import_preview(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Frontend jadvali uchun (date -> ISO satr)."""
+    return {
+        "row": r["row"],
+        "doc_type": r["doc_type"],
+        "label": r["label"],
+        "name": r["name"],
+        "number": r["number"],
+        "issued_at": r["issued_at"].isoformat() if r["issued_at"] else None,
+        "valid_until": r["valid_until"].isoformat() if r["valid_until"] else None,
+        "status": doc_status({"valid_until": r["valid_until"]}),
+        "file_ref": r["file_ref"],
+    }

@@ -4,10 +4,10 @@ import { cn } from '@/lib/utils'
 // Monoxrom chiziqli ikonlar (Feather/Lucide uslubi). Rangni currentColor'dan
 // oladi — ya'ni ota elementning rangiga moslashadi.
 //
-// NEGA `lucide-react` EMAS (u Vengeance UI bilan birga o'rnatilgan): bu
+// NEGA `lucide-react` EMAS (u bog'liqliklarda bor): bu
 // to'plamda loyihaga xos ikonlar bor (`match` — nishon, `wrench` — xizmat) va
 // ular butun ilovada bir xil semantika bilan ishlatiladi. Aralashtirsak
-// ikkita ikon uslubi paydo bo'lardi. Lucide Vengeance UI komponentlari
+// ikkita ikon uslubi paydo bo'lardi. Lucide shadcn komponentlari
 // ichida qoladi, ilova qatlami esa shu faylni ishlatadi.
 const PATHS: Record<string, ReactNode> = {
   tenders: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></>,
@@ -18,6 +18,7 @@ const PATHS: Record<string, ReactNode> = {
   refresh: <><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></>,
   close: <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>,
   left: <polyline points="15 18 9 12 15 6" />,
+  lock: <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>,
   right: <polyline points="9 18 15 12 9 6" />,
   check: <polyline points="20 6 9 17 4 12" />,
   external: <><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></>,
@@ -39,6 +40,17 @@ const PATHS: Record<string, ReactNode> = {
   send: <><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></>,
   mail: <><rect x="2" y="4" width="20" height="16" rx="2" /><polyline points="22 6 12 13 2 6" /></>,
   alert: <><path d="M12 3 2 20h20L12 3z" /><line x1="12" y1="10" x2="12" y2="14" /><line x1="12" y1="17" x2="12.01" y2="17" /></>,
+  checklist: <><path d="M9 5h9a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1" /><rect x="9" y="3" width="6" height="4" rx="1" /><polyline points="9 12 11 14 15 10" /></>,
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></>,
+  moon: <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />,
+  monitor: <><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></>,
+  globe: <><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></>,
+  menu: <><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></>,
+  // Tartiblash yo'nalishi — ustun sarlavhasida. Avval bu ▲/▼ MATN belgisi
+  // edi: u shrift bilan birga o'lchamini o'zgartirardi, boshqa ikonlar bilan
+  // bir chiziqda turmasdi va ekran o'quvchi uni "uchburchak" deb o'qirdi.
+  sortAsc: <polyline points="6 14 12 8 18 14" />,
+  sortDesc: <polyline points="6 10 12 16 18 10" />,
 }
 
 export interface IconProps {

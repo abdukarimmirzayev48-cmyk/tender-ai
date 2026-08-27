@@ -143,10 +143,20 @@ export interface TenderDetail extends TenderRow {
 }
 
 // --- statistika -----------------------------------------------------------
+export interface StatsRegion {
+  area_id: Nullable<string>
+  name: Nullable<string>
+  tender_count: number
+  totals_by_currency: { currency: Nullable<string>; total_value: number }[]
+}
+
 export interface Stats {
+  status: string
+  scope: 'provinces' | 'localities'
+  selected_region: Nullable<{ area_id: string; name: string }>
   count: number
   by_currency: { currency: string; total_value: number; tender_count: number }[]
-  by_region?: { name: string; tender_count: number; total_value: number }[]
+  by_region: StatsRegion[]
   by_status?: { status: string; name: Nullable<string>; tender_count: number }[]
 }
 
@@ -166,6 +176,141 @@ export interface Freshness {
     median_hours: Nullable<number>
     within_1h_pct: Nullable<number>
   }
+  /**
+   * KORPUS holati — semantik qidiruv qancha tenderni ko'radi.
+   *
+   * `caught_up` ATAYLAB "tugadi" deb nomlanmagan: korpus o'sib
+   * turadi (har soat yangi tender, yangi hujjat, yangi bo'lak), ya'ni
+   * yagona to'g'ri holat "quvib yetdi". "Tugadi" deb yozilsa odam ish
+   * bitgan deb o'ylardi va navbat yana o'sganini payqamasdi.
+   */
+  corpus?: Nullable<{
+    chunks: number
+    unvectorized: number
+    tenders: number
+    new_24h: number
+    /**
+     * SOVUQ START yorlig'i. Bo'laklash endigina yurgan bo'lsa
+     * `new_24h` butun korpusga teng chiqadi (118 426 dan 118 426) —
+     * bu sur'at emas, bir martalik to'ldirish. `false` bo'lsa
+     * `new_24h` ni sur'at sifatida KO'RSATMANG.
+     */
+    growth_reliable: boolean
+    caught_up: boolean
+  }>
+}
+
+// --- BROKERGA YO'NALTIRISH ------------------------------------------------
+
+/** AI tavsiyasi. `ai_gonogo.DECISIONS` bilan bir xil so'zlar. */
+export type AiQaror = 'go' | 'review' | 'no_go'
+
+/** Brokerning O'Z qarori — AI dan MUSTAQIL saqlanadi. */
+export type InsonQaror = 'olindi' | 'rad' | 'kutilsin'
+
+export type RoutingHolat = 'yangi' | 'korilmoqda' | 'yopildi'
+
+export interface RoutingItem {
+  id: number
+  tender_id: number
+  tender_name: Nullable<string>
+  close_at: Nullable<string>
+  totalcost: Nullable<number>
+  currency: Nullable<string>
+  kun_qoldi: Nullable<number>
+
+  ai_qaror: Nullable<AiQaror>
+  /** 0..1. Maxraj — O'LCHANGAN mezonlar, jami emas. */
+  ai_ball: Nullable<number>
+  ai_manba: Nullable<'malaka' | 'gonogo'>
+  /** Qamrovni ham aytadi: "3/3 mezon o'tdi, 4 ta O'LCHANMADI". */
+  ai_sabab: Nullable<string>
+
+  /**
+   * INSON QARORI ESKIRDI: broker qaror bergandan keyin `ai_qaror`
+   * o'zgardi. Bu eng shoshilinch holat — broker YOLG'ON ISHONCH
+   * bilan yuribdi, shuning uchun navbatda eng tepada turadi.
+   */
+  ai_ozgardi: boolean
+  ai_qaror_eski: Nullable<AiQaror>
+
+  inson_qaror: Nullable<InsonQaror>
+  broker_nomi: Nullable<string>
+  holat: RoutingHolat
+  created_at: Nullable<string>
+  /**
+   * ERP integratsiyasi UMUMAN mavjudmi — GLOBAL bayroq.
+   * Bu AYNAN SHU tender ERP da borligini BILDIRMAYDI. Aralashtirish
+   * brauzerda topilgan xato edi: har yopilgan qatorga "ERP da bor"
+   * yozilardi.
+   */
+  erp_bor: boolean
+  /** AYNAN SHU tender ERP da ochilganmi. */
+  erp_ish: boolean
+}
+
+export interface RoutingMoslik {
+  qatorlar: {
+    ai_manba: string; ai_qaror: AiQaror; jami: number
+    olindi: number; rad: number; moslik_foiz: Nullable<number>
+  }[]
+  inson_qarorlari: number
+  /** Foiz ma'noli bo'lishi uchun kerakli minimal qaror soni. */
+  kerakli_qaror: number
+  is_sample: boolean
+  /**
+   * O'LCHANDIMI — kamida `kerakli_qaror` ta qaror bormi.
+   *
+   * `false` bo'lsa "moslik 0%" EMAS, "hali o'lchanmagan" deb
+   * ko'rsatiladi. BITTA qarordan "100%" chiqarish eng zararli
+   * shakl edi: u haqiqiy o'lchov kabi ko'rinardi.
+   */
+  olchandi: boolean
+  izoh: Nullable<string>
+}
+
+/** Malaka mezoni hukmi. `ai_gonogo.STATUSES` bilan bir xil. */
+export type MalakaHolat = 'ok' | 'risk' | 'fail' | 'malumot_yoq'
+
+export interface MalakaDalil {
+  requirement_id: number
+  name: string
+  qiymat: Nullable<string>
+  confidence: number
+  review_status: string
+  file_ref: Nullable<string>
+  char_start: Nullable<number>
+  /** Talabni hech kim tekshirmagan va ishonchi chegaradan past. */
+  tasdiqlanmagan: boolean
+}
+
+export interface MalakaMezon {
+  key: string
+  label: string
+  status: MalakaHolat
+  izoh: string
+  dalillar: MalakaDalil[]
+}
+
+export interface MalakaNatija {
+  tender_id: number
+  decision: AiQaror
+  criteria: MalakaMezon[]
+  ok: number
+  fail: number
+  risk: number
+  /** O'LCHANGAN mezonlar soni. `jami_mezon` dan kam bo'lishi normal. */
+  olchandi: number
+  jami_mezon: number
+  talablar_soni: number
+  profil_toldirilgan: Nullable<number>
+  profil_jami: Nullable<number>
+  /**
+   * Profil O'YLAB TOPILGAN sinov qiymatlari bilan to'ldirilgan.
+   * Natijadan statistik xulosa CHIQARILMAYDI.
+   */
+  is_sample: boolean
+  sample_note: Nullable<string>
 }
 
 // --- katalog / profil -----------------------------------------------------
@@ -225,6 +370,7 @@ export interface SavedSearch {
 
 // --- AI -------------------------------------------------------------------
 export interface AiMatchResult {
+  documents?: AiDocsMeta
   verdict: 'mos' | 'qisman' | 'mos_emas'
   score: number
   reason_uz: string
@@ -236,6 +382,7 @@ export interface AiMatchResult {
 }
 
 export interface GoNoGoResult {
+  documents?: AiDocsMeta
   decision: 'go' | 'review' | 'no_go'
   confidence: number
   summary_uz: string
@@ -264,10 +411,25 @@ export interface DocumentTextResult {
   summary: { ok: number; manual_review: number }
 }
 
+/** AI tahlili qaysi hujjat matniga tayangani (api/ai_docs.py `meta`). */
+export interface AiDocsMeta {
+  available: boolean
+  total_files?: number
+  readable?: number
+  chars: number
+  truncated: boolean
+  used: { name: string; chars_used: number; chars_total: number; partial: boolean }[]
+  unreadable: { name: string; reason: string }[]
+  skipped_for_budget?: string[]
+}
+
 export interface DocumentType {
   code: string
   label: string
   hint: Nullable<string>
+  // `true` — biznes-jarayonning odatiy ariza to'plami: tender matnida
+  // yozilmagan bo'lsa ham cheklistда turadi (api/compliance.py BASE_CODES).
+  base: boolean
 }
 
 export interface CompanyDocument {
@@ -373,6 +535,33 @@ export interface ImportResult {
   }[]
 }
 
+// Hujjatlar shabloni importi — katalog importi bilan bir xil shartnoma
+// (qator bo'yicha xato, dry-run), faqat `preview` qatorlari boshqa.
+export interface DocumentImportResult {
+  dry_run: boolean
+  rows_total: number
+  rows_ok: number
+  rows_error: number
+  inserted: number
+  updated: number
+  header_row: number
+  format: string
+  errors?: ImportIssue[]
+  warnings?: ImportIssue[]
+  columns?: { detected: Record<string, string>; unknown: string[]; missing: string[] }
+  preview?: {
+    row: number
+    doc_type: string
+    label: string
+    name: string
+    number: Nullable<string>
+    issued_at: Nullable<string>
+    valid_until: Nullable<string>
+    status: 'ok' | 'expiring_soon' | 'expired' | 'missing'
+    file_ref: Nullable<string>
+  }[]
+}
+
 // --- narx hisobi ----------------------------------------------------------
 export interface PricingItem {
   name: string
@@ -413,6 +602,14 @@ export interface NotifySettingsData {
   telegram_enabled: boolean
   /** ESKI maydon — obunachilar jadvaliga ko'chirilgan, endi ishlatilmaydi. */
   telegram_chat_id: Nullable<string>
+  /**
+   * Xabar tili — INTERFEYS tili bilan bir xil ('uz' | 'ru' | 'en').
+   * Bazada turadi, chunki xabarni server yuboradi (ETL dan keyin, ilova
+   * ochiq bo'lmaganda ham) va u brauzerdagi tanlovni ko'rmaydi.
+   */
+  lang: string
+  /** `schema_patch_notify_lang.sql` qo'llanganmi (yo'q bo'lsa til saqlanmaydi) */
+  lang_ready: boolean
   /** Platforma email yubora oladimi (server .env sozlamasi) */
   smtp_ready: boolean
   /** Xabar qaysi manzildan ketadi (server .env: SMTP_FROM) */
@@ -460,4 +657,115 @@ export interface TelegramBot {
   id: number
   username: Nullable<string>
   first_name: Nullable<string>
+}
+
+// --- J3: TENDER TALABLARI va ularni TASDIQLASH ---------------------
+//
+// `method` — talab QANDAY olingani. UI da vizual farqlanadi:
+// `reyestr` rasmiy yozuv (tasdiqlash talab qilmaydi), `naqsh` va
+// `llm` esa AI natijasi va TEKSHIRILISHI kerak.
+export type TalabUsul = 'reyestr' | 'naqsh' | 'llm'
+export type TalabHolat = 'pending' | 'approved' | 'rejected' | 'corrected'
+
+/** `blind` — model javobi YASHIRIN (anchoring ga qarshi). */
+export type ReviewRejim = 'blind' | 'anchored'
+
+export interface HujjatTuri {
+  code: string
+  label: string
+  /** `base=true` — har tenderda talab qilinadigan asosiy hujjat. */
+  base: boolean
+}
+
+export interface Talab {
+  id: number
+  /**
+   * Talab QAYSI hujjat turini so'raydi (`compliance.DOC_TYPES` kodi),
+   * yoki `'yoq'` / `'boshqa'`.
+   *
+   * `null` = HALI SO'RALMAGAN — `'yoq'` dan FARQ QILADI: birinchisi
+   * "inson qaramagan", ikkinchisi "qaradi va tegishli emas dedi".
+   */
+  doc_type: Nullable<string>
+  /**
+   * YOPIQ rejimda inson model javobini KO'RMASDAN yozgan qiymat.
+   * Kelishmovchilik darajasi shundan hisoblanadi.
+   */
+  blind_value: Nullable<string>
+  name: string
+  method: TalabUsul
+  source: string
+  attrs: Record<string, unknown> | null
+  confidence: number
+  is_mandatory: boolean
+  raw_snippet: Nullable<string>
+  file_ref: Nullable<string>
+  char_start: Nullable<number>
+  char_end: Nullable<number>
+  review_status: TalabHolat
+  corrected_value: Nullable<string>
+  review_note: Nullable<string>
+  reviewed_at: Nullable<string>
+}
+
+export interface TalabNavbat {
+  tender_id: number
+  tender_name: Nullable<string>
+  close_at: Nullable<string>
+  kutayotgan: number
+  modeldan: number
+  naqshdan: number
+  eng_past_ishonch: Nullable<number>
+  past_ishonchli: number
+  ajratilgan: Nullable<string>
+}
+
+export interface TalabXulosa {
+  jami: number
+  majburiy: number
+  hujjatdan: number
+  naqshdan: number
+  modeldan: number
+  past_ishonchli: number
+  kutayotgan?: number
+  tasdiqlangan?: number
+  eng_past_ishonch: Nullable<number>
+  usullar: string[]
+  holat: Nullable<string>
+  izoh: Nullable<string>
+}
+
+/**
+ * Ko'rib chiqish tezligi — pilotning yagona noma'lum raqami.
+ *
+ * MEDIANA bo'yicha bashorat qilinadi, o'rtacha bo'yicha emas: bitta
+ * juda uzun tender o'rtachani buzadi, medianaga esa ta'sir qilmaydi.
+ */
+export interface ReviewTezlik {
+  olchangan_tender: number
+  olchangan_talab: number
+  ortacha_sekund: number
+  mediana_sekund: number
+  eng_tez: number
+  eng_sekin: number
+  sekund_talabga: number
+  navbatda_qolgan: number
+  qolgan_soat: Nullable<number>
+  /**
+   * NAVBAT O'SISH SUR'ATI. `qolgan_soat` navbat MUZLAB turganini
+   * taxmin qiladi; aslida ETL soatiga ishlaydi va navbat to'lib
+   * boradi. Agar o'sish quvvatdan yuqori bo'lsa, "har talabni inson
+   * tasdiqlaydi" modeli umuman ishlamaydi.
+   */
+  sutkalik_osish: number
+  /**
+   * SOVUQ START yorlig'i. Birinchi kunlarda "oxirgi 24 soat" butun
+   * navbatni qamrab oladi (604 dan 604) — bu bir martalik to'ldirish,
+   * sur'at emas. `false` bo'lsa `quvvat_yetadimi` ham `null`.
+   */
+  osish_ishonchli: boolean
+  osish_izohi: Nullable<string>
+  kunlik_quvvat: Nullable<number>
+  quvvat_yetadimi: Nullable<boolean>
+  izoh: Nullable<string>
 }

@@ -3,8 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- KONTENT XAVFSIZLIGI (CSP) — sanitizatordan KEYINGI ikkinchi qatlam.
+         `markdown.ts` model chiqishini tozalaydi, lekin unda tuynuk
+         topilsa CSP zararni cheklaydi: tashqi skript ham, rasm orqali
+         ma'lumot chiqarish ham ishlamaydi.
+
+         `img-src 'self' data:` — data: kerak, chunki interfeys ikonlari
+         va yuklangan fayl ko'rinishi shu ko'rinishda beriladi.
+         `style-src` da 'unsafe-inline' — Tailwind va Radix ish paytida
+         inline style qo'yadi; usiz interfeys buziladi. Bu ATAYLAB
+         qabul qilingan yon berish: XSS uchun asosiy yo'l `script-src`,
+         u esa yopiq.
+         `connect-src` — API va Vite HMR (dev) uchun. -->
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src 'self';
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' data:;
+      font-src 'self' data:;
+      connect-src 'self' http://127.0.0.1:8000 http://localhost:8000 ws: wss:;
+      frame-src 'none';
+      object-src 'none';
+      base-uri 'self';
+      form-action 'none';
+    " />
     <title>Tenderlar — O'zbekiston davlat xaridlari</title>
     <meta name="description" content="Ochiq tenderlarni bitta joyda: filtrlanadigan, deadline bo'yicha tartiblangan dashboard." />
+    <!--
+      MAVZUNI REACT DAN OLDIN QO'YAMIZ (oq chaqnashga qarshi).
+
+      SKRIPT ALOHIDA FAYLDA va buning sababi bor: yuqoridagi CSP
+      `script-src 'self'` deb e'lon qiladi, u esa INLINE skriptga
+      ruxsat bermaydi. Kod shu yerda inline turganda BLOKLANARDI va
+      chaqnash HAR OCHILISHDA bo'lardi — jimgina, chunki hech narsa
+      yiqilmaydi. Brauzer konsolida faqat CSP ogohlantirishi qolardi.
+
+      `public/theme-init.js` `'self'` ga tushadi va tahrirdan
+      buzilmaydi (hash yechimi esa har o'zgarishda eskirardi).
+    -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

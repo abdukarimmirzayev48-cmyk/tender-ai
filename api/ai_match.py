@@ -35,7 +35,7 @@ from api import ai  # build_input(), AIUnavailable, get_client() — qayta yozma
 #: Fikrlash SHU MODELDA DEFAULT YOQIQ: `max_tokens` fikrlash + javob matnini
 #: BIRGA cheklaydi, shuning uchun byudjet kengroq olingan.
 MODEL = "claude-opus-5"
-KIND = "match_v1"            # prompt/sxema o'zgarsa: match_v2
+KIND = "match_v2"            # v2: promptga BIRIKTIRILGAN HUJJAT MATNI qo'shildi
 MAX_TOKENS = 6000
 DEFAULT_EFFORT = os.environ.get("AI_MATCH_EFFORT", "medium")
 
@@ -110,7 +110,17 @@ QAT'IY QOIDALAR:
    uchun atamalarni TARJIMA qil, ko'chirma. Qisqa va dalilga asoslangan yoz.
 5. `matched_items` ga faqat katalogda AYNAN yozilgan nomlarni kiritasan.
 6. Ikkilanayotgan bo'lsang "qisman" ni tanla va sababini ayt — noto'g'ri
-   "mos" degandan ko'ra halol "qisman" foydaliroq."""
+   "mos" degandan ko'ra halol "qisman" foydaliroq.
+7. BIRIKTIRILGAN HUJJAT MATNI berilgan bo'lsa — ASOSIY MANBA O'SHA.
+   Kartochkadagi qisqa nom umumiy bo'ladi, aniq texnik talab esa texnik
+   topshiriqda yoziladi. Ikkalasi ziddiyat qilsa hujjatga ishon.
+   - `requirements` va `risks` ni imkon qadar hujjatdan ol va qaysi
+     hujjatdan olganingni qavsda ko'rsat: "GOST 12.4.011 talab (Техник
+     топшириқ)".
+   - Hujjat matni QISQARTIRILGAN deb ogohlantirilgan bo'lsa: bo'lakda
+     ko'rinmagan narsani "yo'q" dema, "hujjat bo'lagida ko'rsatilmagan" de.
+   - Hujjat umuman o'qilmagan bo'lsa — buni `risks` ga yoz, chunki tahlil
+     to'liq emas."""
 
 
 # ---------------------------------------------------------------------------
@@ -150,14 +160,21 @@ def _fmt_profile(profile: Optional[Dict[str, Any]]) -> str:
 
 
 def build_input(tender: Dict[str, Any], products: List[Dict[str, Any]],
-                profile: Optional[Dict[str, Any]] = None) -> str:
-    """Claude'ga yuboriladigan to'liq matn (tender + katalog).
+                profile: Optional[Dict[str, Any]] = None,
+                docs: str = "") -> str:
+    """Claude'ga yuboriladigan to'liq matn (tender + hujjatlar + katalog).
 
     Tender qismi `ai.build_input()` dan olinadi — ikkita modulda bir xil
     formatlash mantig'i bo'lmasligi uchun.
+
+    `docs` — `ai_docs.prompt_block()` natijasi. U KATALOGDAN OLDIN turadi:
+    model avval "tenderда nima talab qilinyapti" ni to'liq o'qisin, keyin
+    katalog bilan solishtirsin.
     """
-    parts = ["=== TENDER ===", ai.build_input(tender), "", "=== KATALOG ===",
-             _fmt_catalog(products)]
+    parts = ["=== TENDER ===", ai.build_input(tender)]
+    if docs:
+        parts += ["", docs]
+    parts += ["", "=== KATALOG ===", _fmt_catalog(products)]
     prof = _fmt_profile(profile)
     if prof:
         parts += ["", prof]
@@ -191,14 +208,15 @@ def _extract(resp) -> Dict[str, Any]:
 
 def analyze(tender: Dict[str, Any], products: List[Dict[str, Any]],
             profile: Optional[Dict[str, Any]] = None,
-            effort: str = DEFAULT_EFFORT) -> Dict[str, Any]:
+            effort: str = DEFAULT_EFFORT,
+            docs: str = "") -> Dict[str, Any]:
     """Bitta tenderni katalogga nisbatan baholaydi.
 
     Kesh MANTIG'I BU YERDA EMAS — chaqiruvchi content_hash ni tekshiradi.
     Qaytadi: {"result": {...}, "model": ..., "input_tokens": N, "output_tokens": N}
     """
     client = ai.get_client()
-    text = build_input(tender, products, profile)
+    text = build_input(tender, products, profile, docs)
 
     kwargs: Dict[str, Any] = {
         "model": MODEL,

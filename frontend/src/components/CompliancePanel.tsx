@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api } from '@/api'
 import Icon from './Icon'
+import { useT } from '@/i18n'
+import type { TKey } from '@/i18n'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
@@ -14,11 +16,13 @@ import type { ComplianceItem, ComplianceResult } from '@/types'
 //
 // MVP CHEKLOVI OCHIQ AYTILADI: bu STATIK cheklist — hujjat borligini va
 // muddatini tekshiradi, mazmunining huquqiy to'g'riligini EMAS. AI ishlamaydi.
-const STATUS: Record<ComplianceItem['status'], { mark: string; text: string; cls: string }> = {
-  ok: { mark: '✓', text: 'Bazada bor', cls: 'bg-ok-soft text-ok' },
-  expiring_soon: { mark: '!', text: 'Muddati tugayapti', cls: 'bg-soon-soft text-soon' },
-  expired: { mark: '×', text: 'Muddati tugagan', cls: 'bg-urgent-soft text-urgent' },
-  missing: { mark: '×', text: 'Bazada yo‘q', cls: 'bg-urgent-soft text-urgent' },
+const STATUS: Record<ComplianceItem['status'], { mark: string; text: TKey; cls: string }> = {
+  ok: { mark: '✓', text: 'compliance.status.ok', cls: 'bg-ok-soft text-ok-strong' },
+  expiring_soon: {
+    mark: '!', text: 'compliance.status.expiring_soon', cls: 'bg-soon-soft text-soon-strong',
+  },
+  expired: { mark: '×', text: 'compliance.status.expired', cls: 'bg-urgent-soft text-urgent-strong' },
+  missing: { mark: '×', text: 'compliance.status.missing', cls: 'bg-urgent-soft text-urgent-strong' },
 }
 
 const dateFmt = (iso?: string | null) => (iso ? iso.split('-').reverse().join('.') : null)
@@ -29,6 +33,7 @@ interface CompliancePanelProps {
 }
 
 export default function CompliancePanel({ tenderId, onOpenDocuments }: CompliancePanelProps) {
+  const t = useT()
   const [data, setData] = useState<ComplianceResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Hujjat boshqa oynada qo'shilgan bo'lishi mumkin — qayta yuklash kaliti
@@ -45,8 +50,8 @@ export default function CompliancePanel({ tenderId, onOpenDocuments }: Complianc
 
   if (error) {
     return (
-      <div className="mb-4 rounded-lg border border-urgent/40 bg-urgent-soft px-4 py-3 text-[13px] text-urgent">
-        Cheklist yuklanmadi: {error}
+      <div className="mb-4 rounded-lg border border-urgent/40 bg-urgent-soft px-4 py-3 text-body text-urgent-strong">
+        {t('compliance.loadFailed', { msg: error })}
       </div>
     )
   }
@@ -58,24 +63,30 @@ export default function CompliancePanel({ tenderId, onOpenDocuments }: Complianc
     <Card className="mb-4 overflow-hidden">
       <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
         <Icon name="check" size={14} className="text-primary" />
-        <span className="text-[13px] font-semibold">Hujjatlar to‘liqligi</span>
+        <span className="text-body font-semibold">{t('compliance.title')}</span>
         <div className="flex flex-wrap gap-1.5">
-          <Pill tone="ok">Tayyor {s.ready}</Pill>
-          {s.expiring_soon > 0 && <Pill tone="soon">Tugayapti {s.expiring_soon}</Pill>}
-          {s.expired > 0 && <Pill tone="bad" title="Muddati tugagan">Tugagan {s.expired}</Pill>}
-          {s.missing > 0 && <Pill tone="bad">Yo‘q {s.missing}</Pill>}
-          {s.blocking === 0 && <Pill tone="ok">To‘plam to‘liq</Pill>}
+          <Pill tone="ok">{t('compliance.ready', { n: s.ready })}</Pill>
+          {s.expiring_soon > 0 && (
+            <Pill tone="soon">{t('compliance.expiringSoon', { n: s.expiring_soon })}</Pill>
+          )}
+          {s.expired > 0 && (
+            <Pill tone="bad" title={t('compliance.expiredTitle')}>
+              {t('compliance.expired', { n: s.expired })}
+            </Pill>
+          )}
+          {s.missing > 0 && <Pill tone="bad">{t('compliance.missing', { n: s.missing })}</Pill>}
+          {s.blocking === 0 && <Pill tone="ok">{t('compliance.complete')}</Pill>}
         </div>
         <button
           className="ml-auto rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          title="Cheklistni yangilash" onClick={() => setReloadKey((k) => k + 1)}
+          aria-label={t('compliance.refresh')} title={t('compliance.refresh')} onClick={() => setReloadKey((k) => k + 1)}
         >
           <Icon name="refresh" size={12} />
         </button>
       </div>
 
       {/* HALOL HOLAT: tender matnidan hech narsa topilmasa — jim turmaymiz. */}
-      <div className="border-b bg-muted px-3 py-2 text-[12px] text-muted-foreground">{s.note}</div>
+      <div className="border-b bg-muted px-3 py-2 text-caption text-muted-foreground">{s.note}</div>
 
       <ul className="divide-y divide-border-soft">
         {data.items.map((it) => {
@@ -86,36 +97,39 @@ export default function CompliancePanel({ tenderId, onOpenDocuments }: Complianc
               <div className="flex flex-wrap items-center gap-2">
                 <span
                   className={cn(
-                    'flex size-5 shrink-0 items-center justify-center rounded-full text-[12px] font-bold',
+                    'flex size-5 shrink-0 items-center justify-center rounded-full text-caption font-semibold',
                     st.cls,
                   )}
                   aria-hidden="true"
                 >{st.mark}</span>
 
-                <span className="text-[13px] font-medium">{it.label}</span>
+                <span className="text-body font-medium">{it.label}</span>
                 <span className={cn(
-'rounded px-1.5 py-px text-[10px] font-semibold',
+'rounded px-1.5 py-px text-micro font-semibold',
                   it.required_by === 'tender'
                     ? 'bg-secondary text-primary'
                     : 'bg-muted text-muted-foreground',
                 )}>
-                  {it.required_by === 'tender' ? 'tenderda talab' : 'bazaviy'}
+                  {t(it.required_by === 'tender'
+                    ? 'compliance.requiredByTender' : 'compliance.requiredByBase')}
                 </span>
 
-                <span className={cn('ml-auto rounded px-2 py-0.5 text-[12px] font-semibold', st.cls)}>
-                  {st.text}
+                <span className={cn('ml-auto rounded px-2 py-0.5 text-caption font-semibold', st.cls)}>
+                  {t(st.text)}
                 </span>
               </div>
 
               {d && (
-                <div className="mt-1 pl-7 text-[12px] text-muted-foreground">
+                <div className="mt-1 pl-7 text-caption text-muted-foreground">
                   {d.name}
                   {d.number ? ` · № ${d.number}` : ''}
-                  {d.valid_until ? ` · amal qiladi: ${dateFmt(d.valid_until)}` : ' · muddatsiz'}
+                  {d.valid_until
+                    ? ` · ${t('compliance.validUntil', { date: dateFmt(d.valid_until)! })}`
+                    : ` · ${t('compliance.perpetual')}`}
                   {it.days_left != null && it.status === 'expiring_soon'
-                    ? ` (${it.days_left} kun qoldi)` : ''}
+                    ? ` ${t('compliance.daysLeft', { n: it.days_left })}` : ''}
                   {it.days_left != null && it.status === 'expired'
-                    ? ` (${Math.abs(it.days_left)} kun oldin tugagan)` : ''}
+                    ? ` ${t('compliance.daysAgo', { n: Math.abs(it.days_left) })}` : ''}
                 </div>
               )}
 
@@ -123,24 +137,25 @@ export default function CompliancePanel({ tenderId, onOpenDocuments }: Complianc
               {(it.status === 'missing' || it.status === 'expired') && onOpenDocuments && (
                 <div className="mt-1 pl-7">
                   <button
-                    className="text-[12px] font-semibold text-primary underline-offset-2 hover:underline"
+                    className="text-caption font-semibold text-primary underline-offset-2 hover:underline"
                     onClick={() => onOpenDocuments(it.doc_type)}
                   >
-                    {it.status === 'missing' ? 'Hujjat qo‘shish →' : 'Yangilash →'}
+                    {t(it.status === 'missing' ? 'compliance.addDoc' : 'compliance.renewDoc')}
                   </button>
                 </div>
               )}
 
               {/* DALIL — shaffoflik: talab qayerdan kelib chiqdi */}
-              <details className="mt-1 pl-7 text-[12px]">
+              <details className="mt-1 pl-7 text-caption">
                 <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-                  Nega kerak?
+                  {t('compliance.why')}
                 </summary>
                 <div className="mt-1 rounded-md bg-muted p-2 leading-relaxed">
                   {it.evidence}
-                  <div className="mt-1 text-[11px] text-muted-foreground">
+                  <div className="mt-1 text-micro text-muted-foreground">
                     {it.evidence_source
-                      ? `Manba: ${it.evidence_source}${it.confidence ? ` · ishonch ${it.confidence}%` : ''}`
+                      ? t('compliance.evidenceSource', { source: it.evidence_source })
+                        + (it.confidence ? ` · ${t('compliance.confidence', { n: it.confidence })}` : '')
                       : it.hint}
                   </div>
                 </div>
@@ -151,13 +166,15 @@ export default function CompliancePanel({ tenderId, onOpenDocuments }: Complianc
       </ul>
 
       {!!data.extra_documents?.length && (
-        <div className="border-t px-3 py-2 text-[12px] text-muted-foreground"
-          title="Bu tenderda talab qilinmagan">
-          Bazangizda yana bor: {data.extra_documents.map((e) => e.label).join(', ')}
+        <div className="border-t px-3 py-2 text-caption text-muted-foreground"
+          title={t('compliance.alsoHaveTitle')}>
+          {t('compliance.alsoHave', {
+            items: data.extra_documents.map((e) => e.label).join(', '),
+          })}
         </div>
       )}
 
-      <div className="border-t bg-muted px-3 py-2 text-[11px] text-muted-foreground">
+      <div className="border-t bg-muted px-3 py-2 text-micro text-muted-foreground">
         {s.disclaimer}
       </div>
     </Card>
@@ -169,10 +186,10 @@ function Pill({ tone, children, title }: {
   children: React.ReactNode
   title?: string
 }) {
-  const cls = tone === 'ok' ? 'bg-ok-soft text-ok'
-    : tone === 'soon' ? 'bg-soon-soft text-soon' : 'bg-urgent-soft text-urgent'
+  const cls = tone === 'ok' ? 'bg-ok-soft text-ok-strong'
+    : tone === 'soon' ? 'bg-soon-soft text-soon-strong' : 'bg-urgent-soft text-urgent-strong'
   return (
-    <span className={cn('rounded px-1.5 py-0.5 text-[11px] font-semibold', cls)} title={title}>
+    <span className={cn('rounded px-1.5 py-0.5 text-micro font-semibold', cls)} title={title}>
       {children}
     </span>
   )

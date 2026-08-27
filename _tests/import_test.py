@@ -27,6 +27,10 @@ from api import db, importer, stock                  # noqa: E402
 FIX = Path(__file__).parent / "fixtures"
 PREFIX = "ZZTEST "          # sinov mahsulotlari shu bilan boshlanadi
 
+# J1.6: katalog KOMPANIYAGA bog'landi. Sinov mavjud faol hisobdan
+# foydalanadi — o'zi hisob yaratmaydi (auth sinovi buni alohida qiladi).
+TEST_COMPANY_ID = None   # main() da to'ldiriladi
+
 _passed = 0
 _failed = []
 
@@ -192,7 +196,7 @@ def test_import_dry_run():
     before = db.scalar("SELECT count(*) FROM catalog_product")
     batches_before = db.scalar("SELECT count(*) FROM catalog_import_batch")
     data = (FIX / "katalog_togri.xlsx").read_bytes()
-    res = importer.import_catalog(data, "katalog_togri.xlsx", dry_run=True)
+    res = importer.import_catalog(data, "katalog_togri.xlsx", TEST_COMPANY_ID, dry_run=True)
 
     eq("sarlavha 2-qatorda topildi", res["header_row"], 2)
     eq("qabul qilingan qatorlar", res["rows_ok"], 4)
@@ -215,7 +219,7 @@ def test_import_dry_run():
 def test_import_errors():
     print("\n[5] Import — XATOLAR QATOR BO‘YICHA")
     data = (FIX / "katalog_xatoli.csv").read_bytes()
-    res = importer.import_catalog(data, "katalog_xatoli.csv", dry_run=True)
+    res = importer.import_catalog(data, "katalog_xatoli.csv", TEST_COMPANY_ID, dry_run=True)
 
     eq("qabul qilingan", res["rows_ok"], 2)      # faqat 2- va 9-qatorlar
     eq("xato qatorlar soni", res["rows_error"], 6)
@@ -253,13 +257,13 @@ def test_format_errors():
                         ("sarlavhasiz.csv", "Sarlavha")]:
         data = (FIX / fname).read_bytes()
         try:
-            importer.import_catalog(data, fname, dry_run=True)
+            importer.import_catalog(data, fname, TEST_COMPANY_ID, dry_run=True)
             check(f"{fname} -> xato", False, "-> xato chiqmadi")
         except importer.ImportFormatError as e:
             check(f"{fname} -> ImportFormatError", hint.lower() in str(e).lower(), f"-> {e}")
 
     try:
-        importer.import_catalog(b"x", "hisobot.xls", dry_run=True)
+        importer.import_catalog(b"x", "hisobot.xls", TEST_COMPANY_ID, dry_run=True)
         check(".xls rad etildi", False)
     except importer.ImportFormatError as e:
         check(".xls rad etildi", "xlsx" in str(e).lower(), f"-> {e}")
@@ -268,7 +272,7 @@ def test_format_errors():
 def test_cp1251():
     print("\n[7] Import — CP1251 kodlangan CSV")
     data = (FIX / "katalog_cp1251.csv").read_bytes()
-    res = importer.import_catalog(data, "katalog_cp1251.csv", dry_run=True)
+    res = importer.import_catalog(data, "katalog_cp1251.csv", TEST_COMPANY_ID, dry_run=True)
     eq("1 qator o‘qildi", res["rows_ok"], 1)
     eq("kirill buzilmadi", res["preview"][0]["name"], PREFIX + "Кабель UTP")
 
@@ -279,7 +283,7 @@ def test_cp1251():
 def test_import_write():
     print("\n[8] Import — HAQIQIY YOZISH va QAYTA IMPORT (yangilash)")
     data = (FIX / "katalog_togri.xlsx").read_bytes()
-    res = importer.import_catalog(data, "katalog_togri.xlsx", dry_run=False)
+    res = importer.import_catalog(data, "katalog_togri.xlsx", TEST_COMPANY_ID, dry_run=False)
     eq("qo‘shildi", res["inserted"], 4)
     eq("yangilandi", res["updated"], 0)
     check("batch_id qaytdi", bool(res["batch_id"]), "")
@@ -303,7 +307,7 @@ def test_import_write():
     ws.append(["Nomi", "Qoldiq"])
     ws.append([(PREFIX + "Noutbuk Lenovo V15").upper(), 99])   # KATTA HARF
     buf = io.BytesIO(); wb.save(buf)
-    res2 = importer.import_catalog(buf.getvalue(), "qayta.xlsx", dry_run=False)
+    res2 = importer.import_catalog(buf.getvalue(), "qayta.xlsx", TEST_COMPANY_ID, dry_run=False)
     eq("qayta import: yangilandi", res2["updated"], 1)
     eq("qayta import: qo‘shilmadi", res2["inserted"], 0)
 
@@ -416,12 +420,13 @@ def test_stock_real_tender():
 
     # Qoldig'i ATAYIN yetmaydigan sinov mahsuloti
     db.execute_returning(
-        "INSERT INTO catalog_product (name, keywords, unit, stock_qty, "
-        "stock_unit, stock_updated_at) VALUES (%(n)s, %(k)s, 'шт', 200, 'шт', now()) "
+        "INSERT INTO catalog_product (company_id, name, keywords, unit, "
+        "stock_qty, stock_unit, stock_updated_at) "
+        "VALUES (%(c)s, %(n)s, %(k)s, 'шт', 200, 'шт', now()) "
         "RETURNING id",
-        {"n": PREFIX + "Sichqoncha ombor", "k": ["Мышь компьютерная"]})
+        {"c": TEST_COMPANY_ID, "n": PREFIX + "Sichqoncha ombor", "k": ["Мышь компьютерная"]})
 
-    res = stock.check_tender_stock(int(tid))
+    res = stock.check_tender_stock(int(tid), TEST_COMPANY_ID)
     check("natija qaytdi", res is not None, "")
     eq("manba", res["source"], "tender_item")
     check("pozitsiyalar bor", res["summary"]["positions"] > 0, f"-> {res['summary']}")
@@ -430,13 +435,32 @@ def test_stock_real_tender():
     if mine:
         it = mine[0]
         eq("so‘ralgan miqdor amount_text dan o‘qildi", it["required_qty"], 500.0)
-        eq("ombordagi qoldiq", it["available_qty"], 200.0)
-        eq("holat", it["status"], "yetishmaydi")
-        eq("yetishmagan miqdor", it["shortfall_qty"], 300.0)
-        check("yetishmaganlar ro‘yxatida", any(
-            s["item_id"] == it["item_id"] for s in res["shortages"]), "")
+
+        # QOLDIQ QAYERDAN KELGANI KUTILGAN NATIJANI O‘ZGARTIRADI.
+        # ERP ombori ishga tushgan bo‘lsa (`erp.stock_move` da harakat bor),
+        # qoldiqning EGASI — ERP: `erp_stock.apply_to_products()` katalogdagi
+        # qiymatni ALMASHTIRADI va ERP da qaydi yo‘q mahsulot `None` bo‘ladi.
+        # Bu ataylab: bitta ro‘yxatda "jurnaldan" va "eski Exceldan" kelgan
+        # ikki xil haqiqat aralashmasligi kerak (api/erp_stock.py).
+        #
+        # Sinov ERP sxemasiga YOZMAYDI (u boshqa loyihaniki), shuning uchun
+        # bu yerda ikkala holat ham tekshiriladi. Formula mantig‘ining o‘zi
+        # [9] bo‘limida `build_check()` ustida deterministik sinaladi.
+        src = (res.get("stock") or {}).get("source")
+        if src == "erp":
+            eq("ERP rejimi: qoldiq noma’lum", it["available_qty"], None)
+            eq("ERP rejimi: holat", it["status"], "nomalum")
+            check("ERP rejimi: dastlabki deb belgilandi", res["preliminary"] is True,
+                  f"-> {res['preliminary']}")
+        else:
+            eq("ombordagi qoldiq", it["available_qty"], 200.0)
+            eq("holat", it["status"], "yetishmaydi")
+            eq("yetishmagan miqdor", it["shortfall_qty"], 300.0)
+            check("yetishmaganlar ro‘yxatida", any(
+                s["item_id"] == it["item_id"] for s in res["shortages"]), "")
         print(f"     namuna: “{it['name']}” — so‘ralgan {it['required_qty']}, "
-              f"qoldiq {it['available_qty']}, {it['status_label']}")
+              f"qoldiq {it['available_qty']}, {it['status_label']} "
+              f"(qoldiq manbai: {src})")
     print(f"     xulosa: {res['summary']}, dastlabki={res['preliminary']}")
 
 
@@ -461,7 +485,7 @@ def test_endpoints():
         if len(data) > 5 * 1024 * 1024:
             raise HTTPException(413, "Fayl 5 MB dan katta.")
         try:
-            return importer.import_catalog(data, file.filename or "", dry_run=dry_run)
+            return importer.import_catalog(data, file.filename or "", TEST_COMPANY_ID, dry_run=dry_run)
         except importer.ImportFormatError as e:
             raise HTTPException(status_code=422, detail=str(e))
 
@@ -475,7 +499,7 @@ def test_endpoints():
 
     @app.get("/tenders/{tender_id}/stock-check")
     def tender_stock_check(tender_id: int):
-        res = stock.check_tender_stock(tender_id)
+        res = stock.check_tender_stock(tender_id, TEST_COMPANY_ID)
         if res is None:
             raise HTTPException(404, f"Tender {tender_id} topilmadi.")
         return res
@@ -496,14 +520,14 @@ def test_endpoints():
     r = c.get("/catalog/import/template")
     eq("shablon .xlsx -> 200", r.status_code, 200)
     check("shablon ZIP (xlsx)", r.content[:2] == b"PK", "")
-    back = importer.import_catalog(r.content, "template.xlsx", dry_run=True)
+    back = importer.import_catalog(r.content, "template.xlsx", TEST_COMPANY_ID, dry_run=True)
     eq("shablonning o‘zi xatosiz o‘qiladi", back["rows_error"], 0)
     eq("shablonda 3 namuna qator", back["rows_ok"], 3)
 
     r = c.get("/catalog/import/template?fmt=csv")
     eq("shablon .csv -> 200", r.status_code, 200)
     eq("csv shablon xatosiz",
-       importer.import_catalog(r.content, "t.csv", dry_run=True)["rows_error"], 0)
+       importer.import_catalog(r.content, "t.csv", TEST_COMPANY_ID, dry_run=True)["rows_error"], 0)
 
     r = c.get("/tenders/999999999/stock-check")
     eq("yo‘q tender -> 404", r.status_code, 404)
@@ -549,8 +573,14 @@ def cleanup():
 
 
 def main():
+    global TEST_COMPANY_ID
+    from api import auth
+
     make_fixtures()
     db.init_pool()
+    # Pool ko'tarilgandan KEYIN: kompaniya bazadan aniqlanadi.
+    TEST_COMPANY_ID = auth.sole_company_id()
+    print(f"     (sinov kompaniyasi: id={TEST_COMPANY_ID})")
     # Oldingi yarim qolgan yurishdan qoldiq bo'lsa — tozalab boshlaymiz,
     # aks holda "qo'shildi/yangilandi" hisoblari siljiydi.
     _silent_cleanup()

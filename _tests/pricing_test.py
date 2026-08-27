@@ -416,12 +416,37 @@ PARITY_CASES = [
      "min_margin_percent": 20},
 ]
 
+# Harness `calculate(inp, t)` ni chaqiradi: bosqich MATNLARI tilga bog'liq
+# va `t` funksiya PARAMETR sifatida kiradi (`pricing.ts` dagi izohga qarang).
+# Python tomonda matnlar O'ZBEKCHA qotirilgan, shuning uchun bu yerda ham
+# `locales/uz.ts` lug'ati ishlatiladi — aks holda paritet sinovi hisobni
+# emas, tarjimani solishtirib qolardi.
+#
+# TypeScript: Node 22.6+ tur izohlarini o'zi olib tashlaydi (pricing.ts
+# ATAYLAB faqat "o'chiriladigan" TS sintaksisidan iborat). Node eskiroq
+# bo'lsa import yiqiladi va sinov buni ochiq aytadi.
 _JS_HARNESS = """
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-const mod = await import(pathToFileURL(process.argv[2]).href)
+import { dirname, join } from 'node:path'
+
+const file = process.argv[2]
+const mod = await import(pathToFileURL(file).href)
+const { uz } = await import(
+  pathToFileURL(join(dirname(file), 'locales', 'uz.ts')).href)
+
+// i18n.tsx dagi `translate()` ning sinov uchun yetarli qismi: kalit
+// topilmasa KALITNING O'ZI qaytadi va farq darhol ko'zga tashlanadi.
+const t = (key, vars) => {
+  const raw = uz[key]
+  if (raw === undefined) return key
+  return vars
+    ? raw.replace(/\{(\w+)\}/g, (m, name) => (name in vars ? String(vars[name]) : m))
+    : raw
+}
+
 const cases = JSON.parse(readFileSync(0, 'utf8'))
-console.log(JSON.stringify(cases.map((c) => mod.calculate(c))))
+console.log(JSON.stringify(cases.map((c) => mod.calculate(c, t))))
 """
 
 

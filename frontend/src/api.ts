@@ -5,10 +5,73 @@ import type {
   DocumentTextResult, DocumentType, Freshness, GoNoGoResult, Paged, PricingInputs,
   PricingSaved, Product, ProductSuggestion, Region, SavedSearch, Stats, Status,
   StockCheckResult, TelegramBot, TelegramLink, TelegramLinkStatus,
+  HujjatTuri, ReviewRejim, ReviewTezlik, Talab, TalabHolat, TalabNavbat,
+  AiQaror, InsonQaror, MalakaNatija, RoutingHolat, RoutingItem,
+  RoutingMoslik,
+  TalabXulosa,
   TelegramSubscriber, TenderDetail, TenderRow, NotifySettingsData, Nullable,
 } from './types'
 
 const BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+
+// --- KIMLIK (auth-4) ---------------------------------------------------------
+// Tender-AI ga KOMPANIYA hisobi bilan kiriladi (odam emas — hodimlar ERP da).
+//
+// Sessiya tokeni `HttpOnly` COOKIE'da va bu fayl uni KO'RMAYDI: XSS bo'lsa
+// ham JavaScript tokenni o'qiy olmaydi (`localStorage` da esa o'qirdi).
+//
+// COOKIE'NING NARXI — CSRF: brauzer cookie'ni HAR so'rovga o'zi qo'shadi.
+// Shuning uchun o'zgartiruvchi so'rovlarga `X-CSRF-Token` sarlavhasi
+// qo'yiladi; qiymati `HttpOnly BO'LMAGAN` cookie'dan (yoki `/auth/me`
+// javobidan) olinadi va serverdagi SESSIYA qiymati bilan solishtiriladi.
+//
+// MUHIM: cookie ishlashi uchun so'rov SAME-ORIGIN bo'lishi kerak —
+// `VITE_API_BASE=/api` (Vite proksisi). To'liq manzil yozilsa cookie
+// cross-site bo'lib qoladi.
+const CSRF_COOKIE = 'tai_csrf'
+const SEEN_KEY = 'tender-ai:seen'
+
+/** Cookie o'qilmasa ishlatiladigan nusxa (login yoki `/auth/me` dan). */
+let csrfFallback: string | null = null
+
+export function setCsrf(token: string | null): void {
+  csrfFallback = token
+}
+
+function readCsrf(): string | null {
+  try {
+    const hit = document.cookie.split('; ')
+      .find((c) => c.startsWith(CSRF_COOKIE + '='))
+    if (hit) return decodeURIComponent(hit.slice(CSRF_COOKIE.length + 1))
+  } catch { /* document yo'q — pastdagi nusxa ishlatiladi */ }
+  return csrfFallback
+}
+
+/** "Avval kirgan edikmi" belgisi. Tokenning O'ZI emas — u HttpOnly
+ *  cookie'da. Faqat sahifa ochilganda kirish ekrani chaqnamasin uchun. */
+export function getToken(): string | null {
+  try { return localStorage.getItem(SEEN_KEY) } catch { return null }
+}
+
+export function setToken(v: string | null): void {
+  try {
+    if (v) localStorage.setItem(SEEN_KEY, '1')
+    else localStorage.removeItem(SEEN_KEY)
+  } catch { /* localStorage yopiq — zarari yo'q */ }
+}
+
+/** Xom `fetch` ishlatadigan joylar uchun (fayl yuklash — FormData).
+ *  Cookie'ni brauzer o'zi qo'shadi, biz faqat CSRF sarlavhasini beramiz. */
+export function authHeaders(): Record<string, string> {
+  const c = readCsrf()
+  return c ? { 'X-CSRF-Token': c } : {}
+}
+
+/** 401 kelganda chaqiriladi: ilova kirish ekraniga qaytadi. */
+let onUnauthorized: (() => void) | null = null
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  onUnauthorized = fn
+}
 
 // Nisbiy havolalarni (masalan fayl yuklab olish proksisi) to'liq manzilga aylantiradi
 export const apiUrl = (path?: string): string =>
@@ -35,6 +98,28 @@ export function errMatn(detail: unknown): string {
   }).join('; ')
 }
 
+/** Xato + STRUKTURALI `detail`.
+ *  `errMatn()` obyekt-detail'ni satrga aylantira olmaydi ("[object Object]"),
+ *  ERP esa 409 da {message, opportunity_id} qaytaradi — mavjud kartaga havola
+ *  qurish uchun xom tana kerak. `message` avvalgidek "409: ..." ko'rinishida
+ *  qoladi, shuning uchun eski chaqiruvchilar uchun hech narsa o'zgarmaydi. */
+export class ApiError extends Error {
+  status: number
+  detail: unknown
+  /** 429 dagi `Retry-After` (soniya). Server matni bitta tilda keladi,
+   *  interfeys esa uch tilli — shuning uchun xabarni MATNDAN emas, shu
+   *  SONDAN yig'amiz. */
+  retryAfter?: number
+  constructor(message: string, status: number, detail: unknown,
+              retryAfter?: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.detail = detail
+    this.retryAfter = retryAfter
+  }
+}
+
 type Params = Record<string, string | number | boolean | string[] | null | undefined>
 
 interface RequestOpts {
@@ -45,7 +130,10 @@ interface RequestOpts {
 async function request<T>(
   method: string, path: string, { params, body }: RequestOpts = {},
 ): Promise<T> {
-  const url = new URL(BASE + path)
+  // Ikkinchi argument SHART: BASE nisbiy bo'lishi mumkin (masalan '/api' —
+  // ngrok ortida Vite proxy'si orqali). `new URL('/api/tenders')` bazasiz
+  // TypeError beradi. BASE absolyut bo'lsa ikkinchi argument e'tiborga olinmaydi.
+  const url = new URL(BASE + path, window.location.origin)
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       if (v === undefined || v === null || v === '') continue
@@ -56,19 +144,34 @@ async function request<T>(
       else url.searchParams.set(k, String(v))
     }
   }
-  const opts: RequestInit = { method }
+  // `credentials: 'include'` — sessiya cookie'si yuborilishi uchun SHART.
+  const headers: Record<string, string> = {}
+  // CSRF faqat O'ZGARTIRUVCHI so'rovlarda: GET da server ham tekshirmaydi.
+  if (method !== 'GET' && method !== 'HEAD') Object.assign(headers, authHeaders())
+  const opts: RequestInit = { method, headers, credentials: 'include' }
   if (body !== undefined) {
-    opts.headers = { 'Content-Type': 'application/json' }
+    headers['Content-Type'] = 'application/json'
     opts.body = JSON.stringify(body)
   }
   const res = await fetch(url, opts)
   if (!res.ok) {
+    // 401 — sessiya tugadi yoki kirilmagan. Tokenni tozalab, ilovani
+    // kirish ekraniga qaytaramiz: aks holda har bir panel alohida
+    // "401" xatosini ko'rsatib, ekran xatolar bilan to'lardi.
+    if (res.status === 401) {
+      setToken(null)
+      onUnauthorized?.()
+    }
     let detail = res.statusText
+    let raw: unknown = null
     try {
       const b = await res.json()
+      raw = b.detail
       detail = errMatn(b.detail) || b.error || detail
     } catch { /* JSON emas */ }
-    throw new Error(`${res.status}: ${detail}`)
+    const ra = Number(res.headers.get('Retry-After'))
+    throw new ApiError(`${res.status}: ${detail}`, res.status, raw,
+      Number.isFinite(ra) && ra > 0 ? ra : undefined)
   }
   // 204 No Content — TANA BO'SH. DELETE va /catalog/seen shunday javob beradi.
   // Shartsiz res.json() chaqirilsa bu yerda SyntaxError chiqadi va chaqiruvchi
@@ -79,7 +182,46 @@ async function request<T>(
   return (text ? JSON.parse(text) : null) as T
 }
 
+export interface CompanyAccount {
+  id: number
+  username: string
+  company_name: string
+  email: Nullable<string>
+  active: boolean
+  last_login_at: Nullable<string>
+  /** CSRF tokeni (auth-4) — sir emas, sarlavhaga qo'yiladi */
+  csrf?: string
+}
+
 export const api = {
+  // --- kirish ---
+  login: async (username: string, password: string) => {
+    // Javobda TOKEN YO'Q — u `HttpOnly` cookie'da.
+    const r = await request<{ csrf: string; expires_at: string; account: CompanyAccount }>(
+      'POST', '/auth/login', { body: { username, password } })
+    setCsrf(r.csrf)
+    setToken('1')
+    return r.account
+  },
+  /** Parolni almashtirish (auth-6). JORIY parol MAJBURIY; javobda
+   *  yopilgan boshqa sessiyalar soni qaytadi. */
+  setPassword: (currentPassword: string, password: string) =>
+    request<{ ok: boolean; closed_sessions: number }>(
+      'PUT', '/auth/password',
+      { body: { password, current_password: currentPassword } }),
+
+  logout: async () => {
+    try { await request<{ ok: boolean }>('POST', '/auth/logout') } finally {
+      setToken(null); setCsrf(null)
+    }
+  },
+  me: async () => {
+    // Sahifa yangilanganda CSRF tokeni shu yerdan tiklanadi.
+    const a = await request<CompanyAccount>('GET', '/auth/me')
+    if (a.csrf) setCsrf(a.csrf)
+    return a
+  },
+
   tenders: (params?: Params) => request<Paged<TenderRow>>('GET', '/tenders', { params }),
   tender: (id: number) => request<TenderDetail>('GET', `/tenders/${id}`),
   stats: (params?: Params) => request<Stats>('GET', '/stats', { params }),
@@ -96,6 +238,21 @@ export const api = {
   aiGoNogo: (id: number, params?: Params) =>
     request<GoNoGoResult>('POST', `/tenders/${id}/ai-gonogo`, { params }),
 
+  // --- ERP holati (auth-3): so'rovni SERVER qiladi, brauzer ERP ga
+  // to'g'ridan-to'g'ri bormaydi. `api/erp_status.py` ga qarang.
+  erpStatus: (id: number) => request<{
+    ready: boolean
+    opportunities: {
+      opportunity_id: number
+      status: string
+      status_label: string | null
+      priority: string | null
+      broker_name: string | null
+      client_name: string | null
+      created_at: string | null
+    }[]
+  }>('GET', `/tenders/${id}/erp-status`),
+
   // --- P0-2: hujjat matni holati (deterministik parserlar, AI emas) ---
   documentsText: (id: number) =>
     request<DocumentTextResult>('GET', `/tenders/${id}/documents/text`),
@@ -109,6 +266,59 @@ export const api = {
   tenderPricing: (id: number) => request<Nullable<PricingSaved>>('GET', `/tenders/${id}/pricing`),
   saveTenderPricing: (id: number, body: unknown) =>
     request<PricingSaved>('POST', `/tenders/${id}/pricing`, { body }),
+
+  // --- J3: talablar va ularni tasdiqlash ---
+  //
+  // Tasdiqlash MAJBURIY: tekshirilmagan talabni cheklistga ulash AI
+  // xatosini qaror qatlamiga o'tkazadi (arvoh blocker).
+  talabNavbat: (limit = 100) =>
+    request<{ queue: TalabNavbat[] }>('GET', `/requirements/queue?limit=${limit}`),
+  tenderTalablar: (id: number) =>
+    request<{ tender_id: number; rejim: ReviewRejim; summary: TalabXulosa
+              items: Talab[] }>(
+      'GET', `/tenders/${id}/requirements`),
+  talabTezlik: () =>
+    request<ReviewTezlik>('GET', '/requirements/speed'),
+  hujjatTurlari: () =>
+    request<{ doc_types: HujjatTuri[] }>('GET', '/requirements/doc-types'),
+  talabReview: (reqId: number, body: {
+    status: TalabHolat; corrected_value?: string; note?: string
+    doc_type?: string; blind_value?: string
+  }) => request<{ id: number; tender_id: number; review_status: TalabHolat;
+                 qolgan_kutayotgan: number }>(
+    'POST', `/requirements/${reqId}/review`, { body }),
+  talabReviewAll: (tenderId: number, status: 'approved' | 'rejected') =>
+    request<{ tender_id: number; ozgardi: number; status: string }>(
+      'POST', `/tenders/${tenderId}/requirements/review-all`,
+      { body: { status } }),
+
+  // --- BROKERGA YO'NALTIRISH ---
+  //
+  // Malaka tekshiruvi BEPUL va deterministik: `tender_requirement`
+  // (turlangan) bilan `company_profile` (turlangan) SQL da
+  // solishtiriladi. O'lchandi: 500 tender 1.3 s, 0 pullik chaqiruv.
+  malaka: (tenderId: number) =>
+    request<MalakaNatija>('GET', `/tenders/${tenderId}/qualification`),
+  brokerNavbat: (holat?: RoutingHolat, limit = 100) =>
+    request<{ items: RoutingItem[]; jami: number; moslik: RoutingMoslik }>(
+      'GET', `/routing/queue?limit=${limit}`
+             + (holat ? `&holat=${holat}` : '')),
+  brokerYangila: (limit = 2000) =>
+    request<{ baholandi: number; navbatga_tushdi: number
+              yangilandi: number; kesildi: number; jami_nomzod: number
+              inson_qarori_eskirdi: number
+              qarorlar: Record<string, number>; navbat_hajmi: number }>(
+      'POST', `/routing/refresh?limit=${limit}`),
+  brokerOch: (routingId: number, broker?: string) =>
+    request<{ id: number; holat: RoutingHolat }>(
+      'POST', `/routing/${routingId}/open`
+              + (broker ? `?broker=${encodeURIComponent(broker)}` : '')),
+  brokerQaror: (routingId: number, body: {
+    qaror: InsonQaror; izoh?: string; broker?: string
+  }) => request<{ id: number; tender_id: number; ai_qaror: AiQaror
+                  inson_qaror: InsonQaror; holat: RoutingHolat
+                  ai_ozgardi: boolean }>(
+    'POST', `/routing/${routingId}/decision`, { body }),
 
   // --- P0-8: hujjatlar to'liqligi cheklisti ---
   compliance: (id: number) => request<ComplianceResult>('GET', `/tenders/${id}/compliance`),
@@ -146,9 +356,12 @@ export const api = {
   telegramDeleteSubscriber: (chatId: string) =>
     request<{ subscribers: TelegramSubscriber[] }>(
       'DELETE', `/notify/telegram/subscribers/${encodeURIComponent(chatId)}`),
+  // Sinov xabari PLATFORMA TILIDA ketadi (javobdagi `lang` — qaysi tilda).
   telegramTest: (chatId?: string) =>
-    request<{ sent: boolean; chats: string[]; errors: { chat_id: string; error: string }[] }>(
-      'POST', '/notify/telegram/test', { params: { chat_id: chatId } }),
+    request<{
+      sent: boolean; chats: string[]; lang: string; messages: number
+      errors: { chat_id: string; error: string }[]
+    }>('POST', '/notify/telegram/test', { params: { chat_id: chatId } }),
 
   // Aqlli moslashtirish
   getProfile: () => request<Nullable<CompanyProfileData>>('GET', '/profile'),
@@ -170,4 +383,5 @@ export const api = {
   catalogMatch: (body: unknown) => request<Paged<TenderRow>>('POST', '/catalog/match', { body }),
   catalogNewCount: () => request<{ new: number; total: number }>('GET', '/catalog/new-count'),
   catalogSeen: () => request<null>('POST', '/catalog/seen'),
+
 }

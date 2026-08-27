@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react'
-import { apiUrl, errMatn } from '@/api'
+import { apiUrl, authHeaders, errMatn } from '@/api'
 import Icon from './Icon'
+import { useT } from '@/i18n'
+import { useFormat } from '@/format'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
@@ -24,6 +26,7 @@ interface CatalogImportProps {
 }
 
 export default function CatalogImport({ onImported, onClose }: CatalogImportProps) {
+  const t = useT()
   const [file, setFile] = useState<File | null>(null)
   const [result, setResult] = useState<ImportResult | null>(null)   // dry-run natijasi
   const [done, setDone] = useState<ImportResult | null>(null)       // yakuniy import natijasi
@@ -35,8 +38,12 @@ export default function CatalogImport({ onImported, onClose }: CatalogImportProp
   async function send(f: File, dryRun: boolean): Promise<ImportResult> {
     const fd = new FormData()
     fd.append('file', f)
+    // FormData yuborilyapti, shuning uchun `api.ts` dagi `request()`
+    // emas, xom `fetch`. Kimlik sarlavhasini QO'LDA qo'shamiz —
+    // aks holda auth-2 darvozasi 401 qaytaradi.
     const res = await fetch(apiUrl(`/catalog/import?dry_run=${dryRun}`), {
-      method: 'POST', body: fd,
+      method: 'POST', body: fd, headers: authHeaders(),
+      credentials: 'include',
     })
     const text = await res.text()
     const body = text ? JSON.parse(text) : null
@@ -49,7 +56,7 @@ export default function CatalogImport({ onImported, onClose }: CatalogImportProp
     if (!f) return
     setError(null); setResult(null); setDone(null); setFile(f)
     if (f.size > MAX_MB * 1024 * 1024) {
-      setError(`Fayl ${MAX_MB} MB dan katta (${(f.size / 1048576).toFixed(1)} MB).`)
+      setError(t('tpl.tooBig', { max: MAX_MB, size: (f.size / 1048576).toFixed(1) }))
       return
     }
     setBusy(true)
@@ -90,52 +97,49 @@ export default function CatalogImport({ onImported, onClose }: CatalogImportProp
         onDragLeave={() => setOver(false)}
         onDrop={(e) => { e.preventDefault(); setOver(false); pick(e.dataTransfer.files?.[0]) }}
       >
-        <p className="text-sm font-semibold">Katalog va qoldiqlarni import qilish</p>
-        <p className="mt-1 text-[12px] text-muted-foreground">
-          .xlsx / .csv — nomi, xususiyatlari, birlik, qoldiq, tannarx
-        </p>
+        <p className="text-body font-semibold">{t('cimp.title')}</p>
+        <p className="mt-1 text-caption text-muted-foreground">{t('cimp.hint')}</p>
         <div className="mt-3 flex flex-wrap justify-center gap-2">
           <Button disabled={busy} onClick={() => inputRef.current?.click()}>
-            <Icon name="plus" size={14} /> Fayl tanlash
+            <Icon name="plus" size={14} /> {t('tpl.pickFile')}
           </Button>
           <Button variant="outline" asChild>
             <a href={apiUrl('/catalog/import/template')}>
-              <Icon name="download" size={14} /> Shablon (.xlsx)
+              <Icon name="download" size={14} /> {t('cimp.templateXlsx')}
             </a>
           </Button>
           <Button variant="outline" asChild>
             <a href={apiUrl('/catalog/import/template?fmt=csv')}>
-              <Icon name="download" size={14} /> Shablon (.csv)
+              <Icon name="download" size={14} /> {t('cimp.templateCsv')}
             </a>
           </Button>
         </div>
         <input ref={inputRef} type="file" accept=".xlsx,.csv,.txt,.tsv" className="hidden"
           onChange={(e) => pick(e.target.files?.[0])} />
         {file && (
-          <div className="mt-3 inline-flex items-center gap-2 rounded-md bg-muted px-2.5 py-1.5 text-[12.5px]">
+          <div className="mt-3 inline-flex items-center gap-2 rounded-md bg-muted px-2.5 py-1.5 text-caption">
             <Icon name="box" size={13} /> <b>{file.name}</b>
             <span className="text-muted-foreground">({(file.size / 1024).toFixed(0)} KB)</span>
-            <button className="rounded p-0.5 hover:bg-card" title="Bekor qilish" onClick={reset}>
+            <button className="rounded p-0.5 hover:bg-card" aria-label={t('common.cancel')} title={t('common.cancel')} onClick={reset}>
               <Icon name="close" size={13} />
             </button>
           </div>
         )}
       </div>
 
-      {busy && <Note>Fayl tekshirilmoqda…</Note>}
+      {busy && <Note>{t('tpl.checking')}</Note>}
       {error && <Note tone="err">{error}</Note>}
 
       {/* --- Yakuniy natija --- */}
       {done && (
         <>
           <Note tone="ok">
-            Import yakunlandi: <b>{done.inserted}</b> ta qo‘shildi,{' '}
-            <b>{done.updated}</b> tasi yangilandi
-            {done.rows_error > 0 && <>, {done.rows_error} ta qator o‘tkazib yuborildi</>}.
+            {t('cimp.done', { ins: done.inserted, upd: done.updated })}
+            {done.rows_error > 0 && t('tpl.doneSkipped', { n: done.rows_error })}.
           </Note>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={reset}>Yana yuklash</Button>
-            {onClose && <Button variant="ghost" onClick={onClose}>Yopish</Button>}
+            <Button variant="outline" onClick={reset}>{t('tpl.uploadAgain')}</Button>
+            {onClose && <Button variant="ghost" onClick={onClose}>{t('common.close')}</Button>}
           </div>
         </>
       )}
@@ -150,10 +154,10 @@ export default function CatalogImport({ onImported, onClose }: CatalogImportProp
 function Note({ children, tone }: { children: React.ReactNode; tone?: 'ok' | 'err' | 'warn' }) {
   return (
     <div className={cn(
-      'rounded-lg border px-3 py-2 text-[13px]',
-      tone === 'ok' && 'border-ok/40 bg-ok-soft text-ok',
-      tone === 'err' && 'border-urgent/40 bg-urgent-soft text-urgent',
-      tone === 'warn' && 'border-soon/40 bg-soon-soft text-soon',
+      'rounded-lg border px-3 py-2 text-body',
+      tone === 'ok' && 'border-ok/40 bg-ok-soft text-ok-strong',
+      tone === 'err' && 'border-urgent/40 bg-urgent-soft text-urgent-strong',
+      tone === 'warn' && 'border-soon/40 bg-soon-soft text-soon-strong',
       !tone && 'bg-muted text-muted-foreground',
     )}>{children}</div>
   )
@@ -169,6 +173,8 @@ function DryRun({ result, busy, onConfirm, onCancel, onClose }: {
   onCancel: () => void
   onClose?: () => void
 }) {
+  const t = useT()
+  const f = useFormat()
   const errors = result.errors || []
   const warnings = result.warnings || []
   const detected = Object.entries(result.columns?.detected || {})
@@ -177,16 +183,16 @@ function DryRun({ result, busy, onConfirm, onCancel, onClose }: {
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-        <Stat n={result.rows_total} label="Jami qator" />
-        <Stat n={result.rows_ok} label="Qabul qilindi" tone="ok" />
-        <Stat n={result.rows_error} label="Xato qator" tone="bad" />
-        <Stat n={result.inserted} label="Qo‘shiladi" />
-        <Stat n={result.updated} label="Yangilanadi" />
+        <Stat n={result.rows_total} label={t('imp.totalRows')} />
+        <Stat n={result.rows_ok} label={t('imp.acceptedRows')} tone="ok" />
+        <Stat n={result.rows_error} label={t('imp.errorRows')} tone="bad" />
+        <Stat n={result.inserted} label={t('imp.willInsert')} />
+        <Stat n={result.updated} label={t('imp.willUpdate')} />
       </div>
 
       <Note>
-        <b>Dastlabki tekshiruv</b> — bazaga hali yozilmadi.
-        Sarlavha: {result.header_row}-qator · {(result.format || '').toLowerCase()}
+        <b>{t('imp.dryRun')}</b> {t('imp.notWritten')}{' '}
+        {t('imp.headerRow', { n: result.header_row })} · {(result.format || '').toLowerCase()}
       </Note>
 
       {/* Qaysi sarlavha qaysi maydonga tushdi */}
@@ -194,14 +200,14 @@ function DryRun({ result, busy, onConfirm, onCancel, onClose }: {
         <div className="flex flex-wrap gap-1.5">
           {detected.map(([field, header]) => (
             <span key={field}
-              className="rounded bg-secondary px-2 py-0.5 text-[11.5px] text-primary">
+              className="rounded bg-secondary px-2 py-0.5 text-caption text-primary">
               <b>{field}</b> ← “{String(header)}”
             </span>
           ))}
           {unknown.map((h) => (
-            <span key={h} title="Bu ustun tanilmadi va e’tiborga olinmaydi"
-              className="rounded bg-muted px-2 py-0.5 text-[11.5px] text-muted-foreground">
-              “{h}” — tanilmadi
+            <span key={h} title={t('cimp.unrecognizedTitle')}
+              className="rounded bg-muted px-2 py-0.5 text-caption text-muted-foreground">
+              {t('cimp.unrecognized', { h })}
             </span>
           ))}
         </div>
@@ -211,10 +217,10 @@ function DryRun({ result, busy, onConfirm, onCancel, onClose }: {
       {errors.length > 0 && (
         <Card className="overflow-hidden border-urgent/40">
           <div className="flex flex-wrap items-baseline gap-2 bg-urgent-soft px-3 py-2">
-            <p className="text-[13px] font-semibold text-urgent">
-              Xatolar — {result.rows_error} ta qator o‘tmaydi
+            <p className="text-body font-semibold text-urgent-strong">
+              {t('imp.errorsTitle', { n: result.rows_error })}
             </p>
-            <span className="text-[12px] text-urgent/80">tuzatib, qayta yuklang</span>
+            <span className="text-caption text-urgent-strong/80">{t('imp.errorsHint')}</span>
           </div>
           <IssueTable issues={errors} tone="err" />
         </Card>
@@ -223,9 +229,9 @@ function DryRun({ result, busy, onConfirm, onCancel, onClose }: {
       {/* --- OGOHLANTIRISHLAR: qator qabul qilinadi --- */}
       {warnings.length > 0 && (
         <Card className="overflow-hidden border-soon/40">
-          <p className="bg-soon-soft px-3 py-2 text-[13px] font-semibold text-soon"
-            title="Bu qatorlar baribir qabul qilinadi">
-            Ogohlantirishlar — {warnings.length} ta
+          <p className="bg-soon-soft px-3 py-2 text-body font-semibold text-soon-strong"
+            title={t('imp.warningsHint')}>
+            {t('imp.warningsTitle', { n: warnings.length })}
           </p>
           <IssueTable issues={warnings} tone="warn" />
         </Card>
@@ -235,23 +241,23 @@ function DryRun({ result, busy, onConfirm, onCancel, onClose }: {
       {!!result.preview?.length && (
         <Card className="overflow-hidden">
           <div className="flex flex-wrap items-baseline gap-2 border-b px-3 py-2">
-            <p className="text-[13px] font-semibold">Qabul qilingan qatorlar</p>
+            <p className="text-body font-semibold">{t('cimp.previewTitle')}</p>
             {result.rows_ok > result.preview.length && (
-              <span className="text-[12px] text-muted-foreground">
-                birinchi {result.preview.length} tasi
+              <span className="text-caption text-muted-foreground">
+                {t('imp.firstN', { n: result.preview.length })}
               </span>
             )}
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-[12.5px]">
+            <table className="w-full text-caption">
               <thead>
-                <tr className="border-b text-[11px] text-muted-foreground">
-                  <th className="w-16 p-2 text-left font-semibold">Qator</th>
-                  <th className="p-2 text-left font-semibold">Nomi</th>
-                  <th className="p-2 text-left font-semibold">Xususiyatlari</th>
-                  <th className="w-20 p-2 text-left font-semibold">Birlik</th>
-                  <th className="w-24 p-2 text-right font-semibold">Qoldiq</th>
-                  <th className="w-28 p-2 text-right font-semibold">Tannarx</th>
+                <tr className="border-b text-micro text-muted-foreground">
+                  <th className="w-16 p-2 text-left font-semibold">{t('imp.thRow')}</th>
+                  <th className="p-2 text-left font-semibold">{t('drawer.thName')}</th>
+                  <th className="p-2 text-left font-semibold">{t('cimp.thProps')}</th>
+                  <th className="w-20 p-2 text-left font-semibold">{t('cimp.thUnit')}</th>
+                  <th className="w-24 p-2 text-right font-semibold">{t('cimp.thStock')}</th>
+                  <th className="w-28 p-2 text-right font-semibold">{t('cimp.thCost')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -267,7 +273,7 @@ function DryRun({ result, busy, onConfirm, onCancel, onClose }: {
                       {r.stock_qty ?? <span className="text-muted-foreground">—</span>}
                     </td>
                     <td className="tabular p-2 text-right">
-                      {r.cost_price != null ? r.cost_price.toLocaleString('ru-RU')
+                      {r.cost_price != null ? f.num(r.cost_price)
                         : <span className="text-muted-foreground">—</span>}
                     </td>
                   </tr>
@@ -281,12 +287,14 @@ function DryRun({ result, busy, onConfirm, onCancel, onClose }: {
       <div className="flex flex-wrap items-center gap-2">
         <Button onClick={onConfirm} disabled={busy || result.rows_ok === 0}>
           <Icon name="check" size={14} />
-          {busy ? 'Yuklanmoqda…' : `Tasdiqlash — ${result.rows_ok} ta qator`}
+          {busy ? t('common.loading') : t('cimp.confirm', { n: result.rows_ok })}
         </Button>
-        <Button variant="outline" onClick={onCancel} disabled={busy}>Bekor qilish</Button>
-        {onClose && <Button variant="ghost" onClick={onClose} disabled={busy}>Yopish</Button>}
+        <Button variant="outline" onClick={onCancel} disabled={busy}>{t('common.cancel')}</Button>
+        {onClose && (
+          <Button variant="ghost" onClick={onClose} disabled={busy}>{t('common.close')}</Button>
+        )}
         {result.rows_ok === 0 && (
-          <span className="text-[12.5px] text-urgent">To‘g‘ri qator yo‘q — xatolarni tuzating.</span>
+          <span className="text-caption text-urgent-strong">{t('cimp.noValidRows')}</span>
         )}
       </div>
     </div>
@@ -297,15 +305,20 @@ function IssueTable({ issues, tone }: {
   issues: ImportResult['errors'] & object
   tone: 'err' | 'warn'
 }) {
+  const t = useT()
   return (
     <div className="max-h-[300px] overflow-auto">
-      <table className="w-full text-[12.5px]">
+      <table className="w-full text-caption">
         <thead className="sticky top-0 bg-card">
-          <tr className="border-b text-[11px] text-muted-foreground">
-            <th className="w-16 p-2 text-left font-semibold">Qator</th>
-            <th className="w-32 p-2 text-left font-semibold">Ustun</th>
-            {tone === 'err' && <th className="w-36 p-2 text-left font-semibold">Qiymat</th>}
-            <th className="p-2 text-left font-semibold">{tone === 'err' ? 'Xato' : 'Izoh'}</th>
+          <tr className="border-b text-micro text-muted-foreground">
+            <th className="w-16 p-2 text-left font-semibold">{t('imp.thRow')}</th>
+            <th className="w-32 p-2 text-left font-semibold">{t('imp.thColumn')}</th>
+            {tone === 'err' && (
+              <th className="w-36 p-2 text-left font-semibold">{t('imp.thValue')}</th>
+            )}
+            <th className="p-2 text-left font-semibold">
+              {t(tone === 'err' ? 'imp.thError' : 'imp.thNote')}
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -314,7 +327,7 @@ function IssueTable({ issues, tone }: {
               <td className="p-2">
                 <span className={cn(
                   'tabular rounded px-1.5 py-0.5 font-semibold',
-                  tone === 'err' ? 'bg-urgent-soft text-urgent' : 'bg-soon-soft text-soon',
+                  tone === 'err' ? 'bg-urgent-soft text-urgent-strong' : 'bg-soon-soft text-soon-strong',
                 )}>{e.row}</span>
               </td>
               <td className="p-2 text-muted-foreground">{e.column}</td>
@@ -322,7 +335,7 @@ function IssueTable({ issues, tone }: {
                 <td className="p-2">
                   {e.value
                     ? <span className="rounded bg-muted px-1.5 py-0.5">{e.value}</span>
-                    : <span className="text-muted-foreground">— bo‘sh —</span>}
+                    : <span className="text-muted-foreground">{t('imp.emptyValue')}</span>}
                 </td>
               )}
               <td className="p-2">{e.message}</td>
@@ -335,11 +348,11 @@ function IssueTable({ issues, tone }: {
 }
 
 function Stat({ n, label, tone }: { n: number; label: string; tone?: 'ok' | 'bad' }) {
-  const color = tone === 'ok' ? 'text-ok' : tone === 'bad' ? 'text-urgent' : 'text-foreground'
+  const color = tone === 'ok' ? 'text-ok-strong' : tone === 'bad' ? 'text-urgent-strong' : 'text-foreground'
   return (
     <div className="rounded-lg border bg-card px-3 py-2 text-center">
-      <div className={cn('tabular text-[19px] font-bold leading-tight', color)}>{n}</div>
-      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className={cn('tabular text-title font-semibold leading-tight', color)}>{n}</div>
+      <div className="text-micro text-muted-foreground">{label}</div>
     </div>
   )
 }

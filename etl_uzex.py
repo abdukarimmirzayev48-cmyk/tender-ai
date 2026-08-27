@@ -79,6 +79,61 @@ REGION_MAP: Dict[int, Tuple[str, str]] = {
     3049: ("33.3081", "Qoraqalpog‘iston Respublikasi"),
 }
 
+# UzEx ro'yxati hudud nomini uch xil ko'rinishda qaytaradi:
+#   * o'zbekcha lotin (kamdan-kam),
+#   * o'zbekcha kirill,
+#   * detail ichida ruscha (`delivering_region_name`).
+#
+# Faqat `REGION_MAP` dagi lotincha nom bilan tenglashtirish 376 ta ochiq
+# UzEx tenderining 374 tasini hududsiz qoldirgan. Aliaslar ID ga emas,
+# bizning KANONIK `dim_area.area_id` yo'liga bog'langan: manba nomi
+# o'zgarsa ham bazadagi ierarxiya bir xil qoladi.
+REGION_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "33.34": (
+        "Andijon viloyati", "Андижон вилояти", "Андижанская область",
+    ),
+    "33.274": (
+        "Buxoro viloyati", "Бухоро вилояти", "Бухарская область",
+    ),
+    "33.519": (
+        "Jizzax viloyati", "Жиззах вилояти", "Джизакская область",
+    ),
+    "33.711": (
+        "Qashqadaryo viloyati", "Қашқадарё вилояти", "Кашкадарьинская область",
+    ),
+    "33.1040": (
+        "Navoiy viloyati", "Навоий вилояти", "Навоийская область",
+    ),
+    "33.1182": (
+        "Namangan viloyati", "Наманган вилояти", "Наманганская область",
+    ),
+    "33.1445": (
+        "Samarqand viloyati", "Самарқанд вилояти", "Самаркандская область",
+    ),
+    "33.1724": (
+        "Surxondaryo viloyati", "Сурхандарё вилояти", "Сурхандарьинская область",
+    ),
+    "33.2009": (
+        "Sirdaryo viloyati", "Сирдарё вилояти", "Сырдарьинская область",
+    ),
+    "33.2137": (
+        "Toshkent shahri", "Тошкент шаҳри", "город Ташкент", "Ташкент",
+    ),
+    "33.2152": (
+        "Toshkent viloyati", "Тошкент вилояти", "Ташкентская область",
+    ),
+    "33.2466": (
+        "Farg‘ona viloyati", "Farg'ona viloyati", "Фарғона вилояти", "Ферганская область",
+    ),
+    "33.2890": (
+        "Xorazm viloyati", "Хоразм вилояти", "Хорезмская область",
+    ),
+    "33.3081": (
+        "Qoraqalpog‘iston Respublikasi", "Qoraqalpog'iston Respublikasi",
+        "Қорақалпоғистон Республикаси", "Республика Каракалпакстан",
+    ),
+}
+
 # SAVDO TURI: UzEx TypeId -> bizning kanonik `tender.type` qiymati.
 # xt-xarid ham xuddi shu atamalarni beradi ('tender' / 'selection'), shuning
 # uchun ikkala platformada tur bo'yicha filtr bir xil ishlaydi.
@@ -88,11 +143,33 @@ TYPE_BY_ID: Dict[int, str] = {
 }
 DEFAULT_TYPE = "tender"   # noma'lum TypeId uchun xavfsiz zaxira
 
-# Muddat birligini kunga o'girish
-PERIOD_DAYS = {"дней": 1, "день": 1, "кун": 1, "kun": 1,
-               "неделя": 7, "hafta": 7,
-               "месяц": 30, "ой": 30, "oy": 30,
-               "год (лет)": 365, "год": 365, "йил": 365, "yil": 365}
+# Muddat birligini kunga o'girish — O'ZAK bo'yicha, aniq moslik bo'yicha EMAS.
+#
+# NEGA O'ZAK: manba birlik nomini KELISHIKDA qaytaradi. O'lchangan qiymatlar
+# (2551 pozitsiya): "Дней", "Месяцев", "Год (лет)" — bosh kelishikdagi
+# "день"/"месяц"/"год" HECH QACHON kelmaydi. Aniq moslikda "Месяцев" jadvaldan
+# topilmay ×1 bo'lib qolardi va 12 oylik kafolat 12 KUN bo'lib saqlanardi
+# (2551 pozitsiyaning 913 tasi — 36%).
+#
+# TARTIB MUHIM: uzunroq o'zak oldin tekshiriladi, aks holda qisqasi uni
+# yutib yuborardi.
+PERIOD_STEMS = (
+    ("недел", 7), ("hafta", 7), ("apta", 7),
+    ("месяц", 30), ("мес", 30), ("oy", 30), ("ой", 30), ("month", 30),
+    ("год", 365), ("лет", 365), ("йил", 365), ("yil", 365), ("year", 365),
+    ("дн", 1), ("ден", 1), ("кун", 1), ("kun", 1), ("day", 1),
+)
+
+
+def period_mult(period_name: Optional[str]) -> int:
+    """Birlik nomi -> kunlar soni. Tanilmasa 1 (ya'ni qiymat kunda deb olinadi)."""
+    s = (period_name or "").strip().lower()
+    if not s:
+        return 1
+    for stem, days in PERIOD_STEMS:
+        if s.startswith(stem):
+            return days
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -119,24 +196,50 @@ def jparse(v: Any) -> Any:
 
 
 def to_days(term: Any, period_name: Optional[str]) -> Optional[int]:
-    """Delivery_Term=1 + 'Год (лет)' -> 365 kun."""
+    """Muddatni kunga o'giradi: Guarantee_Term=1 + 'Год (лет)' -> 365 kun.
+
+    DIQQAT — `Term_Period_Name` FAQAT KAFOLATGA tegishli, yetkazishga EMAS.
+    UzEx pozitsiyasida bitta `Term_Period_Name` maydoni bor, lekin u ikkala
+    muddatning birligi emas. O'lchangan dalil (2551 pozitsiya):
+
+        Term_Period_Name | Delivery_Term xom | Guarantee_Term xom
+        Дней             | median 30         | median 3
+        Месяцев          | median 22         | median 12
+        Год (лет)        | median 15         | median 1
+
+    Delivery_Term medianasi uch guruhda ham bir xil darajada — ya'ni u
+    DOIM KUNDA. Guarantee_Term esa guruhga qarab o'zgaradi (3 kun / 12 oy /
+    1 yil) — birlik aynan unga tegishli.
+
+    Shuning uchun yetkazish uchun bu funksiya `period_name=None` bilan
+    chaqiriladi. Ilgari ikkalasiga ham bir xil birlik berilgan edi va
+    "7 kun" -> "7 yil" (2555 kun) bo'lib ketardi: 2551 pozitsiyaning
+    934 tasi (37%) shu sababdan buzilgan edi.
+    """
     if term in (None, ""):
         return None
     try:
         n = float(term)
     except (TypeError, ValueError):
         return None
-    mult = PERIOD_DAYS.get((period_name or "").strip().lower(), 1)
-    return int(round(n * mult))
+    return int(round(n * period_mult(period_name)))
 
 
-def region_for(name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """Viloyat nomi -> (area_path, area_leaf_id) kanonik kodda."""
-    if not name:
-        return None, None
-    key = name.strip().lower().replace("`", "‘").replace("'", "‘")
-    for _uid, (code, uz) in REGION_MAP.items():
-        if uz.strip().lower().replace("`", "‘").replace("'", "‘") == key:
+def _region_key(name: Optional[str]) -> str:
+    """Hudud nomini taqqoslash uchun yumshoq normalizatsiya qiladi."""
+    return " ".join((name or "").replace("\xa0", " ").strip().casefold().split()) \
+        .replace("`", "‘").replace("'", "‘").replace("ʻ", "‘")
+
+
+def region_for(*names: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Lotin/kirill/rus nomlaridan kanonik viloyat kodini topadi.
+
+    Birinchi nom odatda TradeList'dan; u bo'sh bo'lsa detail ichidagi
+    `delivering_region_name` zaxira bo'ladi.
+    """
+    keys = {_region_key(name) for name in names if _region_key(name)}
+    for code, aliases in REGION_ALIASES.items():
+        if any(_region_key(alias) in keys for alias in aliases):
             return code, code
     return None, None
 
@@ -197,7 +300,8 @@ def scan_documents(detail: dict, tender_id: int) -> List[dict]:
 def transform(row: dict, detail: dict, type_id: int = 2) -> dict:
     src_id = int(row["id"])
     tid = UZEX_OFFSET + src_id
-    area_path, area_leaf = region_for(row.get("region_name"))
+    area_path, area_leaf = region_for(
+        row.get("region_name"), detail.get("delivering_region_name"))
 
     bp = jparse(detail.get("budget_products")) or []
 
@@ -211,7 +315,7 @@ def transform(row: dict, detail: dict, type_id: int = 2) -> dict:
         "currency": row.get("currency_codeabc"),
         "lang": None,
         "area_path": area_path, "area_leaf_id": area_leaf,
-        "company_id": row.get("seller_id"),
+        "buyer_org_id": row.get("seller_id"),   # UzEx: sotuvchi = buyurtmachi
         "company_name": (row.get("seller_name") or detail.get("customer_name") or "").strip() or None,
         "publicated_at": row.get("start_date"),
         "close_at": row.get("end_date"),
@@ -245,7 +349,9 @@ def transform(row: dict, detail: dict, type_id: int = 2) -> dict:
             "amount_text": f"{p.get('Quantity')} {unit or ''}".strip(),
             "price_text": str(p.get("Price")),
             "totalcost_text": str(p.get("Cost")),
-            "delivery_period": to_days(p.get("Delivery_Term"), p.get("Term_Period_Name")),
+            # Yetkazish DOIM kunda — birlik berilmaydi (izohga qarang).
+            "delivery_period": to_days(p.get("Delivery_Term"), None),
+            # Kafolat — `Term_Period_Name` aynan shu maydonning birligi.
             "guarantee": to_days(p.get("Guarantee_Term"), p.get("Term_Period_Name")),
             "prod_year": None,
             "country_of_origin": None,
@@ -278,7 +384,7 @@ def transform(row: dict, detail: dict, type_id: int = 2) -> dict:
 # ---------------------------------------------------------------------------
 T_COLS = ["id", "source_id", "source_platform", "type", "name", "status",
           "totalcost", "currency", "lang", "area_path", "area_leaf_id",
-          "company_id", "company_name", "publicated_at", "close_at",
+          "buyer_org_id", "company_name", "publicated_at", "close_at",
           "created_at", "lot_count", "good_count", "raw_json"]
 D_COLS = ["tender_id", "anno", "method_marks", "company_details", "director",
           "close_time", "proc_lang", "offer_period", "doc_count", "raw_json"]
@@ -351,6 +457,50 @@ def sync_region_names(conn) -> None:
     conn.commit()
 
 
+def backfill_regions(conn) -> Tuple[int, int]:
+    """Eski UzEx yozuvlarining hududini saqlangan xom javobdan tiklaydi.
+
+    Adapterdagi aliaslar tuzatilishidan oldin yozilgan tenderlar qayta ETL
+    qilinmaguncha NULL bo'lib qolmasligi uchun. Faqat hududi bo'sh UzEx
+    yozuvlariga tegadi; qo'lda yoki boshqa manbadan kelgan qiymatni
+    almashtirmaydi. Natija: (tekshirilgan, yangilangan).
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, raw_json
+            FROM tender
+            WHERE source_platform = %s
+              AND (area_path IS NULL OR area_leaf_id IS NULL)
+        """, (SOURCE,))
+        rows = cur.fetchall()
+
+    updates = []
+    for tender_id, raw in rows:
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            list_row = payload.get("list") or {}
+            detail = payload.get("detail") or {}
+            area_path, area_leaf = region_for(
+                list_row.get("region_name"),
+                detail.get("delivering_region_name"),
+            )
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if area_path:
+            updates.append((area_path, area_leaf, tender_id))
+
+    if updates:
+        with conn.cursor() as cur:
+            cur.executemany("""
+                UPDATE tender
+                SET area_path = %s, area_leaf_id = %s
+                WHERE id = %s AND source_platform = 'uzex'
+                  AND (area_path IS NULL OR area_leaf_id IS NULL)
+            """, updates)
+    conn.commit()
+    return len(rows), len(updates)
+
+
 # ---------------------------------------------------------------------------
 def main() -> None:
     ap = argparse.ArgumentParser(description="etender.uzex.uz adapteri")
@@ -375,6 +525,9 @@ def main() -> None:
             sys.exit("XATO: pip install psycopg2-binary")
         conn = psycopg2.connect(args.dsn)
         sync_region_names(conn)
+        checked, filled = backfill_regions(conn)
+        if checked:
+            print(f"[i] Eski UzEx hududlari: {filled}/{checked} ta tiklandi.")
     else:
         conn = None
 

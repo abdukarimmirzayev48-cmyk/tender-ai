@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react'
-import { api } from '@/api'
+import { api, getToken, setUnauthorizedHandler } from '@/api'
+import type { CompanyAccount } from '@/api'
 import Icon from './components/Icon'
 import Sidebar from './components/Sidebar'
 import Filters from './components/Filters'
@@ -13,8 +14,11 @@ import CatalogView from './components/CatalogView'
 import AccountSettings from './components/AccountSettings'
 import CompanyDocuments from './components/CompanyDocuments'
 import Freshness from './components/Freshness'
+import LoginPage from './components/LoginPage'
+import { useI18n } from '@/i18n'
+import type { TKey } from '@/i18n'
 import { Button } from '@/components/ui/button'
-import { FlipText } from '@/components/ui/flip-text'
+import { ConfirmDialog, useConfirm } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 
@@ -23,10 +27,19 @@ import { cn } from '@/lib/utils'
 // ochgan HAR BIR foydalanuvchi hech qachon ko'rmasligi mumkin bo'lgan grafik
 // kutubxonasini yuklab olardi.
 const StatsView = lazy(() => import('./components/StatsView'))
+// LAZY: tasdiqlash paneli kundalik ish emas — broker unga
+// vaqti-vaqti bilan kiradi. Boshlang'ich yuklamaga qo'shmaymiz.
+const RequirementReview = lazy(() =>
+  import('./components/RequirementReview'))
+const BrokerQueue = lazy(() => import('./components/BrokerQueue'))
 
 // Tender paneli ham alohida: u AI, narx hisobi, cheklist va ombor
 // panellarini tortadi, lekin faqat qatorga bosilganda ochiladi.
 const TenderDrawer = lazy(() => import('./components/TenderDrawer'))
+
+// AI-Chat ham alohida chunk: u `marked` + `DOMPurify` ni tortadi
+// (~13 KB gzip). Chat ochilmaguncha bu kod yuklab olinmaydi.
+const ChatPanel = lazy(() => import('./components/ChatPanel'))
 import type {
   Category, CompanyProfileData, CatalogMatchInfo, Freshness as FreshnessData,
   Product, Region, SavedSearch, Stats, Status, TenderRow,
@@ -44,24 +57,28 @@ const DEFAULT_FILTERS: FiltersState = {
 }
 
 // Katalog mosligini o'qiladigan sabablarga aylantiradi (drawer shuni ko'rsatadi).
-function catalogReasons(c?: CatalogMatchInfo): string[] {
-  if (!c) return []
-  const items = c.products || []
+function catalogReasons(c: CatalogMatchInfo | undefined,
+                        t: (k: TKey, v?: Record<string, string | number>) => string): string[] {
+  const items = c?.products || []
   if (!items.length) return []
-  return [`${c.by === 'category' ? 'Kategoriya' : 'Nom'} bo‘yicha mos: ${items.join(', ')}`]
+  const key: TKey = c!.by === 'category' ? 'app.matchedBy.category' : 'app.matchedBy.name'
+  return [t(key, { items: items.join(', ') })]
 }
 
-const VIEW_TITLES: Record<string, string> = {
-  tenders: 'Tenderlar',
-  match: 'Sizga mos',
-  catalog: 'Mahsulot katalogi',
-  documents: 'Hujjatlarim',
-  stats: 'Statistika',
-  profile: 'Saqlangan qidiruv',
-  account: 'Akkaunt',
+const VIEW_TITLES: Record<string, TKey> = {
+  tenders: 'nav.tenders',
+  match: 'nav.match',
+  catalog: 'nav.catalog',
+  documents: 'nav.documents',
+  requirements: 'nav.requirements',
+  broker: 'nav.broker',
+  stats: 'nav.stats',
+  profile: 'nav.profile',
+  account: 'nav.account',
 }
 
 export default function App() {
+  const { t, lang } = useI18n()
   const [view, setView] = useState('tenders')
   const [filters, setFilters] = useState<FiltersState>(DEFAULT_FILTERS)
   const [offset, setOffset] = useState(0)
@@ -90,6 +107,35 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<{ id: number; match?: TenderRow['match'] } | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  // Tor ekrandagi navigatsiya paneli ochiqmi
+  const [menuOpen, setMenuOpen] = useState(false)
+  // AI-Chat paneli. `null` — yopiq; son — o'sha tender konteksti;
+  // `0` — umumiy suhbat (kontekstsiz).
+  const [chatFor, setChatFor] = useState<number | null>(null)
+
+  // KIRISH (auth-2). `undefined` — hali tekshirilmadi (token bor, so'rov
+  // ketyapti); `null` — kirilmagan. Ikkisini ajratmasak, sahifa har
+  // yangilanganda kirish ekrani bir lahza chaqnab ketardi.
+  const [session, setSession] = useState<CompanyAccount | null | undefined>(
+    () => (getToken() ? undefined : null))
+
+  useEffect(() => {
+    // 401 — sessiya tugadi: kirish ekraniga qaytamiz (api.ts chaqiradi).
+    setUnauthorizedHandler(() => setSession(null))
+    return () => setUnauthorizedHandler(null)
+  }, [])
+
+  useEffect(() => {
+    if (session === undefined) {
+      // Saqlangan token haqiqiymi — bir marta tekshiriladi
+      api.me().then(setSession).catch(() => setSession(null))
+    }
+  }, [session])
+
+  async function signOut() {
+    await api.logout().catch(() => {})
+    setSession(null)
+  }
 
   // Bir martalik ma'lumotlar
   const loadSearches = useCallback(
@@ -98,7 +144,10 @@ export default function App() {
     api.catalog().then(setCatalog).catch(() => {})
     api.catalogNewCount().then(setCatalogNew).catch(() => {})
   }, [])
+  // Ma'lumot FAQAT kirgandan keyin so'raladi: aks holda kirish ekrani
+  // ochiq turganda o'nlab so'rov ketib, hammasi 401 qaytarardi.
   useEffect(() => {
+    if (!session) return
     api.regions().then((rs) => setRegions(rs.filter((r) => r.level === 1))).catch(() => {})
     api.statuses().then(setStatuses).catch(() => {})
     api.categories().then(setCategories).catch(() => {})
@@ -110,7 +159,23 @@ export default function App() {
     if (deep) setSelected({ id: Number(deep) })
     loadSearches()
     loadCatalog()
-  }, [loadSearches, loadCatalog])
+  }, [loadSearches, loadCatalog, session])
+
+  // XABAR TILI = INTERFEYS TILI (TZ P0-10).
+  // Bildirishnomani SERVER yuboradi — ETL dan keyin, soatlik jadval bo'yicha,
+  // ilova umuman ochiq bo'lmaganда ham. Server brauzerni ko'rmaydi, shuning
+  // uchun tanlangan til bazaga yozib qo'yiladi va email ham, Telegram ham
+  // aynan shu tilda keladi.
+  //
+  // FAQAT FARQ BO'LSA yoziladi: aks holda har ochilishda va har qayta
+  // chizishda behuda PUT ketib, sozlamaning `updated_at` i o'zgaraverardi.
+  // Xato JUTILADI — til afzalligi tufayli ilova ochilmay qolmasin.
+  useEffect(() => {
+    if (!session) return
+    api.notifySettings()
+      .then((s) => (s.lang === lang ? null : api.saveNotifySettings({ lang })))
+      .catch(() => {})
+  }, [lang, session])
 
   // Saqlangan qidiruvni qo'llash — profilga o'giradi va "Sizga mos"ga o'tadi
   function applySearch(s: SavedSearch) {
@@ -124,8 +189,9 @@ export default function App() {
   }
   function newSearch() { setEditing('new'); setView('profile'); setOffset(0) }
   function editSearch(s: SavedSearch) { setEditing(s); setView('profile'); setOffset(0) }
+
+  const deleteSearch = useConfirm<SavedSearch>()
   async function removeSearch(s: SavedSearch) {
-    if (!window.confirm(`"${s.name}" qidiruvini o‘chirasizmi?`)) return
     try { await api.deleteSearch(s.id) } catch { /* ignore */ }
     if (activeSearchId === s.id) { setActiveSearchId(null); setProfile(null) }
     loadSearches()
@@ -141,14 +207,15 @@ export default function App() {
     api.freshness().then(setFresh).catch(() => {})
 
     // Ro'yxatsiz ko'rinishlar tender so'ramaydi
-    if (['stats', 'profile', 'catalog', 'account', 'documents'].includes(view)) return
+    if (['stats', 'profile', 'catalog', 'account', 'documents',
+         'requirements', 'broker'].includes(view)) return
     if (!opts.silent) setLoading(true)
     setError(null)
     try {
-      let t: { items: TenderRow[]; total: number }
+      let rows: { items: TenderRow[]; total: number }
       if (view === 'match' && activeSearchId) {
         // Saqlangan qidiruv faol — kalit so'z bo'yicha ballaydi
-        t = await api.match({
+        rows = await api.match({
           profile: profile || { keywords: [], regions: [], currency: null, min_cost: null, max_cost: null },
           status: filters.status, region: filters.region, currency: filters.currency,
           q: filters.q, category: filters.category,
@@ -164,20 +231,20 @@ export default function App() {
         })
         // catalog -> match shakliga moslaymiz (TenderTable o'zgarmaydi).
         // `reasons` HAM berilishi SHART: drawer uni ro'yxat qilib ko'rsatadi.
-        t = {
+        rows = {
           ...r,
           items: r.items.map((it) => ({
             ...it,
             match: {
               score: it.catalog?.score,
               matched_keywords: it.catalog?.products,
-              reasons: catalogReasons(it.catalog),
+              reasons: catalogReasons(it.catalog, t),
             },
           })),
         }
         api.catalogSeen().then(() => setCatalogNew((n) => ({ ...n, new: 0 }))).catch(() => {})
       } else {
-        t = await api.tenders({
+        rows = await api.tenders({
           status: filters.status, region: filters.region,
           currency: filters.currency, q: filters.q, category: filters.category,
           product: filters.products, service: filters.services, source,
@@ -185,7 +252,7 @@ export default function App() {
         })
       }
       const s = await api.stats({ status: filters.status || 'open' })
-      setData(t)
+      setData(rows)
       setStats(s)
       setLastUpdated(new Date())
     } catch (e) {
@@ -193,7 +260,7 @@ export default function App() {
     } finally {
       if (!opts.silent) setLoading(false)
     }
-  }, [view, filters, offset, source, profile, activeSearchId])
+  }, [view, filters, offset, source, profile, activeSearchId, t])
 
   useEffect(() => { load() }, [load])
 
@@ -235,30 +302,53 @@ export default function App() {
   const activeSearch = searches.find((s) => s.id === activeSearchId)
   const emptyCatalog = view === 'match' && !activeSearchId && catalog.length === 0
 
+  // Token tekshirilmaguncha bo'sh ekran — kirish formasi chaqnamasin
+  if (session === undefined) return <div className="min-h-screen bg-background" />
+  if (!session) return <LoginPage onLogin={setSession} />
+
   return (
-    <div className="grid min-h-screen grid-cols-[232px_1fr] max-md:grid-cols-1">
+    <div className="grid min-h-screen md:grid-cols-[232px_1fr]">
+      {/* Klaviatura bilan ishlaydiganlar uchun: birinchi Tab — navigatsiyani
+          o'tkazib yuborish. Panelda o'nlab havola bor, ular har sahifada
+          takrorlanadi. */}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-[60] focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-body focus:text-primary-foreground"
+      >
+        {t('app.skipToContent')}
+      </a>
+
       <Sidebar
         active={view} onNavigate={goto}
-        newMatchCount={catalogNew.new} account={account}
+        newMatchCount={catalogNew.new} account={account} onSignOut={signOut}
         searches={searches} activeSearchId={activeSearchId}
         onApplySearch={applySearch} onNewSearch={newSearch}
-        onEditSearch={editSearch} onDeleteSearch={removeSearch}
+        onEditSearch={editSearch} onDeleteSearch={deleteSearch.ask}
+        mobileOpen={menuOpen} onMobileOpenChange={setMenuOpen}
       />
 
-      <main className="min-w-0 px-6 pb-16 pt-5">
-        <div className="mb-4 flex flex-wrap items-center gap-3">
-          {/* Sahifa sarlavhasi — Vengeance UI `FlipText`, `loop={false}`:
-              ko'rinish almashganda harflar bir marta ag'darilib chiqadi,
-              ya'ni qayerga o'tganingiz ko'zga tashlanadi.
-              `key={view}` SHART — u bo'lmasa React bir xil elementni qayta
-              ishlatadi va animatsiya faqat birinchi marta ishlaydi.
-              (`MorphText` ATAYIN olinmadi: u so'zlarni taymer bilan
-              aylantiradigan, `clamp(3rem,15vw,10rem)` o'lchamli landing-page
-              komponenti — dashboard sarlavhasi uchun emas.) */}
-          <h1 className="text-[22px] font-bold">
-            <FlipText key={view} loop={false} duration={0.9}>
-              {VIEW_TITLES[view] || ''}
-            </FlipText>
+      <ConfirmDialog
+        {...deleteSearch.props}
+        title={t('app.confirmDeleteSearch', { name: deleteSearch.target?.name ?? '' })}
+        onConfirm={() => deleteSearch.target && removeSearch(deleteSearch.target)}
+      />
+
+      <main id="main" className="min-w-0 px-4 pb-16 pt-4 sm:px-6 sm:pt-5">
+        <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <Button
+            variant="outline" size="icon" className="md:hidden"
+            aria-label={t('nav.openMenu')}
+            onClick={() => setMenuOpen(true)}
+          >
+            <Icon name="menu" size={18} />
+          </Button>
+          {/* Sahifa sarlavhasi. Avval bu yerda harflarni bitta-bitta
+              ag'daradigan animatsiya turgan edi — u qayerga o'tganingizni
+              yon paneldagi belgilangan bandga qaraganda YAXSHIROQ
+              ko'rsatmasdi, lekin sarlavhani har almashuvda bir soniya
+              o'qib bo'lmas holga keltirardi. */}
+          <h1 className="text-display font-semibold">
+            {VIEW_TITLES[view] ? t(VIEW_TITLES[view]) : ''}
           </h1>
           <div className="ml-auto flex items-center gap-2">
             <Freshness data={fresh} />
@@ -266,9 +356,11 @@ export default function App() {
                 bazamizdan qayta o'qiydi. Manbadan yig'ish — ETL ishi. */}
             {isList && (
               <Button variant="outline" size="sm" onClick={() => load()} disabled={loading}
-                title="Ro'yxatni bazadan qayta o'qiydi (manba saytlarga so'rov yubormaydi)">
-                <Icon name="refresh" size={14} className={cn(loading && 'animate-spin')} />
-                Yangilash
+                title={t('app.refreshTitle')}>
+                <Icon name="refresh" size={14} className={cn(loading && 'motion-safe:animate-spin')} />
+                <span className="max-sm:sr-only">
+                  {loading ? t('common.loading') : t('common.refresh')}
+                </span>
               </Button>
             )}
           </div>
@@ -286,25 +378,32 @@ export default function App() {
 
             {view === 'match' && activeSearch && (
               <Info>
-                Saqlangan qidiruv: <b>{activeSearch.name}</b>
+                {t('app.savedSearch')} <b>{activeSearch.name}</b>
                 <button className="ml-1.5 font-semibold underline-offset-2 hover:underline"
-                  onClick={() => goto('match')}>Katalog bo‘yicha →</button>
+                  onClick={() => goto('match')}>{t('app.byCatalog')}</button>
               </Info>
             )}
             {emptyCatalog && (
               <Info>
-                Katalogingiz bo‘sh — to‘ldirsangiz mos tenderlar shu yerda chiqadi.
+                {t('app.emptyCatalog')}
                 <button className="ml-1.5 font-semibold underline-offset-2 hover:underline"
-                  onClick={() => goto('catalog')}>Katalogga o‘tish →</button>
+                  onClick={() => goto('catalog')}>{t('app.toCatalog')}</button>
               </Info>
             )}
 
             <StatsStrip stats={stats} total={data.total} lastUpdated={lastUpdated} />
 
+            {/* `role="alert"` — ekran o'quvchi xatoni DARHOL o'qiydi. U
+                bo'lmasa xabar sahifada jimgina paydo bo'lardi va faqat
+                kursorni o'sha yerga olib borgan odam bilardi. */}
             {error && (
-              <div className="mb-3 rounded-lg border border-urgent/40 bg-urgent-soft px-3.5 py-2.5 text-[13px] text-urgent">
-                Xatolik: {error}
-                <div className="mt-0.5 text-[12px] opacity-80">Backend ishlayaptimi? (:8000)</div>
+              <div role="alert"
+                className="mb-3 rounded-lg border border-urgent/40 bg-urgent-soft px-3.5 py-2.5 text-body text-urgent-strong">
+                <p className="font-semibold">{t('common.errorWith', { msg: error })}</p>
+                <p className="mt-0.5 text-caption">{t('app.backendHint')}</p>
+                <Button variant="outline" size="sm" className="mt-2" onClick={() => load()}>
+                  {t('common.retry')}
+                </Button>
               </div>
             )}
 
@@ -341,6 +440,22 @@ export default function App() {
         {/* Saqlangach yon paneldagi ism/email darhol yangilanadi */}
         {view === 'account' && <AccountSettings onSaved={setAccount} />}
         {view === 'documents' && <CompanyDocuments focusType={docFocus} />}
+        {view === 'requirements' && (
+          <Suspense fallback={<Skeleton className="h-[420px] w-full rounded-xl" />}>
+            {/* Manbaga sakrash: hujjat matni tender panelida ochiladi,
+                ya'ni tasdiqlovchi AYNAN o'sha bo'lakni ko'radi. */}
+            <RequirementReview
+              onOpenSource={(_ref, _pos) => { /* keyingi qadam: DocumentText ga chuqur havola */ }}
+            />
+          </Suspense>
+        )}
+        {view === 'broker' && (
+          <Suspense fallback={<Skeleton className="h-[420px] w-full rounded-xl" />}>
+            {/* Tenderni ochish: broker qaror berishdan OLDIN manbani
+                ko'rishi kerak — qaror faqat `ai_sabab` ga tayanmasin. */}
+            <BrokerQueue onOpenTender={(id) => setSelected({ id })} />
+          </Suspense>
+        )}
         {view === 'stats' && (
           <Suspense fallback={<Skeleton className="h-[420px] w-full rounded-xl" />}>
             <StatsView />
@@ -356,11 +471,38 @@ export default function App() {
         )}
       </main>
 
+      {chatFor !== null && (
+        <Suspense fallback={null}>
+          <div className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[440px]
+                          flex-col border-l shadow-xl">
+            <ChatPanel
+              tenderId={chatFor || null}
+              onClose={() => setChatFor(null)}
+              onOpenCitation={(c) => setSelected({ id: c.tender_id })} />
+          </div>
+        </Suspense>
+      )}
+
+      {/* AI-Chat tugmasi — chat yopiq bo'lganda ko'rinadi */}
+      {chatFor === null && (
+        <button
+          type="button"
+          onClick={() => setChatFor(0)}
+          title={t('chat.title')}
+          className="fixed bottom-5 right-5 z-30 flex h-12 w-12 items-center
+                     justify-center rounded-full bg-primary text-primary-foreground
+                     shadow-lg transition hover:opacity-90"
+        >
+          <Icon name="sparkle" size={20} />
+        </button>
+      )}
+
       {selected && (
         <Suspense fallback={null}>
           <TenderDrawer
             id={selected.id} match={selected.match}
             onOpenDocuments={openDocuments}
+            onAskAi={(tid) => setChatFor(tid)}
             onClose={() => {
               setSelected(null)
               // Bildirishnomadan kelgan ?tender= parametrini olib tashlaymiz
@@ -376,7 +518,7 @@ export default function App() {
 
 function Info({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mb-3 rounded-lg border border-primary/30 bg-secondary px-3.5 py-2.5 text-[13px] text-primary">
+    <div className="mb-3 rounded-lg border border-primary/30 bg-secondary px-3.5 py-2.5 text-body text-primary">
       {children}
     </div>
   )

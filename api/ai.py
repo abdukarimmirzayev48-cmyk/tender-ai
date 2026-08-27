@@ -204,9 +204,56 @@ def content_hash(text: str) -> str:
 _client = None
 
 
+# =====================================================================
+# PULLIK CHAQIRUV QULFI
+#
+# STANDART HOLAT — BLOKLANGAN. Loyiha egasi qat'iy shart qo'ydi:
+# ishlab chiqarish holatiga chiqmaguncha HECH QANDAY pullik amal
+# bajarilmaydi.
+#
+# NEGA KODDA, ESLAB QOLISHDA EMAS: bu loyihada pullik chaqiruv TO'RT
+# modulda va bitta sinov jabdug'ida bor (`ai`, `ai_gonogo`,
+# `ai_match`, `requirement_ai`, `_tests/ai_eval`). Ularning birortasi
+# tasodifan chaqirilsa — pul sarflanadi va buni QAYTARIB BO'LMAYDI.
+# Qoidani odam eslab qolishiga tayanish yetarli emas.
+#
+# Yoqish: `.env` da `AI_PAID_ENABLED=1`. Bu ATAYLAB env orqali —
+# kodni o'zgartirmasdan, bitta joydan, va o'chirish ham shunchalik
+# oson.
+#
+# QULF NIMANI QAMRAMAYDI: lokal embedding (`multilingual-e5-small`),
+# naqsh ajratgichi, retrieval, ETL — ular pul sarflamaydi va
+# bloklanmaydi.
+PAID_ENV = "AI_PAID_ENABLED"
+
+
+def paid_allowed() -> bool:
+    """Pullik chaqiruvga ruxsat bormi. Standart: YO'Q."""
+    return os.environ.get(PAID_ENV, "0").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def paid_guard(nima: str = "AI chaqiruvi") -> None:
+    """Pullik amal oldidan chaqiriladi. Ruxsat bo'lmasa TO'XTATADI.
+
+    `AIUnavailable` ko'tariladi — loyihaning "AI ixtiyoriy" tamoyili
+    bo'yicha chaqiruvchilar buni allaqachon xato emas, HOLAT deb
+    ishlaydi (interfeys ogohlantirish ko'rsatadi, ETL davom etadi).
+    """
+    if not paid_allowed():
+        raise AIUnavailable(
+            f"{nima} BLOKLANGAN: pullik amallar o'chirilgan.\n"
+            f"  Loyiha ishlab chiqarish holatiga chiqmaguncha hech "
+            f"qanday pullik chaqiruv bajarilmaydi.\n"
+            f"  Yoqish (ATAYLAB): .env da {PAID_ENV}=1")
+
+
 def get_client():
     """Anthropic mijozi (lazy). Kalit yo'q bo'lsa aniq xato beradi."""
     global _client
+    # QULF BIRINCHI — kesh tekshiruvidan ham OLDIN. Aks holda bir
+    # marta yaratilgan mijoz qulfni chetlab o'tardi.
+    paid_guard("Anthropic mijozi")
     if _client is not None:
         return _client
     if not os.environ.get("ANTHROPIC_API_KEY"):

@@ -44,6 +44,8 @@ import zipfile
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
 
+import zipfile
+
 import requests
 
 try:
@@ -106,8 +108,44 @@ EXT_PDF   = {"pdf"}
 EXT_DOCX  = {"docx", "docm"}
 EXT_XLSX  = {"xlsx", "xlsm"}
 EXT_PLAIN = {"txt", "csv", "htm", "html", "xml", "json", "md"}
+EXT_ZIP   = {"zip"}
+EXT_OLE2  = {"ole2"}      # eski Word/Excel — `sniff_magic` beradi
+
+# --- ZIP CHEKLOVLARI -------------------------------------------------
+# Arxiv TASHQI MANBADAN keladi, ya'ni ishonchsiz.
+#
+# ZIP SLIP (a'zo nomida `../../`) bu yerda TUZILISHIGA KO'RA mumkin
+# emas: biz hech qachon diskka yozmaymiz, a'zo faqat xotirada
+# o'qiladi va nomi faqat YORLIQ sifatida ishlatiladi. Shunday bo'lsa
+# ham nom tozalanadi — chalg'ituvchi matn chiqmasin.
+#
+# ZIP BOMBA esa haqiqiy xavf: 40 KB arxiv ochilganda gigabaytga
+# aylanishi mumkin. Uchta chegara qo'yamiz va ularning HAMMASI
+# ochishdan OLDIN, `ZipInfo.file_size` (siqilmagan hajm) bo'yicha
+# tekshiriladi.
+ZIP_MAX_MEMBERS = 40          # a'zolar soni
+ZIP_MAX_TOTAL   = 60 * 1024 * 1024   # jami siqilmagan hajm
+ZIP_MAX_MEMBER  = 25 * 1024 * 1024   # bitta a'zo (MAX_BYTES bilan bir xil)
+# Ichma-ich arxiv OCHILMAYDI: 1 daraja yetarli, chuqurroq ketish
+# bombaga eshik ochadi va amalda uchramaydi.
+ZIP_MAX_DEPTH   = 1
+
+#: Sehrli baytlar — KENGAYTMA YOLG'ON BO'LISHI MUMKIN.
+#: Namunada (2026-08-25) `.doc` deb belgilangan 6 fayldan 1 tasi
+#: aslida `docx` (ZIP) bo'lib chiqdi. Kengaytmaga ishonsak, o'qilishi
+#: mumkin bo'lgan hujjatni bekorga rad etardik.
+_MAGIC = [
+    (b"%PDF", "pdf"),
+    (b"PK\x03\x04", "zip"),           # zip | docx | xlsx — pastda ajratiladi
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole2"),   # eski doc/xls
+    (b"Rar!\x1a\x07", "rar"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"{\\rtf", "rtf"),
+    (b"\x1f\x8b", "gz"),
+]
+
 # Bilib turib rad etamiz (arxiv / eski binar format / rasm)
-EXT_KNOWN_UNSUPPORTED = {"rar", "zip", "7z", "tar", "gz", "doc", "xls", "ppt",
+EXT_KNOWN_UNSUPPORTED = {"rar", "7z", "tar", "gz", "xls", "ppt",
                          "pptx", "jpg", "jpeg", "png", "gif", "tif", "tiff",
                          "bmp", "exe", "dwg", "sig", "p7s", "pfx", "ofd"}
 
@@ -316,6 +354,171 @@ def extract_plain(data: bytes, ext: str) -> Tuple[str, Optional[int], str, Optio
     return clean(text), None, "plain", None
 
 
+#: OLE2 matnida yaroqli deb hisoblanadigan belgilar.
+_OLE_YAROQLI = re.compile(
+    r"[0-9A-Za-z\u0400-\u04FF\u02BC'\u2018\u2019\u201C\u201D"
+    r"\u00AB\u00BB\u2116\s.,;:!?()\[\]/\\%+\-\u2013\u2014=\"#&@*]+")
+
+#: Bo'lak shu uzunlikdan qisqa bo'lsa — tasodifiy shovqin.
+OLE_MIN_BOLAK = 40
+
+#: Bir xil belgining uzun takrori — Word ning ichki to'ldiruvchi
+#: maydoni. Bo'lakni butunlay rad etish XATO bo'lardi: shovqin
+#: HAQIQIY MATNGA YOPISHIB kelishi mumkin va u bilan birga tushib
+#: ketardi. Shuning uchun avval KESIB tashlaymiz, keyin baholaymiz.
+_TAKROR_RE = re.compile(r"(.)\1{7,}")
+
+
+def _ole_shovqinmi(bolak: str) -> bool:
+    """Bir xil belgi takrori yoki juda kambag'al bo'lak — binar shovqin.
+
+    O'LCHANDI: namunalarning birida matn `яяяяяяяя...` bilan
+    boshlanardi — bu Word ning ichki binar maydoni cp1251 da shunday
+    o'qilgani. Uzunligi katta, ma'nosi yo'q.
+    """
+    toza = bolak.strip()
+    if not toza:
+        return True
+    xilma = len(set(toza))
+    if xilma <= 3:                       # "яяяя", "0000", "    "
+        return True
+    # Eng ko'p uchraydigan belgi bo'lakning yarmidan ko'pini egallasa
+    eng = max(toza.count(ch) for ch in set(toza))
+    return eng > len(toza) * 0.5
+
+
+def extract_doc(data: bytes) -> Tuple[str, Optional[int], str, Optional[str]]:
+    """Eski Word (.doc, OLE2) dan matn — QO'SHIMCHA KUTUBXONASIZ.
+
+    NEGA `olefile` EMAS: Word 97-2003 matnni `WordDocument` oqimida
+    UTF-16LE (yoki cp1251) da UZUN UZLUKSIZ bo'laklar sifatida
+    saqlaydi. FIB ni to'g'ri o'qish uchun `olefile` kerak, lekin
+    RAG uchun bizga matnning O'ZI yetarli — bo'lak chegarasi aniq
+    bo'lishi shart emas.
+
+    O'LCHANDI (12 fayl, ochiq tenderlar, 2026-08-25): 11/12 (92%)
+    faylda o'qiladigan xarid matni topildi — shartnoma bandlari,
+    kafolat va to'lov shartlari. Yangi bog'liqlik uchun bu farq
+    yetarli emas edi.
+
+    IKKI KODLASH sinaladi va HARFLAR SONI ko'proq chiqqani olinadi:
+    noto'g'ri kodlash harf bermaydi, shuning uchun bu mezon ishonchli.
+    """
+    eng_matn, eng_ball = "", 0
+    for kodlash in ("utf-16-le", "cp1251"):
+        try:
+            xom = data.decode(kodlash, errors="ignore")
+        except (UnicodeDecodeError, LookupError):
+            continue
+        # Avval TAKRORNI kesamiz — shovqin matnga yopishgan bo'lsa
+        # ham matn saqlanib qoladi.
+        bolaklar = [_TAKROR_RE.sub(" ", b).strip()
+                    for b in _OLE_YAROQLI.findall(xom)]
+        bolaklar = [b for b in bolaklar
+                    if len(b) >= OLE_MIN_BOLAK and not _ole_shovqinmi(b)]
+        matn = "\n".join(bolaklar)
+        ball = sum(1 for ch in matn if ch.isalpha())
+        if ball > eng_ball:
+            eng_matn, eng_ball = matn, ball
+
+    if not eng_matn:
+        return "", None, "ole2-xom", "OLE2 ichida o'qiladigan matn topilmadi"
+    return clean(eng_matn), None, "ole2-xom", None
+
+
+def sniff_magic(data: bytes, ext: str) -> str:
+    """HAQIQIY formatni baytlardan aniqlaydi; topolmasa `ext` qaytadi.
+
+    ZIP oilasi alohida ajratiladi: `docx` va `xlsx` ham ZIP, farqi
+    ichidagi yo'llarda.
+    """
+    tur = next((n for m, n in _MAGIC if data.startswith(m)), None)
+    if tur is None:
+        return ext
+    if tur != "zip":
+        return tur
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            nomlar = set(z.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return ext
+    if any(n.startswith("word/") for n in nomlar):
+        return "docx"
+    if any(n.startswith("xl/") for n in nomlar):
+        return "xlsx"
+    if any(n.startswith("ppt/") for n in nomlar):
+        return "pptx"          # parser yo'q, lekin rost nomi bilan rad etamiz
+    return "zip"
+
+
+def _azo_nomi(nom: str) -> str:
+    """A'zo nomini YORLIQ sifatida xavfsiz ko'rinishga keltiradi."""
+    toza = nom.replace("\\", "/").split("/")[-1]
+    return "".join(ch for ch in toza if ch.isprintable())[:120] or "?"
+
+
+def extract_zip(data: bytes, depth: int = 0) -> Tuple[str, Optional[int], str, Optional[str]]:
+    """ZIP ichidagi qo'llab-quvvatlanadigan fayllarni ajratadi.
+
+    Har a'zo matni o'z sarlavhasi bilan qo'shiladi — javobdagi iqtibos
+    qaysi fayldan kelganini ko'rsatsin.
+    """
+    parchalar: List[str] = []
+    jami = 0
+    ochildi = xato_soni = 0
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except (zipfile.BadZipFile, OSError) as e:
+        return "", None, "zipfile", f"arxiv ochilmadi: {e}"
+
+    with z:
+        azolar = [i for i in z.infolist() if not i.is_dir()]
+        if len(azolar) > ZIP_MAX_MEMBERS:
+            return ("", None, "zipfile",
+                    f"arxivda {len(azolar)} a'zo (chegara {ZIP_MAX_MEMBERS}) "
+                    "— ochilmadi")
+        for info in azolar:
+            # CHEGARALAR — OCHISHDAN OLDIN, e'lon qilingan hajm bo'yicha.
+            if info.file_size > ZIP_MAX_MEMBER:
+                xato_soni += 1
+                continue
+            if jami + info.file_size > ZIP_MAX_TOTAL:
+                parchalar.append("[...arxiv hajm chegarasida to'xtatildi]")
+                break
+
+            ichki_ext = sniff_ext({"name": info.filename})
+            try:
+                azo = z.read(info)
+            except (RuntimeError, zipfile.BadZipFile, OSError):
+                xato_soni += 1     # parolli yoki buzilgan a'zo
+                continue
+            jami += len(azo)
+
+            haqiqiy = sniff_magic(azo, ichki_ext)
+            if haqiqiy == "zip":
+                if depth >= ZIP_MAX_DEPTH:
+                    xato_soni += 1
+                    continue
+                matn, _, _, xato = extract_zip(azo, depth + 1)
+            elif is_supported(haqiqiy):
+                matn, _, _, xato = extract(azo, haqiqiy)
+            else:
+                xato_soni += 1
+                continue
+
+            if xato or not matn.strip():
+                xato_soni += 1
+                continue
+            ochildi += 1
+            parchalar.append(f"### {_azo_nomi(info.filename)}\n{matn}")
+
+    if not parchalar:
+        return ("", None, "zipfile", "arxiv ichida o'qiladigan hujjat yo'q "
+                f"({len(azolar)} a'zo, {xato_soni} tasi o'qilmadi)")
+    return ("\n\n".join(parchalar), None,
+            f"zipfile({ochildi}/{len(azolar)})", None)
+
+
 def sniff_ext(row: dict) -> str:
     """Kengaytmani aniqlaydi: file_type -> nom -> content_type."""
     ext = (row.get("file_type") or "").strip().lower().lstrip(".")
@@ -345,11 +548,17 @@ def extract(data: bytes, ext: str) -> Tuple[str, Optional[int], str, Optional[st
         return extract_xlsx(data)
     if ext in EXT_PLAIN:
         return extract_plain(data, ext)
+    if ext in EXT_ZIP:
+        return extract_zip(data)
+    if ext in EXT_OLE2:
+        return extract_doc(data)
     return "", None, "", None      # bu yerga kelmasligi kerak
 
 
 def is_supported(ext: str) -> bool:
-    return ext in EXT_PDF or ext in EXT_DOCX or ext in EXT_XLSX or ext in EXT_PLAIN
+    return (ext in EXT_PDF or ext in EXT_DOCX or ext in EXT_XLSX
+            or ext in EXT_PLAIN or ext in EXT_ZIP
+            or ext in EXT_OLE2)
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +571,13 @@ def process(session: requests.Session, row: dict) -> dict:
            "page_count": None, "error": None, "extractor": None}
 
     ext = sniff_ext(row)
+
+    # `.doc` — kengaytma bo'yicha rad ETMAYMIZ: haqiqiy turi OLE2
+    # bo'lsa `extract_doc` o'qiydi, `docx` bo'lsa (namunada ~8%)
+    # oddiy yo'ldan ketadi. Ikkalasi ham baytlarni ko'rgandan keyin
+    # aniqlanadi.
+    if ext == "doc":
+        ext = "ole2"
 
     # 1. Format — yuklab olishdan OLDIN tekshiramiz (trafik tejaladi)
     if not is_supported(ext):
@@ -396,7 +612,17 @@ def process(session: requests.Session, row: dict) -> dict:
         out["error"] = "bo'sh fayl (0 bayt)"
         return out
 
-    # 4. Matn ajratish
+    # 4. HAQIQIY format — baytlardan. Kengaytma yolg'on bo'lishi mumkin
+    #    (namunada `.doc` fayllarning ~17% i aslida `docx` edi).
+    haqiqiy = sniff_magic(data, ext)
+    if haqiqiy != ext:
+        out["error"] = f"kengaytma '{ext}', haqiqiy format '{haqiqiy}'"
+        if not is_supported(haqiqiy):
+            out["status"] = "unsupported"
+            return out
+        ext = haqiqiy
+
+    # 5. Matn ajratish
     text, pages, extractor, perr = extract(data, ext)
     out["extractor"] = extractor or None
     out["page_count"] = pages
@@ -420,6 +646,9 @@ def process(session: requests.Session, row: dict) -> dict:
     out["text"] = text
     out["char_count"] = len(text)
     out["status"] = "ok"
+    # Format haqidagi eslatma xato emas — muvaffaqiyatda tozalaymiz.
+    if (out.get("error") or "").startswith("kengaytma "):
+        out["error"] = None
     return out
 
 
@@ -428,6 +657,38 @@ def process(session: requests.Session, row: dict) -> dict:
 # ---------------------------------------------------------------------------
 COLS = ["tender_id", "file_ref", "text", "status", "char_count",
         "page_count", "error", "extractor"]
+
+
+def catalog_tender_ids(conn) -> List[int]:
+    """Katalogga mos OCHIQ tenderlar id lari.
+
+    Qoida `api/matching.product_matches()` da — `/catalog/match` endpointi
+    bilan AYNAN bir xil (kategoriya roll-up YOKI nom/kalit so'z, alifbodan
+    qat'i nazar). Bu yerda takrorlanmaydi (reja_ai_chat.md §15.3.1).
+
+    KO'P KOMPANIYA: `catalog_product` hozir filtrlanmaydi, ya'ni natija
+    barcha kompaniyalar kataloglarining BIRLASHMASI — aynan shu kerak,
+    aks holda B kompaniyasining tenderlari o'qilmay qolardi (§15.3.2).
+    """
+    from api import matching, queries        # sof funksiyalar, DB ochmaydi
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT id, name, category_code, keywords FROM catalog_product")
+        products = [dict(r) for r in cur.fetchall()]
+        if not products:
+            # JIMGINA O'TKAZIB YUBORILMAYDI: bo'sh katalog = bo'sh qamrov =
+            # hech qanday hujjat o'qilmaydi. Buni ko'rmasdan qolish
+            # "ETL ishladi, lekin matn yo'q" degan chalkashlikni beradi.
+            print("[!] Katalog BO'SH — `--catalog` qamrovi hech nimani "
+                  "tanlamaydi. Katalogni to'ldiring yoki `--no-only-open` / "
+                  "`--category` bilan yurgizing.")
+            return []
+        where, params = queries.build_tender_filters(status="open")
+        cur.execute(queries.match_candidates_sql(where, cap=5000), params)
+        cands = [dict(r) for r in cur.fetchall()]
+
+    return [c["id"] for c in cands
+            if any(matching.product_matches(c, p) for p in products)]
 
 
 def fetch_targets(conn, args) -> List[dict]:
@@ -446,6 +707,31 @@ def fetch_targets(conn, args) -> List[dict]:
         params["ft"] = args.file_type.strip().lower().lstrip(".")
     if not args.force:
         where.append("t.file_ref IS NULL")
+
+    # --- QAMROV (reja_ai_chat.md §15) --------------------------------------
+    # Muddati o'tgan tenderning hujjati qaror uchun kerak emas: bazadagi
+    # o'lchov bo'yicha bu filtr yuklab olinadigan hajmni 9.81 GB dan
+    # 2.49 GB ga tushiradi va HECH NARSA yo'qotmaydi.
+    # `--tender-id` berilgan bo'lsa chetlab o'tiladi: aniq so'ralgan tender
+    # muddati o'tgan bo'lsa ham o'qilishi kerak.
+    if getattr(args, "only_open", True) and not args.tender_id:
+        where.append("EXISTS (SELECT 1 FROM tender t2 WHERE t2.id = d.tender_id "
+                     "AND t2.status = 'open' "
+                     "AND (t2.close_at IS NULL OR t2.close_at > now()))")
+
+    if getattr(args, "category", None):
+        # Parent tanlansa ichkilari ham: 'qurilish' -> 'qurilish/yol'
+        where.append("EXISTS (SELECT 1 FROM tender_category tc "
+                     "WHERE tc.tender_id = d.tender_id "
+                     "AND (tc.code = %(cat)s OR tc.code LIKE %(cat)s || '/%%'))")
+        params["cat"] = args.category.strip()
+
+    if getattr(args, "catalog", False):
+        ids = catalog_tender_ids(conn)
+        if not ids:
+            return []                      # katalog bo'sh -> qamrov ham bo'sh
+        where.append("d.tender_id = ANY(%(cat_ids)s)")
+        params["cat_ids"] = ids
 
     sql = f"""
         SELECT d.tender_id, d.file_ref, d.file_id, d.file_path, d.name,
@@ -490,9 +776,21 @@ def main() -> None:
     ap.add_argument("--tender-id", type=int, help="Faqat shu tender hujjatlari")
     ap.add_argument("--platform", help="Faqat shu manba ('xt-xarid' | 'uzex')")
     ap.add_argument("--file-type", help="Faqat shu tur ('pdf' | 'docx' | 'xlsx' ...)")
+    # --- QAMROV (reja_ai_chat.md §15.4) ---
+    ap.add_argument("--only-open", action=argparse.BooleanOptionalAction, default=True,
+                    help="Faqat ochiq va muddati tugamagan tenderlar "
+                         "(STANDART: yoqilgan; o'chirish: --no-only-open)")
+    ap.add_argument("--catalog", action="store_true",
+                    help="Faqat katalogga mos tenderlar "
+                         "(qoida: api/matching.product_matches)")
+    ap.add_argument("--category", help="Faqat shu kategoriya ('elektr', "
+                                       "'qurilish' — ichkilari ham kiradi)")
+    ap.add_argument("--count-only", action="store_true",
+                    help="Faqat SANAYDI va chiqadi — hech narsa yuklab olinmaydi")
     ap.add_argument("--force", action="store_true",
                     help="Allaqachon ishlanganlarni ham qayta yuklab oladi")
-    ap.add_argument("--dry-run", action="store_true", help="DBga yozmaydi")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Yuklab oladi va matn ajratadi, lekin DBga yozmaydi")
     ap.add_argument("--quiet", action="store_true", help="Har fayl uchun satr chiqarmaydi")
     ap.add_argument("--dsn", default=os.environ.get("XT_DB_DSN"))
     args = ap.parse_args()
@@ -504,6 +802,47 @@ def main() -> None:
 
     conn = psycopg2.connect(args.dsn)
     rows = fetch_targets(conn, args)
+
+    if args.count_only:
+        # QAMROVNI KO'RSATADI, TARMOQQA CHIQMAYDI. Yuklab olishdan oldin
+        # "nima tanlandi va qancha bo'ladi" degan savolga javob (§15.4).
+        scope = []
+        if args.only_open and not args.tender_id:
+            scope.append("ochiq + muddati tugamagan")
+        if args.catalog:
+            scope.append("katalogga mos")
+        if args.category:
+            scope.append(f"kategoriya={args.category}")
+        if args.platform:
+            scope.append(f"platforma={args.platform}")
+        if args.file_type:
+            scope.append(f"tur={args.file_type}")
+        print(f"Qamrov: {' · '.join(scope) or 'cheklovsiz'}")
+
+        by_type: Dict[str, List[int]] = {}
+        sup_n = sup_b = uns_n = 0
+        for r in rows:
+            ext = sniff_ext(r)
+            b = r.get("size_bytes") or 0
+            acc = by_type.setdefault(ext or "?", [0, 0])
+            acc[0] += 1
+            acc[1] += b
+            if is_supported(ext):
+                sup_n += 1
+                sup_b += b
+            else:
+                uns_n += 1
+
+        for ext, (n, b) in sorted(by_type.items(), key=lambda x: -x[1][1])[:12]:
+            mark = "" if is_supported(ext) else "  (qo'llab-quvvatlanmaydi)"
+            print(f"  {ext:<8} {n:>5} ta  {b / 1048576:>8.1f} MB{mark}")
+
+        print(f"\n  Matn ajratiladi: {sup_n} ta, {sup_b / 1073741824:.2f} GB")
+        print(f"  O'tkazib yuboriladi: {uns_n} ta")
+        print(f"  Taxminiy vaqt: ~{sup_n * (REQUEST_DELAY + 1.2) / 60:.0f} daqiqa")
+        print("\n  (--count-only — hech narsa yuklab olinmadi)")
+        conn.close()
+        return
 
     if not rows:
         print("Qayta ishlanadigan hujjat yo'q "
