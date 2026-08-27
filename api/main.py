@@ -39,7 +39,8 @@ load_dotenv()  # .env ni import paytida yuklaymiz (pool DSN'ni ko'rishi uchun)
 
 from api import (ai, ai_chat, ai_docs, ai_gonogo, ai_match, auth,  # noqa: E402
                  compliance, db, erp_status, erp_stock, i18n, importer,
-                 kodlash, matching, notify, pricing, queries, stock, telegram)
+                 kodlash, matching, notify, pricing, queries, stock, telegram,
+                 translit)
 
 
 # ---------------------------------------------------------------------------
@@ -2858,6 +2859,70 @@ def kod_rad(product_id: int, body: KodQarorIn, request: Request):
     if not kodlash.rad_et(company_id_of(request), product_id, body.code):
         raise HTTPException(404, "Bog'lanish topilmadi.")
     return None
+
+
+@app.get("/kod/qidir")
+def kod_qidir(request: Request, soz: str = "", limit: int = 10):
+    """Tasniflagich kodini QIDIRISH — korpus pozitsiyalari bo'yicha.
+
+    NEGA TESKARI YO'NALISHDA: broker `Кульман` yoki `Трубка
+    рентгеновская` degan rasmiy nomlarni tanimaydi, lekin POZITSIYA
+    nomlarini taniydi. Shuning uchun so'rov korpusdagi tovar nomlariga
+    solishtiriladi va natija "qaysi kod ostida shunday pozitsiyalar
+    bor" bo'lib qaytadi.
+
+    KO'P-IJARACHILIK — IKKI QISM ANIQ AJRATILGAN:
+
+      korpus qismi  (`pozitsiya`, `kod_nomi`) — UMUMIY ma'lumot.
+          `tender_good` va `dim_good_code` hech qaysi ijarachiga
+          tegishli emas, shuning uchun filtr QO'YILMAYDI. Qo'yilsa
+          natija bo'shab qolardi.
+
+      kompaniya qismi (`meniki`) — FAQAT shu ijarachining katalogi.
+          `company_id` MAJBURIY va u `company_id_of(request)` dan
+          keladi.
+    """
+    cid = company_id_of(request)
+    natija = kodlash.qidir(soz, limit=limit)
+
+    # Shu atama MENING katalogimda nechta mahsulotga tegishli —
+    # kompaniya ma'lumoti, shuning uchun `company_id` bilan.
+    meniki = 0
+    if natija.get("kalit"):
+        pats = []
+        for bolak in natija["kalit"].split():
+            for v in translit.variants(bolak):
+                if v and len(v) >= 3:
+                    pats.append(f"%{v}%")
+        if pats:
+            meniki = db.scalar(
+                "SELECT count(*) FROM catalog_product p "
+                "WHERE p.company_id = %(company_id)s "
+                f"  AND ({translit.sql_fold('p.name')} LIKE ANY(%(pats)s) "
+                "       OR EXISTS (SELECT 1 FROM unnest(p.keywords) k "
+                f"                  WHERE {translit.sql_fold('k')} LIKE ANY(%(pats)s)))",
+                {"company_id": cid, "pats": pats}) or 0
+
+    natija["meniki"] = meniki
+    return natija
+
+
+@app.get("/catalog/kod-navbat")
+def kod_navbat(request: Request, limit: int = 40,
+               takliflar: bool = False):
+    """Kodlash navbati — kodsiz atamalar, DALIL bilan.
+
+    `takliflar=false` (standart) — tez ochiladi. Taklif sifati past
+    (o'lchandi: 10 atamadan 1-2 tasida ishonchli nomzod), asosiy yo'l
+    `/kod/qidir`. Taklif kerak bo'lsa `takliflar=true`.
+
+    Uch toifa qaytadi va ULARNING YIG'INDISI JAMIGA TENG:
+      `atamalar`      — ko'rib chiqiladi
+      `talabsiz`      — korpusda uchramaydi, ko'rish SHART EMAS
+      `turi_aniqmas`  — kalit so'zi spetsifikatsiya yoki bo'sh
+    """
+    return kodlash.navbat(company_id_of(request), limit=limit,
+                          takliflar_bilan=takliflar)
 
 
 @app.get("/catalog/kodlash-holati")

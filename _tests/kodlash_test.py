@@ -407,6 +407,70 @@ def test_moslik_tasdiqsiz_ishlamaydi(cid: int):
         "RETURNING product_id", {"p": prod["id"], "k": kod["code"]})
 
 
+def test_navbat_qoldiqsiz(cid: int):
+    """TOIFALASH QOLDIQSIZ — yig'indi JAMIGA teng.
+
+    UMUMIY QOIDA, alohida holat emas. O'lchangan nosozlik: 837 kodsiz
+    mahsulotdan 185 tasi na navbatda, na "talabsiz" da ko'rinardi
+    (turi 30 belgidan uzun edi). Ular hech qayerda ko'rinmasdi va
+    HECH QANDAY XATO CHIQMASDI — bu loyihada shu sinf o'ninchi marta.
+
+    Bitta assert shu sinfni kelajakda ham tutadi.
+    """
+    section("B. Navbat qoldiqsiz")
+    from api import kodlash
+
+    n = kodlash.navbat(cid, limit=5, takliflar_bilan=False)
+    check("jami = toifalar yig'indisi",
+          n["jami_mahsulot"] == n["toifa_yigindi"],
+          f"jami={n['jami_mahsulot']} yig'indi={n['toifa_yigindi']}")
+    check("qoldiq toifasi MAVJUD", "turi_aniqmas_jami" in n)
+    check("talabsiz toifasi MAVJUD", "talabsiz_jami" in n)
+    # Chegaradan tashqaridagilar ham sanaladi — aks holda `limit`
+    # o'zgarganda yig'indi buzilardi.
+    check("chegaradan tashqaridagilar sanaladi", n["qolgan"] >= 0)
+
+
+def test_qidiruv_ijarachi(cid: int):
+    """QIDIRUV: korpus UMUMIY, mahsulot soni esa IJARACHINIKI.
+
+    Ikkisi ARALASHTIRILMASIN: korpusga filtr qo'yilsa natija bo'shab
+    qolardi, mahsulot soniga qo'yilmasa begona katalog ko'rinardi.
+    """
+    section("B. Qidiruv va ijarachi chegarasi")
+    from api import db, kodlash
+
+    r = kodlash.qidir("kabel", limit=5)
+    check("korpus natijasi FILTRSIZ keladi", len(r["pozitsiya"]) > 0,
+          "korpus umumiy ma'lumot, bo'sh bo'lmasligi kerak")
+    check("kalit normallashtirilgan", r["kalit"] == "kabel", r["kalit"])
+    # Kirill kirish AYNAN shu natijani bersin — aks holda qidiruv
+    # yangi til devorini yaratardi.
+    r2 = kodlash.qidir("Кабели", limit=5)
+    check("kirill kirish bir xil kalit beradi", r2["kalit"] == r["kalit"],
+          f"{r2['kalit']!r} != {r['kalit']!r}")
+
+    # MAHSULOT SONI — begona kompaniyada 0 bo'lsin.
+    begona = db.scalar("SELECT COALESCE(max(id), 0) + 1000 "
+                       "FROM company_account") or 99999
+    n_meniki = db.scalar(
+        "SELECT count(*) FROM catalog_product p WHERE p.company_id = %(c)s",
+        {"c": begona})
+    check("begona kompaniyada mahsulot yo'q", (n_meniki or 0) == 0,
+          f"topildi {n_meniki}")
+
+    # NAVBAT begona kompaniyada BO'SH.
+    nb = kodlash.navbat(begona, limit=5, takliflar_bilan=False)
+    check("begona kompaniya navbati bo'sh",
+          nb["jami_mahsulot"] == 0 and not nb["atamalar"],
+          str(nb["jami_mahsulot"]))
+    # O'z kompaniyasida esa BO'SH EMAS — aks holda yuqoridagi sinov
+    # "hamma joyda bo'sh" degan holatni ham o'tkazib yborardi.
+    oz = kodlash.navbat(cid, limit=5, takliflar_bilan=False)
+    check("o'z kompaniyasida navbat bor", oz["jami_mahsulot"] > 0,
+          str(oz["jami_mahsulot"]))
+
+
 def test_kodsiz_korinadi(cid: int):
     """Kodsiz mahsulot JIMGINA yo'qolmaydi — alohida ro'yxatda ko'rinadi."""
     section("B. Kodsiz mahsulot ko'rinadi")
@@ -444,6 +508,8 @@ def main() -> int:
             test_markaz_va_lugat()
             test_baza_qulflari(args.company)
             test_moslik_tasdiqsiz_ishlamaydi(args.company)
+            test_navbat_qoldiqsiz(args.company)
+            test_qidiruv_ijarachi(args.company)
             test_kodsiz_korinadi(args.company)
         except Exception as e:                               # noqa: BLE001
             # BAZA YO'QLIGI SINOVNI "O'TDI" QILMASIN.

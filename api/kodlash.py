@@ -851,7 +851,11 @@ def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
     # NOL ISHONCHLI: keng o'zak ham hech narsa topmagan bo'lsa,
     # korpusda haqiqatan yo'q. Ajratish AYNAN shu shart bo'yicha —
     # musbat raqam bo'yicha emas.
-    tanlangan = [(k, g) for k, g in tartib if g["korpus"]["jami"] > 0][:limit]
+    koriladigan = [(k, g) for k, g in tartib if g["korpus"]["jami"] > 0]
+    tanlangan = koriladigan[:limit]
+    # Chegaradan tashqarida qolganlar — ular ham TOIFADA, faqat shu
+    # sahifada ko'rsatilmaydi. Yig'indi tekshiruvida sanaladi.
+    qolgan_koriladigan = koriladigan[limit:]
     talabsiz = [(k, g) for k, g in tartib if g["korpus"]["jami"] == 0]
 
     # TO'LIQ TALAB — faqat ko'rsatiladigan atamalar uchun (<=40).
@@ -900,8 +904,7 @@ def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
         })
     return {
         "atamalar": natija,
-        "qolgan": max(0, len([1 for _k, g in tartib if g["korpus"]["jami"] > 0])
-                      - len(tanlangan)),
+        "qolgan": len(qolgan_koriladigan),
         # TALABSIZ atamalar JIMGINA yo'qolmaydi — ular "hali ko'rilmagan"
         # emas, "ko'rish SHART EMAS". Interfeys buni ayirishi kerak.
         "talabsiz": [{"kalit": k, "atama": g["atama"],
@@ -914,6 +917,20 @@ def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
         "turi_aniqmas": [{"id": x["id"], "name": x["name"]}
                          for x in aniqmas[:20]],
         "turi_aniqmas_jami": len(aniqmas),
+        # QOLDIQSIZ TOIFALASH — yig'indi JAMIGA teng.
+        #
+        # Bu umumiy qoida, alohida holat emas: har toifalashda QOLDIQ
+        # toifa bo'lishi va yig'indi tekshirilishi shart. Aks holda
+        # element jimgina yo'qoladi va hech qanday xato chiqmaydi —
+        # aynan shu sodir bo'ldi: 837 kodsiz mahsulotdan 185 tasi na
+        # navbatda, na "talabsiz" da ko'rinmasdi (turi 30 belgidan
+        # uzun edi). Bu loyihada shu sinf o'ninchi marta uchradi.
+        "jami_mahsulot": len(prods),
+        "toifa_yigindi": (
+            sum(g["n_mahsulot"] for _k, g in tanlangan)
+            + sum(g["n_mahsulot"] for _k, g in qolgan_koriladigan)
+            + sum(g["n_mahsulot"] for _k, g in talabsiz)
+            + len(aniqmas)),
     }
 
 
