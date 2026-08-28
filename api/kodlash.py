@@ -1046,6 +1046,122 @@ def qidir(soz: str, level: int = DEFAULT_LEVEL,
     }
 
 
+# ---------------------------------------------------------------------------
+# QAROR O'LCHOVI — uch raqam AVTOMATIK yoziladi
+#
+# Vaqt, manba va qidiruv soni QO'LDA yozilmaydi: qo'lda yozilsa ular
+# xotiradan tiklanadi va TAXMINGA aylanadi. Ekran ularni o'zi qayd
+# etadi.
+#
+# Eng muhimi `qidiruv_soni`: `talabsiz` bosilganda undan OLDIN qidiruv
+# qilinganmi. Qidiruvsiz "talabsiz" — avtomatik o'lchovga ishonish, va
+# u xato bo'lishi O'LCHANGAN (`turniket` avtomatik o'lchovda talabsiz
+# edi, qidiruv 26.30 "Турникет" ni topdi).
+# ---------------------------------------------------------------------------
+def qaror_ochish(company_id: int, kalit: str, atama: str) -> Dict[str, Any]:
+    """Atama ko'rib chiqishga OCHILDI — vaqt hisobi shu yerdan boshlanadi.
+
+    Ochiq qator allaqachon bo'lsa YANGI YARATILMAYDI (qisman unikal
+    indeks buni majburlaydi), aks holda `qidiruv_soni` bo'linib
+    ketardi.
+    """
+    row = db.execute_returning(
+        "INSERT INTO kod_qaror (company_id, kalit, atama) "
+        "VALUES (%(c)s, %(k)s, %(a)s) "
+        "ON CONFLICT (company_id, kalit) WHERE qaror IS NULL "
+        "  DO UPDATE SET atama = EXCLUDED.atama "
+        "RETURNING id, ochilgan_at, qidiruv_soni",
+        {"c": company_id, "k": kalit, "a": atama})
+    return row or {}
+
+
+def qaror_qidiruv(company_id: int, kalit: str) -> int:
+    """Qidiruv qilindi — sanoqni oshiradi. Qaytadi: yangi son."""
+    row = db.execute_returning(
+        "UPDATE kod_qaror SET qidiruv_soni = qidiruv_soni + 1 "
+        "WHERE company_id = %(c)s AND kalit = %(k)s AND qaror IS NULL "
+        "RETURNING qidiruv_soni",
+        {"c": company_id, "k": kalit})
+    return (row or {}).get("qidiruv_soni") or 0
+
+
+def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
+              kim: str, code: Optional[str] = None,
+              manba: Optional[str] = None) -> Dict[str, Any]:
+    """Qarorni yozadi. `qaror`: 'kod' | 'talabsiz' | 'otkazildi'.
+
+    Ochiq qator bo'lsa u YAKUNLANADI (vaqt va qidiruv soni saqlanadi).
+    Bo'lmasa — YANGI yakunlangan qator (bir atamaga IKKINCHI kod
+    berilgan holat; `UNIQUE(kalit)` ataylab yo'q).
+    """
+    if not (kim or "").strip():
+        raise ValueError("kim bo'sh bo'la olmaydi")
+    row = db.execute_returning(
+        "UPDATE kod_qaror SET qaror=%(q)s, code=%(kod)s, manba=%(m)s, "
+        "       kim=%(kim)s, qaror_at=now() "
+        "WHERE company_id=%(c)s AND kalit=%(k)s AND qaror IS NULL "
+        "RETURNING id, ochilgan_at, qaror_at, qidiruv_soni",
+        {"c": company_id, "k": kalit, "q": qaror, "kod": code,
+         "m": manba, "kim": kim.strip()})
+    if row:
+        return row
+    return db.execute_returning(
+        "INSERT INTO kod_qaror (company_id, kalit, atama, qaror, code, "
+        "                       manba, kim, qaror_at) "
+        "VALUES (%(c)s, %(k)s, %(a)s, %(q)s, %(kod)s, %(m)s, %(kim)s, now()) "
+        "RETURNING id, ochilgan_at, qaror_at, qidiruv_soni",
+        {"c": company_id, "k": kalit, "a": atama, "q": qaror,
+         "kod": code, "m": manba, "kim": kim.strip()}) or {}
+
+
+def atamaga_kod_biriktir(company_id: int, kalit: str, code: str,
+                         kim: str) -> int:
+    """Kalitga tegishli MAHSULOTLARGA kodni biriktiradi. Qaytadi: soni.
+
+    Qaror darhol kuchga kirsin — broker natijani o'sha yurishda
+    ko'rsin, keyingi ETL ni kutmasin.
+
+    Mahsulot kaliti `navbat()` dagi bilan AYNAN bir xil hisoblanadi
+    (`keywords[1]` yoki `keywords[0]` yoki nom). Ikki joyda ikki xil
+    hisoblansa, qaror boshqa mahsulotlarga tushardi.
+    """
+    from api import atama as _atama
+
+    prods = db.query(
+        "SELECT id, name, keywords FROM catalog_product "
+        "WHERE company_id = %(c)s", {"c": company_id})
+    n = 0
+    for p in prods:
+        kws = list(p["keywords"] or [])
+        xom = ((kws[1] if len(kws) >= 2 else (kws[0] if kws else p["name"]))
+               or "").strip()
+        if not xom or len(xom) > _TUR_MAX_LEN:
+            continue
+        if _atama.normal(xom) != kalit:
+            continue
+        taklif_yoz(company_id, p["id"], [{"code": code, "skor": None}])
+        if tasdiqla(company_id, p["id"], code, kim=kim):
+            n += 1
+    return n
+
+
+def qaror_olchov(company_id: int) -> Dict[str, Any]:
+    """Uch savolning javobi — 40 qarordan keyin o'qiladi."""
+    return db.query_one(
+        "SELECT * FROM v_kod_qaror_olchov WHERE company_id = %(c)s",
+        {"c": company_id}) or {}
+
+
+def qarorlar(company_id: int, limit: int = 200) -> List[Dict[str, Any]]:
+    """Qabul qilingan qarorlar — ekranda qaysi atama bajarilganini
+    ko'rsatish uchun."""
+    return db.query(
+        "SELECT kalit, atama, qaror, code, manba, qidiruv_soni, qaror_at "
+        "FROM kod_qaror WHERE company_id = %(c)s AND qaror IS NOT NULL "
+        "ORDER BY qaror_at DESC LIMIT %(l)s",
+        {"c": company_id, "l": limit})
+
+
 def kodsiz_mahsulotlar(company_id: int) -> List[Dict[str, Any]]:
     """Tasdiqlangan kodi YO'Q mahsulotlar — moslashtirishda ko'rinmaydi."""
     return db.query(

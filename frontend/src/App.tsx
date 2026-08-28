@@ -32,6 +32,8 @@ const StatsView = lazy(() => import('./components/StatsView'))
 const RequirementReview = lazy(() =>
   import('./components/RequirementReview'))
 const BrokerQueue = lazy(() => import('./components/BrokerQueue'))
+// KODLASH NAVBATI — O'LCHOV asbobi (40 qaror + uch raqam).
+const KodNavbat = lazy(() => import('./components/KodNavbat'))
 
 // Tender paneli ham alohida: u AI, narx hisobi, cheklist va ombor
 // panellarini tortadi, lekin faqat qatorga bosilganda ochiladi.
@@ -461,6 +463,11 @@ export default function App() {
             <RequirementReview
               onOpenSource={(_ref, _pos) => { /* keyingi qadam: DocumentText ga chuqur havola */ }}
             />
+          </Suspense>
+        )}
+        {view === 'kodlash' && (
+          <Suspense fallback={<Skeleton className="h-[420px] w-full rounded-xl" />}>
+            <KodNavbat />
           </Suspense>
         )}
         {view === 'broker' && (

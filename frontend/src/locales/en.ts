@@ -48,6 +48,7 @@ export const en: Dict = {
   'nav.requirements': 'Requirements',
   // --- BROKER QUEUE ---
   'nav.broker': 'Broker queue',
+  'nav.kodlash': 'Coding queue',
   'broker.title': 'Routing queue',
   'broker.count': '{n} tenders',
   'broker.refresh': 'Re-evaluate',

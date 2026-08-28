@@ -2862,7 +2862,8 @@ def kod_rad(product_id: int, body: KodQarorIn, request: Request):
 
 
 @app.get("/kod/qidir")
-def kod_qidir(request: Request, soz: str = "", limit: int = 10):
+def kod_qidir(request: Request, soz: str = "", limit: int = 10,
+              kalit: str = ""):
     """Tasniflagich kodini QIDIRISH — korpus pozitsiyalari bo'yicha.
 
     NEGA TESKARI YO'NALISHDA: broker `Кульман` yoki `Трубка
@@ -2904,6 +2905,14 @@ def kod_qidir(request: Request, soz: str = "", limit: int = 10):
                 {"company_id": cid, "pats": pats}) or 0
 
     natija["meniki"] = meniki
+
+    # QIDIRUV SANOG'I. `kalit` berilsa (ekran navbatdagi atamani
+    # ko'rayotgan bo'lsa) sanoq oshadi. Shu raqam "talabsiz tugmasi
+    # bosilgunga qadar qidirilganmi" degan savolga javob beradi —
+    # qidiruvsiz "talabsiz" avtomatik o'lchovga ishonish demak va u
+    # xato bo'lishi o'lchangan (`turniket`).
+    if kalit.strip():
+        natija["qidiruv_soni"] = kodlash.qaror_qidiruv(cid, kalit.strip())
     return natija
 
 
@@ -2923,6 +2932,61 @@ def kod_navbat(request: Request, limit: int = 40,
     """
     return kodlash.navbat(company_id_of(request), limit=limit,
                           takliflar_bilan=takliflar)
+
+
+class KodQarorIn(BaseModel):
+    kalit: str
+    atama: str
+    qaror: str                       # 'kod' | 'talabsiz' | 'otkazildi'
+    code: Optional[str] = None
+    manba: Optional[str] = None      # 'taklif' | 'qidiruv' | 'qolda'
+
+
+@app.post("/kod/qaror/ochish")
+def kod_qaror_ochish(body: KodQarorIn, request: Request):
+    """Atama ko'rib chiqishga ochildi — VAQT hisobi shu yerdan.
+
+    Ekran atamani ochganda chaqiradi. Qo'lda vaqt yozilmasin degan
+    talab shu yerda bajariladi.
+    """
+    return kodlash.qaror_ochish(company_id_of(request),
+                                body.kalit, body.atama)
+
+
+@app.post("/kod/qaror")
+def kod_qaror(body: KodQarorIn, request: Request):
+    """Qaror yoziladi. Vaqt, manba va qidiruv soni AVTOMATIK saqlanadi.
+
+    `kim` — sessiyadan. SERVICE kaliti (ERP) odam emas, qaror qo'ya
+    olmaydi: `catalog_product_code` bilan bir xil qoida.
+
+    QAROR 'kod' bo'lsa `catalog_product_code` ga ham yoziladi —
+    ya'ni moslashtirish DARHOL ishlaydi va broker natijani o'sha
+    yurishda ko'radi.
+    """
+    acc = current_account(request)
+    kim = (acc.get("username") or "").strip()
+    if not kim:
+        raise HTTPException(403, "Qarorni faqat kirgan foydalanuvchi qo'ya oladi.")
+    cid = company_id_of(request)
+
+    row = kodlash.qaror_yoz(cid, body.kalit, body.atama, body.qaror,
+                            kim=kim, code=body.code, manba=body.manba)
+
+    # Kod berilgan bo'lsa — shu atamaga tegishli MAHSULOTLARGA biriktiramiz.
+    n_mahsulot = 0
+    if body.qaror == "kod" and body.code:
+        n_mahsulot = kodlash.atamaga_kod_biriktir(cid, body.kalit,
+                                                  body.code, kim)
+    return {**row, "biriktirildi": n_mahsulot}
+
+
+@app.get("/kod/qaror/olchov")
+def kod_qaror_olchov(request: Request):
+    """Uch savolning javobi — 40 qarordan keyin o'qiladi."""
+    cid = company_id_of(request)
+    return {"olchov": kodlash.qaror_olchov(cid),
+            "qarorlar": kodlash.qarorlar(cid)}
 
 
 @app.get("/catalog/kodlash-holati")

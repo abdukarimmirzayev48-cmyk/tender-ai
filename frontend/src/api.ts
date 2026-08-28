@@ -7,6 +7,7 @@ import type {
   StockCheckResult, TelegramBot, TelegramLink, TelegramLinkStatus,
   HujjatTuri, ReviewRejim, ReviewTezlik, Talab, TalabHolat, TalabNavbat,
   AiQaror, InsonQaror, MalakaNatija, RoutingHolat, RoutingItem,
+  KodNavbat, KodQidiruv, KodOlchov,
   RoutingMoslik,
   TalabXulosa,
   TelegramSubscriber, TenderDetail, TenderRow, NotifySettingsData, Nullable,
@@ -385,4 +386,26 @@ export const api = {
     'GET', '/catalog/new-count'),
   catalogSeen: () => request<null>('POST', '/catalog/seen'),
 
+  // --- KODLASH (o'lchov bosqichi) ---
+  // Ekran O'LCHOV ASBOBI: vaqt, manba va qidiruv soni AVTOMATIK
+  // yoziladi. Qo'lda yozilsa ular xotiradan tiklanib, taxminga
+  // aylanardi.
+  kodNavbat: (limit = 40, takliflar = false) =>
+    request<KodNavbat>('GET', '/catalog/kod-navbat',
+      { params: { limit, takliflar } }),
+  /** `kalit` berilsa qidiruv SANOG'I oshadi — "talabsiz" dan oldin
+   *  qidirilganmi degan savolning javobi shundan chiqadi. */
+  kodQidir: (soz: string, kalit?: string, limit = 6) =>
+    request<KodQidiruv>('GET', '/kod/qidir',
+      { params: kalit ? { soz, kalit, limit } : { soz, limit } }),
+  kodQarorOchish: (kalit: string, atama: string) =>
+    request<{ id: number; ochilgan_at: string }>(
+      'POST', '/kod/qaror/ochish',
+      { body: { kalit, atama, qaror: 'kod' } }),
+  kodQaror: (body: {
+    kalit: string; atama: string; qaror: 'kod' | 'talabsiz' | 'otkazildi'
+    code?: string | null; manba?: 'taklif' | 'qidiruv' | 'qolda' | null
+  }) => request<{ biriktirildi: number; qidiruv_soni: number }>(
+    'POST', '/kod/qaror', { body }),
+  kodOlchov: () => request<KodOlchov>('GET', '/kod/qaror/olchov'),
 }

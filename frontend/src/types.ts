@@ -771,3 +771,73 @@ export interface ReviewTezlik {
   quvvat_yetadimi: Nullable<boolean>
   izoh: Nullable<string>
 }
+
+// --- KODLASH NAVBATI (o'lchov bosqichi) ---
+//
+// Ekran O'LCHOV ASBOBI sifatida quriladi: 40 ta haqiqiy qaror qabul
+// qilinadi va uch raqam AVTOMATIK yoziladi (vaqt, manba, qidiruv
+// soni). Qoida jadvalining shakli o'sha raqamlardan aniqlanadi.
+export interface KodPozitsiya {
+  code: string
+  n_poz: number
+  n_ochiq: number
+  namunalar: string[]
+}
+
+export interface KodTaklif {
+  code: string
+  name_ru: Nullable<string>
+  n_tender_open: number
+  /** DALIL — kod ostidagi HAQIQIY pozitsiyalar. Qaror shundan chiqadi:
+   *  kod nomi begona bo'lishi mumkin, pozitsiyalar esa tanish. */
+  pozitsiyalar: { nom: Nullable<string>; n_ochiq: number }[]
+}
+
+export interface KodAtama {
+  kalit: string
+  atama: string
+  n_mahsulot: number
+  /** `keng` qisqartirilgan o'zak bo'yicha (YUQORI CHEGARA),
+   *  `aniq` to'liq so'z bo'yicha. Farq katta bo'lsa o'zak kengligi
+   *  sabab ekani ko'rinadi — bitta raqam ko'rsatilsa u aniq deb
+   *  o'qilardi. */
+  korpus_ochiq: number
+  korpus_ochiq_aniq: number
+  korpus_jami: number
+  takliflar: KodTaklif[]
+}
+
+export interface KodNavbat {
+  atamalar: KodAtama[]
+  qolgan: number
+  talabsiz: { kalit: string; atama: string; n_mahsulot: number }[]
+  talabsiz_jami: number
+  turi_aniqmas: { id: number; name: string }[]
+  turi_aniqmas_jami: number
+  /** Toifalar yig'indisi JAMIGA teng bo'lishi shart. */
+  jami_mahsulot: number
+  toifa_yigindi: number
+}
+
+export interface KodQidiruv {
+  kalit: string
+  pozitsiya: KodPozitsiya[]
+  kod_nomi: { code: string; name_ru: Nullable<string>; n_ochiq: number }[]
+  meniki: number
+  qidiruv_soni?: number
+}
+
+export interface KodOlchov {
+  olchov: {
+    qaror_soni: number; kod_berildi: number; talabsiz: number
+    otkazildi: number; ortacha_sek: Nullable<number>
+    taklifdan: number; qidiruvdan: number; qoldan: number
+    talabsiz_qidiruvsiz: number; talabsiz_qidiruvli: number
+    kop_kodli_atama: number
+  } | null
+  qarorlar: {
+    kalit: string; atama: string; qaror: string
+    code: Nullable<string>; manba: Nullable<string>
+    qidiruv_soni: number; qaror_at: string
+  }[]
+}

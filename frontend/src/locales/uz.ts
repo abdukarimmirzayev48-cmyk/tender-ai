@@ -48,6 +48,7 @@ export const uz = {
   'nav.requirements': 'Talablar',
   // --- BROKER NAVBATI ---
   'nav.broker': 'Broker navbati',
+  'nav.kodlash': 'Kodlash navbati',
   'broker.title': 'Yo\u2018naltirish navbati',
   'broker.count': '{n} ta tender',
   'broker.refresh': 'Qayta baholash',
