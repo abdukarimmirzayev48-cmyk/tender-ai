@@ -23,7 +23,7 @@
  * ustidan yoziladi (`UNIQUE(kalit)` yo'q — bir atamaga ikkinchi kod
  * berish O'LCHANADIGAN holat).
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { KodAtama, KodNavbat as Navbat, KodOlchov, KodQidiruv } from '../types'
 import { Button } from './ui/button'
@@ -48,23 +48,36 @@ function Qator({ a, onQaror }: {
   const [band, setBand] = useState(false)
   const [qidirildi, setQidirildi] = useState(false)
 
-  // OCHILISH VAQTI — qator ko'ringanda yoziladi, qaror paytida emas.
-  useEffect(() => {
+  // OCHILISH VAQTI — BIRINCHI HARAKATDA yoziladi, render paytida EMAS.
+  //
+  // Avval `useEffect` da edi va o'lchandi: ekran ochilganda 40 qator
+  // bir vaqtda ochilib, 11 soniya ichida 40 ta qator yaratildi va
+  // ularning birortasida qaror bo'lmadi. Ikki xato:
+  //   1. `count(*)` "40 qaror" bo'lib ko'rindi — aslida 40 ta RENDER;
+  //   2. `qaror_at - ochilgan_at` "sahifa ochilganidan beri" ni
+  //      o'lchardi, "shu atamaga sarflangan vaqt" ni emas.
+  // Ya'ni asbob boshqa narsani o'lchayotgan edi.
+  const ochilganRef = useRef(false)
+  const ochish = useCallback(() => {
+    if (ochilganRef.current) return
+    ochilganRef.current = true
     api.kodQarorOchish(a.kalit, a.atama).catch(() => {})
   }, [a.kalit, a.atama])
 
   const qidir = useCallback(async () => {
     if (!soz.trim()) return
+    ochish()                       // birinchi harakat — vaqt hisobi shundan
     setBand(true)
     try {
       // `kalit` uzatiladi -> server qidiruv SANOG'INI oshiradi.
       setNatija(await api.kodQidir(soz.trim(), a.kalit))
       setQidirildi(true)
     } finally { setBand(false) }
-  }, [soz, a.kalit])
+  }, [soz, a.kalit, ochish])
 
   const yoz = async (q: 'kod' | 'talabsiz' | 'otkazildi',
                      code: string | null, manba: Manba | null) => {
+    ochish()                       // to'g'ridan-to'g'ri qaror ham hisoblanadi
     setBand(true)
     try { await onQaror(a.kalit, a.atama, q, code, manba) } finally { setBand(false) }
   }
