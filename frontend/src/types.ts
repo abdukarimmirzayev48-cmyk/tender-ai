@@ -953,6 +953,15 @@ export interface KodQidiruv {
   qidiruv_soni?: number
 }
 
+/** `/kod/qaror/olchov` javobining RAQAMLAR qismi.
+ *
+ *  `KodOlchov` — BUTUN javob (`{olchov, pilot, qarorlar}`), bu esa
+ *  faqat `olchov` ichi. Komponent `o.olchov` ni saqlaydi, ya'ni uning
+ *  holati aynan shu turda bo'lishi kerak. Ilgari u `KodOlchov` deb
+ *  yozilgan edi va `tsc -b` buni xato deb ko'rsatardi (`npm run build`
+ *  shu sababdan yiqilardi). */
+export type KodOlchovRaqam = KodOlchov['olchov']
+
 export interface KodOlchov {
   olchov: {
     qaror_soni: number

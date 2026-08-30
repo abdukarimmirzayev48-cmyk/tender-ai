@@ -29,7 +29,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-import type { KodAtama, KodNavbat as Navbat, KodOlchov, KodPilot,
+import type { KodAtama, KodNavbat as Navbat, KodOlchovRaqam, KodPilot,
   KodQaror, KodQidiruv, Manba } from '../types'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -267,7 +267,7 @@ function Qator({ a, onQaror }: {
 
 export default function KodNavbat() {
   const [navbat, setNavbat] = useState<Navbat | null>(null)
-  const [olchov, setOlchov] = useState<KodOlchov | null>(null)
+  const [olchov, setOlchov] = useState<KodOlchovRaqam | null>(null)
   const [pilot, setPilot] = useState<KodPilot | null>(null)
   const [yuklanmoqda, setYuklanmoqda] = useState(true)
   const [xato, setXato] = useState<string | null>(null)

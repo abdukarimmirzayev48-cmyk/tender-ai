@@ -14,13 +14,17 @@ import { api, getAktorId, setAktorId } from '../api'
 import { useI18n } from '../i18n'
 import type { Aktor, AktorHolat } from '../types'
 
-const ISHONCH_KALIT: Record<string, string> = {
+// Tarjima kalitlari `t()` ning QAT'IY turida bo'lishi kerak — oddiy
+// `string` qabul qilinmaydi. Bu ATAYLAB: mavjud bo'lmagan kalit
+// `tsc -b` da to'xtaydi va "tarjimasi yo'q" holati ish paytida
+// yuzaga kelmaydi. Shuning uchun `as const`.
+const ISHONCH_KALIT = {
   erp_sessiya: 'aktor.trust.proven',
   aktor_elon: 'aktor.trust.declared',
   kompaniya_sessiyasi: 'aktor.trust.companyOnly',
   servis: 'aktor.trust.service',
   kuzatuvdan_oldin: 'aktor.trust.unknown',
-}
+} as const
 
 export default function AktorTanlash() {
   const { t } = useI18n()
@@ -78,12 +82,13 @@ export default function AktorTanlash() {
         {!majburiy && <option value="">{t('aktor.none')}</option>}
         {aktorlar.map((a) => (
           <option key={a.id} value={a.id}>
-            {a.ism} — {t(`aktor.role.${a.rol}`)}
+            {a.ism} — {t(`aktor.role.${a.rol}` as 'aktor.role.admin')}
           </option>
         ))}
       </select>
       <div className="mt-1 text-micro text-muted-foreground">
-        {t(ISHONCH_KALIT[ishonch] ?? 'aktor.trust.companyOnly')}
+        {t(ISHONCH_KALIT[ishonch as keyof typeof ISHONCH_KALIT]
+           ?? 'aktor.trust.companyOnly')}
       </div>
       {majburiy && !tanlangan && (
         <div className="mt-1 text-micro text-destructive">

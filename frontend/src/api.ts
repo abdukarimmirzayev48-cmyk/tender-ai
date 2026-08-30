@@ -382,7 +382,7 @@ export const api = {
   audit: (p: { entity?: string; entity_id?: number; actor_id?: number
                limit?: number } = {}) =>
     request<{ tayyor: boolean; yozuvlar: AuditYozuv[] }>(
-      'GET', '/audit', { params: p as Record<string, unknown> }),
+      'GET', '/audit', { params: p }),
 
   // --- P0-8: hujjatlar to'liqligi cheklisti ---
   compliance: (id: number) => request<ComplianceResult>('GET', `/tenders/${id}/compliance`),
