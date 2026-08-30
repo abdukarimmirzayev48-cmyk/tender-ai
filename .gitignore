@@ -29,6 +29,11 @@ dist/
 *.log
 etl_cron.log
 *.tsv
+# Migratsiya manifesti — `*.tsv` ga tushib qolgan edi, lekin u LOG EMAS,
+# MANBA: 55 ta migratsiyaning muzlatilgan tartibi. Kuzatilmasa toza
+# klonda `migratsiya.py` umuman ishlamasdi ("Manifest YO'Q") va buni
+# hech narsa ko'rsatmasdi.
+!migratsiya_manifest.tsv
 *.bak
 .tmp/
 .runtime/

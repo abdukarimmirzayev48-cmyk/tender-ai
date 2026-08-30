@@ -1,0 +1,74 @@
+# MIGRATSIYA MANIFESTI — MUZLATILGAN TARTIB
+#
+# Ustunlar: tartib <TAB> migratsiya_id <TAB> fayl
+#
+# Bu tartib bog'liqliklardan CHIQARILGAN (e'lon qilingan
+# talablar, raqamli suffikslar, obyekt bog'liqliklari) va
+# BO'SH BAZADA qurish bilan TEKSHIRILGAN.
+#
+# Yurgizuvchi tartibni ish paytida QAYTA CHIQARMAYDI —
+# faqat shu fayldan o'qiydi. Sabab: yangi patch qo'shilishi
+# eski tartibni jimgina siljitmasin.
+#
+# Yangi patch qo'shish: fayl nomini oxiriga yozing, tartibga
+# oldingisidan katta raqam bering (10 lik qadam ataylab —
+# orasiga qo'yish uchun joy qoladi).
+#
+# `migratsiya_id` BARQAROR: fayl qayta nomlansa ham
+# o'zgartirilmaydi, aks holda jurnal tarixi uzilardi.
+#
+10	0001_migratsiya	schema_patch_migratsiya.sql
+20	0002_xt_xarid_schema	xt_xarid_schema.sql
+30	0003_ai	schema_patch_ai.sql
+40	0004_categories	schema_patch_categories.sql
+50	0005_catalog	schema_patch_catalog.sql
+60	0006_dims	schema_patch_dims.sql
+70	0007_documents	schema_patch_documents.sql
+80	0008_freshness	schema_patch_freshness.sql
+90	0009_lots	schema_patch_lots.sql
+100	0010_profile	schema_patch_profile.sql
+110	0011_saved_search	schema_patch_saved_search.sql
+120	0012_source	schema_patch_source.sql
+130	0013_multiplatform	schema_patch_multiplatform.sql
+140	0014_compliance	schema_patch_compliance.sql
+150	0015_doctext	schema_patch_doctext.sql
+160	0016_etl_coverage	schema_patch_etl_coverage.sql
+170	0017_gonogo	schema_patch_gonogo.sql
+180	0018_notify	schema_patch_notify.sql
+190	0019_notify_telegram	schema_patch_notify_telegram.sql
+200	0020_notify_subscribers	schema_patch_notify_subscribers.sql
+210	0021_notify_link	schema_patch_notify_link.sql
+220	0022_pricing	schema_patch_pricing.sql
+230	0023_stock	schema_patch_stock.sql
+240	0024_auth	schema_patch_auth.sql
+250	0025_auth_2	schema_patch_auth_2.sql
+260	0026_ai_chat	schema_patch_ai_chat.sql
+270	0027_auth_3	schema_patch_auth_3.sql
+280	0028_auth_4	schema_patch_auth_4.sql
+290	0029_buyer_org	schema_patch_buyer_org.sql
+300	0030_embed_384	schema_patch_embed_384.sql
+310	0031_expired	schema_patch_expired.sql
+320	0032_multitenant	schema_patch_multitenant.sql
+330	0033_multitenant_2	schema_patch_multitenant_2.sql
+340	0034_notify_lang	schema_patch_notify_lang.sql
+350	0035_qualification	schema_patch_qualification.sql
+360	0036_requirement	schema_patch_requirement.sql
+370	0037_requirement_2	schema_patch_requirement_2.sql
+380	0038_requirement_3	schema_patch_requirement_3.sql
+390	0039_requirement_4	schema_patch_requirement_4.sql
+400	0040_requirement_5	schema_patch_requirement_5.sql
+410	0041_requirement_6	schema_patch_requirement_6.sql
+420	0042_requirement_7	schema_patch_requirement_7.sql
+430	0043_routing	schema_patch_routing.sql
+440	0044_routing_2	schema_patch_routing_2.sql
+450	0045_semantik	schema_patch_semantik.sql
+460	0046_goodcode	schema_patch_goodcode.sql
+470	0047_goodcode_2	schema_patch_goodcode_2.sql
+480	0048_goodcode_3	schema_patch_goodcode_3.sql
+490	0049_kod_qaror	schema_patch_kod_qaror.sql
+500	0050_kod_qaror_2	schema_patch_kod_qaror_2.sql
+510	0051_etl_ishonch	schema_patch_etl_ishonch.sql
+520	0052_doc_qamrov	schema_patch_doc_qamrov.sql
+530	0053_embed_qamrov	schema_patch_embed_qamrov.sql
+540	0054_kod_qaror_3	schema_patch_kod_qaror_3.sql
+550	0055_requirement_8	schema_patch_requirement_8.sql
