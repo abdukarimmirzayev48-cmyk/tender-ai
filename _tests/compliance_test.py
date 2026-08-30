@@ -15,19 +15,30 @@ Uch qism:
 Uvicorn ISHGA TUSHIRILMAYDI — modul to'g'ridan-to'g'ri chaqiriladi.
 """
 import datetime as _dt
+import io
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+# KONSOL KODLASHI — Windows kod sahifasidan MUSTAQIL UTF-8.
+#
+# Chiqish QUVUR yoki FAYLGA yo'naltirilganda (ya'ni CI da) Python
+# `locale.getpreferredencoding()` ni oladi — bu mashinada `cp1251`.
+# O'zbek kirill (`ҳ`, `қ`, `ў`) va to'liq kenglikdagi belgilar
+# (`）`) u yerda YO'Q va chop etish `UnicodeEncodeError` bilan
+# BUTUN TO'PLAMNI o'ldiradi. `import_test` aynan shu sababdan
+# 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import konsol  # noqa: E402
+
+konsol.sozla()
 
 # Windows konsoli cp1251 da ochiladi va o'zbek KIRILL harflarini (ҳ, қ, ў)
 # chiqara olmaydi — sinov xabari o'rniga UnicodeEncodeError chiqardi.
 # Alifbo bu modulning asosiy mavzusi, shuning uchun chiqishni utf-8 ga
 # o'tkazamiz; qo'llab-quvvatlanmasa `replace` xatoga yo'l qo'ymaydi.
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except (AttributeError, ValueError):            # pragma: no cover
-    pass
 
 from dotenv import load_dotenv
 
@@ -196,19 +207,112 @@ def test_status():
           and s["missing"] == 2, "xulosa sanoqlari to'g'ri", str(s))
     check(s["blocking"] == 3, "blocking = missing + expired", str(s["blocking"]))
 
-    head("3b. Chegara holatlari")
-    check(C.doc_status(doc("x", days=0), TODAY) == "expiring_soon",
-          "bugun tugaydi -> expiring_soon (hali tugamagan)")
-    check(C.doc_status(doc("x", days=-1), TODAY) == "expired",
-          "kecha tugagan -> expired")
-    check(C.doc_status(doc("x", days=C.EXPIRING_SOON_DAYS), TODAY) == "expiring_soon",
-          f"{C.EXPIRING_SOON_DAYS} kun -> expiring_soon")
-    check(C.doc_status(doc("x", days=C.EXPIRING_SOON_DAYS + 1), TODAY) == "ok",
-          f"{C.EXPIRING_SOON_DAYS + 1} kun -> ok")
+    head("3b. Chegara holatlari — QOIDA TO'LIQ QOPLANADI")
+    #
+    # QOIDA (api/compliance.doc_status docstring i bilan AYNAN bir xil):
+    #
+    #   BIZNES KUNI  Asia/Tashkent (UTC+5), `compliance.bugun()`
+    #   valid_until  hujjat yaroqli OXIRGI kun, va u KIRADI
+    #
+    #       hujjat yo'q                            -> missing
+    #       valid_until IS NULL                    -> ok (MUDDATSIZ)
+    #       valid_until <  bugun                   -> expired
+    #       0 <= (valid_until - bugun) <= CHEGARA  -> expiring_soon
+    #       (valid_until - bugun) >  CHEGARA       -> ok
+    #
+    #   USTUVORLIK: `expired` `expiring_soon` DAN OLDIN.
+    #   CHEGARA IKKI TOMONDAN KIRADI.
+    CH = C.EXPIRING_SOON_DAYS
+    chegaralar = [
+        (None,   "ok",            "muddatsiz (NULL) -> ok, 'noma'lum' EMAS"),
+        (-30,    "expired",       "30 kun oldin tugagan -> expired"),
+        (-1,     "expired",       "KECHA tugagan -> expired"),
+        (0,      "expiring_soon", "BUGUN tugaydi -> expiring_soon "
+                                  "(kun oxirigacha yaroqli)"),
+        (1,      "expiring_soon", "+1 kun -> expiring_soon"),
+        (6,      "expiring_soon", "+6 kun -> expiring_soon"),
+        (7,      "expiring_soon", "+7 kun -> expiring_soon"),
+        (CH - 1, "expiring_soon", f"+{CH - 1} kun (chegaradan bir kun oldin)"),
+        (CH,     "expiring_soon", f"+{CH} kun — CHEGARA O'ZI KIRADI"),
+        (CH + 1, "ok",            f"+{CH + 1} kun — chegaradan tashqari -> ok"),
+        (365,    "ok",            "+365 kun -> ok"),
+    ]
+    for kun, kutilgan, izoh in chegaralar:
+        natija = C.doc_status(doc("x", days=kun), TODAY)
+        check(natija == kutilgan, izoh, f"olindi: {natija}")
+        # `days_left` HOLAT bilan bir xil sanaga qarab hisoblanadi.
+        kutilgan_kun = None if kun is None else kun
+        check(C._days_left(doc("x", days=kun)["valid_until"], TODAY)
+              == kutilgan_kun,
+              f"days_left({kun}) = {kutilgan_kun}")
+
     check(C.doc_status(None, TODAY) == "missing", "hujjat yo'q -> missing")
+    check(C.doc_status({}, TODAY) == "missing", "bo'sh dict -> missing")
+    check(C.doc_status({"valid_until": None}, TODAY) == "ok",
+          "valid_until=None -> ok (muddatsiz)")
+    check(C.doc_status({"valid_until": ""}, TODAY) == "ok",
+          "bo'sh satr ham muddatsiz deb qaraladi")
     # ISO satr ham qabul qilinishi kerak (DB drayveri date beradi, JSON satr)
     check(C.doc_status({"valid_until": "2020-01-01"}, TODAY) == "expired",
           "ISO satr sana ham tushuniladi")
+    check(C.doc_status({"valid_until": TODAY.isoformat()}, TODAY)
+          == "expiring_soon", "ISO satr: bugungi sana -> expiring_soon")
+    # `datetime` (mintaqasiz va mintaqali) ham SANAGA aylanadi.
+    check(C.doc_status({"valid_until": _dt.datetime.combine(
+              TODAY, _dt.time(23, 59))}, TODAY) == "expiring_soon",
+          "mintaqasiz datetime -> sana sifatida o'qiladi")
+    check(C.doc_status({"valid_until": _dt.datetime.combine(
+              TODAY, _dt.time(3, 0), tzinfo=C.BIZNES_TZ)}, TODAY)
+          == "expiring_soon", "mintaqali datetime -> biznes sanasi")
+
+    head("3b-2. VAQT MINTAQASI — biznes kuni Asia/Tashkent")
+    #
+    # O'LCHANGAN NUQSON: `doc_status()` `datetime.date.today()` ni
+    # ishlatardi — u JARAYONNING mintaqasiga qarab ishlaydi, baza esa
+    # `Asia/Tashkent` da yuradi. Server UTC da bo'lsa har kuni
+    # 19:00–24:00 UTC oralig'ida sana BIR KUN orqada bo'lardi va
+    # sinovlar kunning soatiga qarab goh o'tib, goh yiqilardi.
+    check(C.BIZNES_TZ.utcoffset(None) == _dt.timedelta(hours=5),
+          "biznes mintaqasi UTC+5 (yozgi vaqt yo'q)")
+    kutilgan_bugun = (_dt.datetime.now(_dt.timezone.utc)
+                      .astimezone(C.BIZNES_TZ).date())
+    check(C.bugun() == kutilgan_bugun,
+          "bugun() Toshkent sanasini beradi", f"{C.bugun()} vs {kutilgan_bugun}")
+    src = io.open(os.path.join(ROOT, "api", "compliance.py"),
+                  encoding="utf-8").read()
+    kod = " ".join(ln for ln in src.splitlines()
+                   if not ln.lstrip().startswith("#"))
+    check("_dt.date.today()" not in kod,
+          "kodda `date.today()` QOLMADI — sana yagona manbadan",
+          "u serverning mintaqasiga bog'liq va mo'rt sinov manbai edi")
+
+    head("3b-3. ENG YAXSHI NUSXA — muddatsiz hujjat ustun keladi")
+    #
+    # AYNAN SHU XATTI-HARAKAT 2026-08-27 dan beri beshta integratsiya
+    # tekshiruvini yiqitgan edi: sinov o'z 7 kunlik fixture'ini
+    # kutardi, kompaniyada esa MUDDATSIZ haqiqiy hujjat bor edi.
+    # Xatti-harakat TO'G'RI — amal qiluvchi muddatsiz hujjat bo'lsa,
+    # band "tugayapti" deb ogohlantirilishi noto'g'ri bo'lardi.
+    juftlik = [doc("bank_details", days=7, id=1, name="tugayapti"),
+               doc("bank_details", days=None, id=2, name="muddatsiz")]
+    eng = C._pick_best(juftlik, TODAY)
+    check(eng["name"] == "muddatsiz",
+          "muddatsiz nusxa tugayaptidan USTUN")
+    check(C.doc_status(eng, TODAY) == "ok",
+          "natijada band `ok` bo'ladi — bu TO'G'RI")
+    # Tartib TESKARI bo'lsa ham natija bir xil (tanlov barqaror).
+    check(C._pick_best(list(reversed(juftlik)), TODAY)["name"] == "muddatsiz",
+          "tanlov ro'yxat TARTIBIGA bog'liq emas")
+    # Muddati tugagan + tugayapti -> tugayapti tanlanadi.
+    check(C._pick_best([doc("x", days=-10, id=1, name="tugagan"),
+                        doc("x", days=5, id=2, name="tugayapti")],
+                       TODAY)["name"] == "tugayapti",
+          "tugagan nusxa tufayli band bloklanmaydi")
+    # Ikki muddatli nusxadan UZOQROG'I tanlanadi.
+    check(C._pick_best([doc("x", days=5, id=1, name="yaqin"),
+                        doc("x", days=25, id=2, name="uzoq")],
+                       TODAY)["name"] == "uzoq",
+          "ikki tugayaptidan UZOQROG'I tanlanadi")
 
     head("3c. Eski va yangi nusxa birga — YANGISI tanlanadi")
     two = [doc("license", days=-100, id=9, name="eski"),
@@ -275,6 +379,17 @@ def test_db():
         check(any(r["name"] == "[SINOV] Guvohnoma" for r in rows),
               "DOCS_LIST_SQL yozuvlarni qaytardi")
 
+        # FIXTURE NING O'ZI to'g'ri baholanadimi — bu `check()` ning
+        # eng yaxshi hujjat tanlashidan MUSTAQIL tekshiruv.
+        rekv = next((r for r in rows if r["name"] == "[SINOV] Rekvizitlar"), None)
+        check(rekv is not None, "7 kunlik fixture bazada bor")
+        if rekv:
+            check(C.doc_status(rekv, real_today) == "expiring_soon",
+                  "7 kun qolgan fixture -> expiring_soon",
+                  C.doc_status(rekv, real_today))
+            check(C.shape_document(rekv, real_today)["days_left"] == 7,
+                  "fixture days_left = 7")
+
         # --- haqiqiy tenderlar ---
         tids = [r["id"] for r in db.query(
             "SELECT id FROM tender ORDER BY publicated_at DESC NULLS LAST LIMIT 5")]
@@ -290,12 +405,40 @@ def test_db():
             check(s["total"] >= 6, f"tender {tid}: kamida 6 band")
             check(st.get("conformity_certificate") == "expired",
                   f"tender {tid}: muddati tugagan sertifikat expired")
-            check(st.get("bank_details") == "expiring_soon",
-                  f"tender {tid}: 7 kun qolgan rekvizit expiring_soon")
             check(st.get("reg_certificate") == "ok",
                   f"tender {tid}: muddatsiz guvohnoma ok")
             check(st.get("power_of_attorney") == "missing",
                   f"tender {tid}: yo'q ishonchnoma missing")
+
+            # ═══════════════ NEGA `bank_details` ENDI BOSHQACHA ═══════════════
+            #
+            # ILGARI shu yerda `st["bank_details"] == "expiring_soon"` turardi
+            # va u 2026-08-27 dan beri BESH TENDERDA HAM YIQILARDI.
+            #
+            # SABAB — MAHSULOT XATOSI EMAS, SINOV IZOLYATSIYASI:
+            # sinov o'z fixture'ini REAL kompaniyaning hujjatlari orasiga
+            # yozadi va o'zining 7 kunlik `bank_details` yozuvi YAGONA deb
+            # hisoblardi. 2026-08-27 da kompaniya HAQIQIY "BARAKA PROFIT
+            # bank rekvizitlari" hujjatini import qildi — `valid_until`
+            # NULL, ya'ni MUDDATSIZ.
+            #
+            # `_pick_best()` bir turdagi hujjatlardan ENG YAROQLISINI
+            # tanlaydi (ok=0 > expiring_soon=1). Muddatsiz hujjat
+            # to'g'ri ravishda ustun keladi va band `ok` bo'ladi.
+            # Kompaniyada amal qiluvchi muddatsiz rekvizit BOR — u
+            # "tugayapti" deb ogohlantirilishi XATO bo'lardi.
+            #
+            # Ya'ni ESKI TEKSHIRUV NOTO'G'RI NARSANI kutayotgan edi.
+            # Kutilgan qiymatni "yashil bo'lsin" deb o'zgartirmaymiz —
+            # uning O'RNIGA HAQIQIY SHARTNOMA tekshiriladi:
+            #   band holati == O'SHA TURDAGI ENG YAXSHI hujjat holati
+            # Bu invariant boshqa hujjatlar borligiga BOG'LIQ EMAS.
+            bank_docs = [r for r in rows if r["doc_type"] == "bank_details"]
+            kutilgan = C.doc_status(C._pick_best(bank_docs, real_today),
+                                    real_today)
+            check(st.get("bank_details") == kutilgan,
+                  f"tender {tid}: bank_details holati ENG YAXSHI hujjatniki "
+                  f"({kutilgan})", str(st.get("bank_details")))
 
         # --- talabi aniqlanadigan tender (technical_proposal) ---
         found = db.query("""

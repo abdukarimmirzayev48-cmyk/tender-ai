@@ -60,6 +60,39 @@ EVIDENCE_PAD = 70
 #: Muddati tugashiga shuncha kun qolganda "tugayapti" deb ogohlantiramiz.
 EXPIRING_SOON_DAYS = 30
 
+#: BIZNES VAQT MINTAQASI — O'zbekiston, UTC+5, yozgi vaqt YO'Q.
+#:
+#: NEGA ANIQ YOZILGAN (o'lchangan 2026-08-30): `doc_status()`,
+#: `_days_left()` va `build_checklist()` `datetime.date.today()` ni
+#: ishlatardi — u JARAYONNING vaqt mintaqasiga qarab ishlaydi. Baza
+#: esa `Asia/Tashkent` da yuradi (`current_setting('TimeZone')` bilan
+#: tekshirilgan).
+#:
+#: Server UTC da yursa (bulutda odatiy holat) har kuni 19:00–24:00
+#: UTC oralig'ida jarayonning sanasi bazanikidan BIR KUN ORQADA
+#: bo'ladi. Natijada:
+#:   * bugun tugaydigan hujjat "ertaga tugaydi" bo'lib ko'rinardi;
+#:   * kecha tugagan hujjat "bugun tugaydi" — ya'ni `expired`
+#:     o'rniga `expiring_soon`;
+#:   * sinovlar kunning qaysi soatida yurgizilganiga qarab goh
+#:     o'tib, goh yiqilardi (VAQT MINTAQASIGA BOG'LIQ MO'RTLIK).
+#:
+#: `etl_tenders.py` da xuddi shu qaror allaqachon qabul qilingan
+#: (`TZ = timezone(timedelta(hours=5))`) — bu yerda u takrorlanadi,
+#: chunki ikkala modul ham mustaqil ishlatiladi.
+BIZNES_TZ = _dt.timezone(_dt.timedelta(hours=5))
+
+
+def bugun() -> _dt.date:
+    """BIZNES kuni (Asia/Tashkent), jarayonning mintaqasi EMAS.
+
+    Sana solishtiruvining YAGONA manbai. `date.today()` to'g'ridan-
+    to'g'ri ishlatilmasin — u serverning mintaqasiga bog'liq va
+    o'sha bog'liqlik vaqt mintaqasiga bog'liq mo'rt sinovlar
+    manbai edi.
+    """
+    return _dt.datetime.now(BIZNES_TZ).date()
+
 
 # ---------------------------------------------------------------------------
 # KANONIK HUJJAT TURLARI
@@ -485,9 +518,20 @@ def detect_required(tender_texts: Sequence[Any]) -> List[Dict[str, Any]]:
 # KOMPANIYA BAZASI bilan solishtirish
 # ---------------------------------------------------------------------------
 def _as_date(v: Any) -> Optional[_dt.date]:
+    """Har qanday ko'rinishdagi qiymatni BIZNES SANASIGA aylantiradi.
+
+    MINTAQALI `datetime` BIZNES MINTAQASIGA o'giriladi, keyin sanasi
+    olinadi. Aks holda UTC da saqlangan `2026-08-30T22:00Z` "30-avgust"
+    bo'lardi, holbuki Toshkentda u allaqachon 31-avgust soat 03:00.
+    Hozir `valid_until` — `date` ustuni, ya'ni bu yo'l ishlamaydi,
+    lekin funksiya umumiy va keyin `timestamptz` bilan ham
+    chaqirilishi mumkin.
+    """
     if v is None or v == "":
         return None
     if isinstance(v, _dt.datetime):
+        if v.tzinfo is not None:
+            v = v.astimezone(BIZNES_TZ)
         return v.date()
     if isinstance(v, _dt.date):
         return v
@@ -499,10 +543,36 @@ def _as_date(v: Any) -> Optional[_dt.date]:
 
 def doc_status(doc: Optional[Dict[str, Any]],
                today: Optional[_dt.date] = None) -> str:
-    """Bitta hujjatning holati: missing | expired | expiring_soon | ok."""
+    """Bitta hujjatning holati: missing | expired | expiring_soon | ok.
+
+    ══════════════════ QOIDA (yagona manba) ══════════════════
+
+    BIZNES KUNI — Asia/Tashkent (UTC+5, yozgi vaqt yo'q), `bugun()`.
+
+    `valid_until` — hujjat yaroqli bo'lgan OXIRGI KUN va u KIRADI:
+    o'sha kunning oxirigacha hujjat AMAL QILADI. Ya'ni "bugun
+    tugaydi" degan hujjat BUGUN hali yaroqli.
+
+        hujjat yo'q                              -> missing
+        valid_until IS NULL                      -> ok
+              (MUDDATSIZ, "noma'lum" EMAS)
+        valid_until <  bugun                     -> expired
+        0 <= (valid_until - bugun) <= CHEGARA     -> expiring_soon
+        (valid_until - bugun) >  CHEGARA          -> ok
+
+    USTUVORLIK: `expired` `expiring_soon` DAN OLDIN tekshiriladi —
+    muddati o'tgan hujjat "tugayapti" bo'lib ko'rinmasin.
+
+    CHEGARA IKKI TOMONDAN KIRADI (`EXPIRING_SOON_DAYS` = 30):
+        bugun            -> expiring_soon   (0 kun qoldi, hali yaroqli)
+        bugun + 1        -> expiring_soon
+        bugun + 30       -> expiring_soon   (aynan chegarada)
+        bugun + 31       -> ok
+        kecha            -> expired
+    """
     if not doc:
         return "missing"
-    today = today or _dt.date.today()
+    today = today or bugun()
     vu = _as_date(doc.get("valid_until"))
     if vu is None:
         return "ok"          # muddatsiz — "ma'lumot yo'q" emas, "cheklanmagan"
@@ -565,7 +635,7 @@ def _days_left(valid_until: Any,
     vu = _as_date(valid_until)
     if vu is None:
         return None
-    return (vu - (today or _dt.date.today())).days
+    return (vu - (today or bugun())).days
 
 
 def build_checklist(detected: Sequence[Dict[str, Any]],
@@ -575,7 +645,7 @@ def build_checklist(detected: Sequence[Dict[str, Any]],
 
     DB'ga bog'liq emas: sof funksiya, shuning uchun sinovi oson.
     """
-    today = today or _dt.date.today()
+    today = today or bugun()
     det = {d["doc_type"]: d for d in detected or []}
 
     # Turlar bo'yicha guruhlash (notanish kodlar ham saqlanadi)
