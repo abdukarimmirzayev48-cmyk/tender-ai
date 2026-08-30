@@ -291,7 +291,14 @@ def test_db():
             # tekshiramiz — ochiqlar ro'yxati kutilganidan oshib
             # ketmaganini.
             from api.main import PUBLIC_PATHS, PUBLIC_PREFIXES, SERVICE_PATHS
-            eq("ochiq yo'llar soni", len(PUBLIC_PATHS), 8)
+            eq("ochiq yo'llar soni", len(PUBLIC_PATHS), 9)
+            # 8 -> 9: `/ready` ONGLI ravishda qo'shildi (2026-08-31).
+            # Sabab: teskari proksi (Caddy `health_uri /ready`) va
+            # systemd sog'liq tekshiruvi TOKEN USHLAB TUROLMAYDI.
+            # Javob ATAYLAB tafsilotsiz — faqat `ok|ogohlantirish|xato`
+            # so'zlari; migratsiya sanog'i va xato matni server
+            # jurnalida qoladi (`api/main.py:ready()`).
+            eq("`/ready` ochiq ro'yxatda", "/ready" in PUBLIC_PATHS, True)
             # Bu son ATAYLAB qattiq yozilgan: kalit ochadigan eshiklar
             # jimgina ko'payib ketmasin. Yangi endpoint qo'shilsa sinov
             # yiqiladi va uni ONGLI ravishda yangilash kerak bo'ladi.

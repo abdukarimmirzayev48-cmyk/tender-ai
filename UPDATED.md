@@ -734,6 +734,7 @@ raqam kiyimidagi shakli.
 | 2026-08-31 | (§23) | **Aktor kimligi va audit** — qaror endi odamga bog'lanadi; ijarachi izolyatsiyasi kompozit FK bilan |
 | 2026-08-31 | (§24) | **Xavfsizlik qattiqlashtirish** — 1 Critical + 5 High tuzatildi; eng kam huquqli rol 24/24 bilan tasdiqlandi |
 | 2026-08-31 | (§25) | **Ma'lumot xaritasi** — 7 manba endpointi, kelib chiqish qamrovi 0 yetishmovchilik, 8 ta NOMA'LUM belgilandi |
+| 2026-08-31 | (§26) | **Joylashtirish** — staging majburiy, systemd + Caddy, zaxira + haftalik tiklash mashqi |
 
 ---
 
@@ -751,6 +752,7 @@ raqam kiyimidagi shakli.
 | `docs/erp_bosqichlar.md` | ERP integratsiya bosqichlari |
 | `docs/erp_integratsiya.md`, `_2.md` | ERP integratsiya tafsilotlari |
 | `docs/erp_texnik.md` | ERP texnik shartnoma |
+| `docs/deploy.md` | **Joylashtirish — staging birinchi, orqaga qaytarish, zaxira** |
 | `docs/legal-data-map.md` | **Ma'lumot xaritasi — huquqiy tekshiruv uchun (faktlar)** |
 | `docs/xavfsizlik.md` | **Xavfsizlik: tahdid modeli, topilmalar, nazoratlar** |
 | `docs/erp_kimlik.md` | **Aktor kimligi va audit — arxitektura qarori (ADR)** |
@@ -1147,6 +1149,95 @@ arxitekturaviy qaror talab qiladi, texnik "tuzatish" emas.
 
 `_tests/manba_test.py` — 41/41. Kelib chiqish qamrovi nolga teng
 bo'lib qolishini qo'riqlaydi. To'liq to'plam **25/25**.
+
+
+---
+
+## 26. Joylashtirish — staging birinchi (2026-08-31)
+
+To'liq qo'llanma: `docs/deploy.md`.
+
+> **Server hali yo'q.** Hamma narsa repozitoriyada tayyor va sinovdan
+> o'tgan (`_tests/deploy_test.py` 110/110), lekin HAQIQIY mashinada
+> yurgizilmagan. Bu ochiq aytiladi.
+
+### Arxitektura
+
+Caddy (avtomatik HTTPS) -> uvicorn 127.0.0.1 -> PostgreSQL+pgvector.
+Frontend QURILGAN statik fayllar (`npm run build`), dev-server
+ISHLATILMAYDI. systemd timer'lar: ETL soatiga 1, zaxira har kuni,
+tiklash mashqi haftalik.
+
+**Shablon birlik** (`tenderai-api@.service`): staging va production
+BITTA fayldan — ikkita nusxa ajralib ketishining eng qisqa yo'li.
+
+### Staging'siz ishlab chiqarishga joylashtirib BO'LMAYDI
+
+`deploy.sh production` `/opt/tenderai/staging/.verified` faylini
+tekshiradi va AYNAN SHU ref staging'da o'tganini solishtiradi.
+Tasdiqni staging joylashtiruvi SOG'LIQ TEKSHIRUVIDAN O'TGACH o'zi
+yozadi.
+
+Joylashtirish ATOMAR (`ln -sfn current`), sog'liq tekshiruvi
+o'tmasa AVTOMATIK orqaga qaytariladi.
+
+### To'rt sog'liq tekshiruvi ATAYLAB ajratilgan
+
+| Endpoint | Nima | Yiqilsa |
+|---|---|---|
+| `/health` | jarayon tirikmi | xizmat o'lgan |
+| `/ready` | baza **va migratsiya** | **503** — proksi trafik yubormaydi |
+| `/freshness` | ETL yangiligi | ogohlantirish |
+| `psql` | baza to'g'ridan-to'g'ri | ulanish yo'q |
+
+Ularni qo'shish "tirik = ishlayapti" degan YOLG'ON berardi: jarayon
+ko'tarilgan, lekin migratsiya qo'llanmagan holat HAQIQIY.
+
+`/ready` OCHIQ (proksi token ushlamaydi), lekin javobi TAFSILOTSIZ —
+sabablar server jurnalida. `auth_test` dagi ochiq yo'llar soni 8 -> 9
+ONGLI ravishda yangilandi.
+
+### `localhost` havolasi — o'lchangan va to'silgan
+
+Bazada `notify_settings.base_url = 'http://localhost:5173'` YOZILGAN
+edi (haqiqiy ijarachi uchun). Bildirishnoma o'chiq bo'lgani uchun
+buzuq havola hali yuborilmagan.
+
+Uch qatlam: `PUBLIC_BASE_URL` muhitdan; bazadagi qiymat mahalliy
+bo'lsa MUHIT yutadi; `url_tekshir()` `APP_ENV != dev` da yuborishni
+TO'XTATADI. Jimgina almashtirmaydi — to'g'ri manzil noma'lum.
+
+Tekshiruv `card_url()` ICHIDA, ya'ni uchala ko'rinish (email matni,
+email HTML, Telegram) avtomatik qamrab olinadi.
+
+### Zaxira — sinalmagani zaxira emas
+
+`backup.sh` dump oladi va DARHOL `pg_restore --list` bilan
+ochilishini tekshiradi (buzuq faylni haftalab saqlab yurmaslik
+uchun); jadval soni 10 dan kam bo'lsa dump O'CHIRILADI.
+
+`restore-test.sh` HAR HAFTA vaqtinchalik bazaga tiklaydi, jadval /
+qator / migratsiya / pgvector ni tekshiradi va TIKLASH VAQTINI
+o'lchaydi (RTO uchun haqiqiy raqam). Ishlab chiqarish bazasi bilan
+adashmaslik tekshiruvi bor va u bajarilmasa skript TO'XTAYDI.
+
+### Tuzilmali jurnal
+
+`api/jurnal.py` — JSON qatorlar, har so'rovda `sorov_id` (javobda
+`X-Request-Id`). SIRLAR NIQOBLANADI: `password`, `token`, `api_key`,
+`dsn`, `cookie` nomli maydonlar — NOM bo'yicha, mazmun bo'yicha emas.
+`/health` va `/ready` so'rovlari yozilmaydi (faqat xato bo'lganda) —
+ular har 30 soniyada keladi.
+
+### Ochiq qolgan
+
+1. Server yo'q — hech narsa haqiqiy mashinada yurgizilmagan.
+2. Domenlar va staging `basic_auth` xeshi NAMUNAVIY.
+3. Zaxira faqat mahalliy diskda — tashqi nusxa yo'q.
+4. Monitoring/ogohlantirish yo'q: systemd xizmatni qayta ko'taradi,
+   lekin buni HECH KIM bilmaydi.
+5. RTO raqami hali O'LCHANMAGAN — mashq birinchi marta yurgandan
+   keyin ma'lum bo'ladi. Taxminiy raqam yozilmadi.
 
 
 ---
