@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+import etl_ishonch as ish
+
 try:
     import psycopg2
     from psycopg2.extras import execute_values
@@ -47,7 +49,19 @@ URPC_URL      = "https://api.xt-xarid.uz/urpc"
 REQUEST_DELAY = 0.8      # serverga bosim qilmaslik uchun
 MAX_RETRIES   = 3
 RETRY_BACKOFF = 2.0
-TIMEOUT       = 40
+#: (ulanish, o'qish) — ilgari bitta `40` edi va ikkalasiga qo'llanardi.
+TIMEOUT       = (8.0, 40.0)
+SIYOSAT = ish.Siyosat(urinishlar=MAX_RETRIES, asos=1.0, koeff=RETRY_BACKOFF,
+                      max_kutish=45.0, jitter=0.25)
+
+#: Vaqt byudjeti — bu qadam eng uzun (har tender uchun alohida so'rov).
+STANDART_BYUDJET = 20 * 60
+
+#: Kelishilgan chiqish kodlari (`run_etl.py` shularga qarab status qo'yadi).
+CHIQISH_TUGADI = 0
+CHIQISH_QISMAN = 7
+CHIQISH_BAND   = 8
+CHIQISH_XATO   = 1
 
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
@@ -68,27 +82,41 @@ def headers(proc_id: Any) -> Dict[str, str]:
     }
 
 
+#: Metrika hisoblagichi va to'xtash so'rovi — `main()` da o'rnatiladi.
+_HISOB: Optional[Any] = None
+_TOXTATGICH: Optional[ish.Toxtatgich] = None
+
+
 def get_proc(session: requests.Session, proc_id: Any) -> Optional[dict]:
-    """Bitta tenderning to'liq tafsilotini oladi. Xato bo'lsa None."""
+    """Bitta tenderning to'liq tafsilotini oladi. Xato bo'lsa None.
+
+    `None` = "shu YOZUV olinmadi" va u BUTUN yurishni to'xtatmaydi.
+    Qayta urinish TASNIFLANGAN: 404 darhol tashlanadi, 503 kutib
+    qayta urinilyapti.
+    """
     payload = {"id": 1, "jsonrpc": "2.0", "method": "get_proc",
                "params": {"proc_id": str(proc_id)}}
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            r = session.post(URPC_URL, json=payload, headers=headers(proc_id),
-                             timeout=TIMEOUT)
-            r.raise_for_status()
-            body = r.json()
-            if body.get("error"):
-                print(f"    ! RPC xato: {str(body['error'])[:90]}", file=sys.stderr)
-                return None
-            return body.get("result")
-        except Exception as e:  # noqa: BLE001
-            if attempt == MAX_RETRIES:
-                print(f"    ! {MAX_RETRIES} urinishdan keyin muvaffaqiyatsiz: {e}",
-                      file=sys.stderr)
-                return None
-            time.sleep(RETRY_BACKOFF ** attempt)
-    return None
+
+    def _ish():
+        body = ish.javob_json(
+            session.post(URPC_URL, json=payload, headers=headers(proc_id),
+                         timeout=TIMEOUT))
+        if isinstance(body, dict) and body.get("error"):
+            # RPC xatosi HTTP 200 bilan keladi — MAZMUNIY xato,
+            # qayta urinish tuzatmaydi.
+            raise ish.ManbaXato(f"RPC xato: {str(body['error'])[:120]}",
+                                qayta_urinsa=False)
+        return body.get("result") if isinstance(body, dict) else None
+
+    try:
+        return ish.qayta_urin(
+            _ish, siyosat=SIYOSAT, nom=f"get_proc #{proc_id}",
+            ogohlantir=lambda m: print(f"    ! {m}", file=sys.stderr),
+            hisob=(lambda: _HISOB.oldinga(retried=1)) if _HISOB else None,
+            toxtash=(lambda: _TOXTATGICH.toxtaymi()) if _TOXTATGICH else None)
+    except ish.ManbaXato as e:
+        print(f"    ! #{proc_id} olinmadi: {e}", file=sys.stderr)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -196,13 +224,40 @@ def save(conn, detail: dict, docs: List[dict]) -> None:
                 fetched_at = now()""",
             [detail[c] for c in DETAIL_COLS])
 
-        # Hujjatlarni qayta yozamiz (manbada o'zgargan/olib tashlangan bo'lishi mumkin)
-        cur.execute("DELETE FROM tender_document WHERE tender_id = %s",
-                    (detail["tender_id"],))
-        if docs:
+        # PK = (tender_id, file_ref). `scan_files()` STRUKTURA bo'yicha
+        # skanerlaydi, ya'ni bitta fayl obyekti IKKI xil maydonda
+        # uchrasa ikki marta qaytadi. Ilgari bunday tender
+        # `duplicate key` bilan yiqilar va TAFSILOTI UMUMAN
+        # saqlanmasdi. Takror = AYNI bir xil qator, ya'ni yo'qoladigan
+        # narsa yo'q.
+        uniq = {d["file_ref"]: d for d in docs}
+        if len(uniq) != len(docs):
+            print(f"    ! #{detail['tender_id']}: {len(docs) - len(uniq)} ta "
+                  f"takror hujjat havolasi birlashtirildi", file=sys.stderr)
+
+        # DELETE + INSERT EMAS — UPSERT. Sabab `etl_uzex.save()` dagi
+        # bilan bir xil: o'chirish qayta ishlash HOLATINI va ajratilgan
+        # matn bilan bog'lanishni yo'qotardi (o'lchangan: 392 yetim
+        # matn qatori).
+        if uniq:
             execute_values(cur,
-                f"INSERT INTO tender_document ({','.join(DOC_COLS)}) VALUES %s",
-                [tuple(d[c] for c in DOC_COLS) for d in docs])
+                f"INSERT INTO tender_document ({','.join(DOC_COLS)}) VALUES %s "
+                "ON CONFLICT (tender_id, file_ref) DO UPDATE SET "
+                + ",".join(f"{c}=EXCLUDED.{c}" for c in DOC_COLS
+                           if c not in ("tender_id", "file_ref"))
+                + ", fetched_at = now()"
+                + ", manbadan_yoqoldi_at = NULL"
+                + ", holat = CASE WHEN tender_document.holat = 'manbadan_yoqoldi' "
+                  "              THEN 'navbatda' ELSE tender_document.holat END",
+                [tuple(d[c] for c in DOC_COLS) for d in uniq.values()])
+
+        # Manbada BOSHQA YO'Q — o'chirilmaydi, BELGILANADI.
+        cur.execute(
+            "UPDATE tender_document SET holat='manbadan_yoqoldi', "
+            "       manbadan_yoqoldi_at = COALESCE(manbadan_yoqoldi_at, now()) "
+            "WHERE tender_id = %s AND holat <> 'manbadan_yoqoldi' "
+            "  AND NOT (file_ref = ANY(%s))",
+            (detail["tender_id"], list(uniq.keys()) or [""]))
     conn.commit()
 
 
@@ -210,18 +265,34 @@ def save(conn, detail: dict, docs: List[dict]) -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
+    ish.chiqishni_sozla()
     ap = argparse.ArgumentParser(description="Tender tafsiloti va hujjatlari ETL")
     ap.add_argument("--only-open", action="store_true",
                     help="Faqat ochiq tenderlar (standart: barchasi)")
     ap.add_argument("--limit", type=int, help="Nechta tender (sinov uchun)")
     ap.add_argument("--dry-run", action="store_true", help="DBga yozmaydi")
     ap.add_argument("--dsn", default=os.environ.get("XT_DB_DSN"))
+    ap.add_argument("--max-seconds", type=float, default=STANDART_BYUDJET,
+                    help="Vaqt byudjeti. Tugaganda checkpoint yozib TOZA "
+                         "to'xtaydi (0 = cheksiz)")
+    ap.add_argument("--no-checkpoint", action="store_true",
+                    help="Checkpoint o'qilmaydi/yozilmaydi (sinov uchun)")
     args = ap.parse_args()
 
     if not args.dsn:
         sys.exit("XATO: DSN yo'q. --dsn yoki XT_DB_DSN o'rnating.")
     if psycopg2 is None:
         sys.exit("XATO: pip install psycopg2-binary")
+
+    global _HISOB, _TOXTATGICH
+    _TOXTATGICH = ish.Toxtatgich(args.max_seconds or None)
+    _TOXTATGICH.signallarni_ulash()
+    yozuvchi = ish.BazaYozuvchi(args.dsn)
+    yurish = ish.Yurish(yozuvchi)
+    _HISOB = yurish
+    oqim = "details:" + ("open" if args.only_open else "all")
+    kp = ish.Checkpoint(yozuvchi, "xt-xarid", oqim,
+                        faol=not (args.no_checkpoint or args.dry_run))
 
     # Qaysi tenderlarni yig'amiz
     conn = psycopg2.connect(args.dsn)
@@ -237,40 +308,98 @@ def main() -> None:
 
     label = "faqat ochiq" if args.only_open else "barcha"
     print(f"[1/2] {len(ids)} ta tender ({label}) uchun tafsilot yig'iladi...")
-    print(f"      Taxminiy vaqt: ~{len(ids) * REQUEST_DELAY / 60:.1f} daqiqa\n")
+    print(f"      Taxminiy vaqt: ~{len(ids) * REQUEST_DELAY / 60:.1f} daqiqa")
 
-    session = requests.Session()
+    # --- CHECKPOINT: qayerdan davom etamiz? ---------------------------
+    # `ish_kaliti` ID ro'yxatining barmoq izi. Ro'yxat o'zgargan bo'lsa
+    # (yangi tender qo'shilgan) kursor YAROQSIZ deb belgilanadi va
+    # noldan boshlanadi — noto'g'ri joydan davom etib oradagi tenderni
+    # JIMGINA tashlab ketishdan ko'ra shu yaxshi.
+    kalit = ish.ish_kaliti(ids)
+    boshlanish = kp.boshla(len(ids), kalit) if ids else 0
+    if boshlanish:
+        yurish.oldinga(resumed=boshlanish)
+        print(f"      CHECKPOINT: {boshlanish}/{len(ids)} dan davom etamiz "
+              f"(oldingi yurish uzilgan).")
+    byudjet = _TOXTATGICH.qolgan()
+    if byudjet:
+        print(f"      Byudjet: {byudjet:.0f}s")
+    print()
+
+    # Keep-alive: bu qadam har tenderga alohida so'rov qiladi, ya'ni
+    # ulanishni qayta ishlatish eng ko'p shu yerda foyda beradi.
+    session = ish.sessiya_yarat(pool=2)
     ok = failed = total_docs = 0
+    sabab, chiqish = "tugadi", CHIQISH_TUGADI
 
-    for i, tid in enumerate(ids, 1):
+    i = boshlanish
+    while i < len(ids):
+        if _TOXTATGICH.toxtaymi():
+            sabab = _TOXTATGICH.sabab or "toxtatildi"
+            chiqish = CHIQISH_QISMAN
+            print(f"\n[!] TO'XTASH ({sabab}): {i}/{len(ids)} da to'xtadik, "
+                  f"checkpoint yozildi. Keyingi yurish shu yerdan davom etadi.")
+            break
+
+        tid = ids[i]
+        i += 1
         result = get_proc(session, tid)
         if not result:
             failed += 1
+            yurish.oldinga(processed=1, failed=1)
             print(f"  [{i}/{len(ids)}] #{tid} — TAFSILOT OLINMADI")
+            kp.siljit(i)
             time.sleep(REQUEST_DELAY)
             continue
 
-        detail, docs = transform(tid, result)
-        total_docs += len(docs)
-        ok += 1
-        mark = f"{len(docs)} hujjat" if docs else "hujjatsiz"
-        print(f"  [{i}/{len(ids)}] #{tid} — {mark}")
+        # BITTA BUZUQ YOZUV BUTUN PAKETNI YIQITMAYDI.
+        try:
+            detail, docs = transform(tid, result)
+        except Exception as e:                              # noqa: BLE001
+            failed += 1
+            yurish.oldinga(processed=1, failed=1)
+            print(f"  [{i}/{len(ids)}] #{tid} — BUZUQ YOZUV: "
+                  f"{type(e).__name__}: {str(e)[:70]}", file=sys.stderr)
+            kp.siljit(i)
+            time.sleep(REQUEST_DELAY)
+            continue
 
+        yozildi = True
         if not args.dry_run:
             try:
                 save(conn, detail, docs)
             except Exception as e:  # noqa: BLE001
                 conn.rollback()
-                print(f"    ! DB xato: {e}", file=sys.stderr)
+                print(f"    ! #{tid} DB xato: {str(e)[:120]}", file=sys.stderr)
                 failed += 1
+                yozildi = False
+                yurish.oldinga(processed=1, failed=1)
 
+        if yozildi:
+            total_docs += len(docs)
+            ok += 1
+            yurish.oldinga(processed=1, succeeded=1)
+            mark = f"{len(docs)} hujjat" if docs else "hujjatsiz"
+            print(f"  [{i}/{len(ids)}] #{tid} — {mark}")
+
+        kp.siljit(i, oxirgi_id=tid if yozildi else None)
+        yurish.puls()
         time.sleep(REQUEST_DELAY)
+    else:
+        kp.tugat()
 
     conn.close()
-    print(f"\n[2/2] Tayyor. Muvaffaqiyatli: {ok}, xato: {failed}, "
+    yurish.checkpoint_yoz(dict(kp.holat.dict(), oqim=oqim))
+    yurish.sabab_yoz(sabab)
+    print(f"\n[2/2] {sabab.upper()}. Muvaffaqiyatli: {ok}, xato: {failed}, "
           f"jami hujjat: {total_docs}")
+    print(f"      Metrika: {yurish.xulosa()}")
     if args.dry_run:
         print("      (--dry-run — DBga yozilmadi)")
+    yozuvchi.yop()
+    if failed and chiqish == CHIQISH_TUGADI:
+        chiqish = CHIQISH_QISMAN
+    sys.exit(chiqish)
 
 
 if __name__ == "__main__":

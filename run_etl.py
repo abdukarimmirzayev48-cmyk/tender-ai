@@ -110,15 +110,40 @@ def close_stale_runs(stale_hours: float = 2.0) -> int:
     `try/finally` bu yerda YORDAM BERMAYDI: SIGKILL/taskkill /F da Python
     umuman kod bajarmaydi. Shuning uchun tozalash keyingi yurish boshida.
 
+    O'LCHOV TUZATILDI (2026-08-30). Ilgari `finished_at = now()` edi,
+    ya'ni "qachon PAYQADIK". Natijada 3-daqiqada o'lgan yurish jurnalda
+    45 SOAT davom etgan bo'lib ko'rinardi va davomiylik metrikasi
+    butunlay ma'nosiz edi:
+
+        uzex 'error' davomiyligi: o'rtacha 421 daq, maksimum 2700 daq
+        uzex 'ok'    davomiyligi: o'rtacha 1.9 daq
+
+    Endi `finished_at = heartbeat_at`, ya'ni "qachon ishlashdan
+    TO'XTADI". Heartbeat yo'q bo'lsa (darhol o'lgan yoki eski qator)
+    `finished_at` NULL qoladi — bu O'LCHANMAGANLIK, va
+    `v_etl_run_olchov` uni o'rtachaga QO'SHMAYDI. O'lchanmagan narsani
+    nolga aylantirish "tez ishladi" degan yolg'on berardi.
+
     Qaytadi: yopilgan qatorlar soni.
     """
     conn = db()
     try:
         with conn.cursor() as cur:
+            # `terminal_reason` HAR DOIM 'uzildi' bo'ladi, bolaning oxirgi
+            # yozganidan qat'i nazar. Sabab: bola qadam TUGATGAN bo'lishi
+            # mumkin ('tugadi'), lekin YURISH baribir uzilgan — ota-jarayon
+            # qatorni yopishga ulgurmagan. `status='error'` +
+            # `terminal_reason='tugadi'` ziddiyatli o'qilardi.
+            # Bolaning oxirgi sababi YO'QOLMAYDI: u `error` matniga qo'shiladi.
             cur.execute(
-                "UPDATE etl_run SET status='error', finished_at=now(), "
-                "error=%s WHERE status='running' "
-                "AND started_at < now() - (%s * interval '1 hour')",
+                "UPDATE etl_run SET status='error', "
+                "  finished_at = heartbeat_at, "
+                "  error = COALESCE(NULLIF(error, '') || E'\\n', '') || %s "
+                "          || COALESCE(' (bola oxirgi holati: '"
+                "                      || terminal_reason || ')', ''), "
+                "  terminal_reason = 'uzildi' "
+                "WHERE status='running' "
+                "  AND started_at < now() - (%s * interval '1 hour')",
                 ("yurish tugamasdan uzildi (jarayon majburan to'xtatilgan yoki "
                  "kompyuter uxlagan); keyingi yurish boshida yopildi",
                  stale_hours))
@@ -405,10 +430,37 @@ def siljish_tekshir(nom: str, oldin: Optional[int], keyin: Optional[int],
     print(f"  [OK] {nom}: {oldin} -> {keyin} ({oldin - keyin} ta bajarildi)")
 
 
-def run_script(script: str, extra_args: List[str]) -> Tuple[bool, Optional[str], float, List[str]]:
+#: Bola skriptlarining KELISHILGAN chiqish kodlari. 0/1 dan boshqa
+#: kodlar ATAYLAB: "tugallanmagan" va "band" — bu XATO ham, MUVAFFAQIYAT
+#: ham emas, va ularni bir-biriga qo'shib yuborish quvur sog'ligini
+#: noto'g'ri ko'rsatardi.
+KOD_TUGADI = 0
+KOD_QISMAN = 7      # vaqt byudjeti/to'xtash — checkpoint yozilgan
+KOD_BAND   = 8      # boshqa yurish shu manbani olib turibdi
+
+#: Chiqish kodi -> (guruh holati uchun hissa, tugash sababi)
+_KOD_MANOSI = {
+    KOD_TUGADI: ("ok",      "tugadi"),
+    KOD_QISMAN: ("partial", "qisman"),
+    KOD_BAND:   ("band",    "band"),
+}
+
+
+def run_script(script: str, extra_args: List[str],
+               run_id: Optional[int] = None
+               ) -> Tuple[bool, Optional[str], float, List[str], int]:
     """Bitta ETL skriptini bola-jarayon sifatida yurgizadi.
 
-    Qaytadi: (ok, xato_matni, sekund, chiqish_qatorlari)
+    Qaytadi: (ok, xato_matni, sekund, chiqish_qatorlari, chiqish_kodi)
+
+    `run_id` bola muhitiga `ETL_RUN_ID` bo'lib beriladi. Bola metrikani
+    (processed/succeeded/failed/...) SHU qatorga O'ZI yozadi.
+
+    NEGA MUHIT ORQALI, chiqishni parsing qilib emas: majburan
+    to'xtatilgan bola HECH NARSA CHOP ETMAYDI (bufer yuvilmaydi), ya'ni
+    chiqishga tayangan metrika aynan biz o'lchamoqchi bo'lgan holatda —
+    o'ldirilgan yurishda — yo'qolardi. Bazaga to'g'ridan-to'g'ri yozuv
+    esa o'lim paytigacha bo'lgan hamma narsani saqlab qoladi.
 
     MUHIM (Windows): bola-jarayon chiqishi UTF-8 deb dekodlanadi va
     PYTHONIOENCODING=utf-8 bola muhitiga beriladi. Aks holda kirill matnда
@@ -425,7 +477,9 @@ def run_script(script: str, extra_args: List[str]) -> Tuple[bool, Optional[str],
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
-    ok, err = False, None
+    if run_id is not None:
+        env["ETL_RUN_ID"] = str(run_id)
+    ok, err, kod = False, None, -1
     for urinish in (1, 2):
         try:
             res = subprocess.run([PY, os.path.join(HERE, script), *extra_args],
@@ -433,7 +487,12 @@ def run_script(script: str, extra_args: List[str]) -> Tuple[bool, Optional[str],
                                  capture_output=True, text=True,
                                  encoding="utf-8", errors="replace",
                                  timeout=3600)
-            ok = res.returncode == 0
+            kod = res.returncode
+            # `ok` = "xato bo'lmadi". QISMAN va BAND xato EMAS: birinchisi
+            # checkpoint yozib toza to'xtadi, ikkinchisi ataylab
+            # o'tkazib yuborildi. Ularni 'error' deb belgilash
+            # quvurni sog'lom bo'lgani holda kasal ko'rsatardi.
+            ok = kod in _KOD_MANOSI
             tail = "\n".join((res.stdout or "").strip().splitlines()[-4:])
             if tail:
                 out.extend(f"    {ln}" for ln in tail.splitlines())
@@ -449,18 +508,20 @@ def run_script(script: str, extra_args: List[str]) -> Tuple[bool, Optional[str],
                 out = out[:1] + out[-1:]        # birinchi urinish chiqishi
                 continue
         except subprocess.TimeoutExpired:
-            ok, err = False, "timeout (1 soat)"
+            ok, err, kod = False, "timeout (1 soat)", -2
         except KeyboardInterrupt:
-            ok, err = False, "foydalanuvchi to'xtatdi (Ctrl+C)"
+            ok, err, kod = False, "foydalanuvchi to'xtatdi (Ctrl+C)", -3
         except Exception as e:  # noqa: BLE001
-            ok, err = False, str(e)[:500]
+            ok, err, kod = False, str(e)[:500], -4
         break
 
     dt = time.time() - t0
     if not ok:
         out.append(f"    !! XATO: {(err or '').strip()[:300]}")
-    out.append(f"  [{'OK' if ok else 'XATO'}] {script} — {dt:.0f}s")
-    return ok, err, dt, out
+    belgi = {KOD_TUGADI: "OK", KOD_QISMAN: "QISMAN",
+             KOD_BAND: "BAND"}.get(kod, "XATO")
+    out.append(f"  [{belgi}] {script} — {dt:.0f}s")
+    return ok, err, dt, out, kod
 
 
 def run_group(platform: str, steps: List[Tuple[str, List[str]]],
@@ -484,39 +545,81 @@ def run_group(platform: str, steps: List[Tuple[str, List[str]]],
     # qadami ~10 daqiqa yurishi mumkin, jonli qayta aloqa yo'qolmasin.
     emit([f"\n===== {platform}: {len(steps)} qadam ====="])
     all_ok = True
+    qismanmi = False
+    bandmi = True                 # hamma qadam BAND bo'lsagina guruh band
     errors: List[str] = []
     t0 = time.time()
     for script, extra in steps:
-        ok, err, _dt, out = run_script(script, extra)
+        ok, err, _dt, out, kod = run_script(script, extra, run_id)
         emit([f"[{platform}] " + ln for ln in out])
+        if kod != KOD_BAND:
+            bandmi = False
+        if kod == KOD_QISMAN:
+            qismanmi = True
         if not ok:
             all_ok = False
             errors.append(f"{script} {' '.join(extra)}: {(err or '').strip()[:200]}")
     dt = time.time() - t0
 
+    # HOLAT UCH XIL, IKKI XIL EMAS.
+    #   error   — haqiqiy nosozlik, ma'lumot eskirgan bo'lishi mumkin
+    #   partial — ish bajarildi, lekin tugamadi; checkpoint bor,
+    #             keyingi yurish davom ettiradi
+    #   ok      — to'liq tugadi
+    # `partial` ni 'ok' deb belgilash TUGALLANMAGAN YURISHNI
+    # MUVAFFAQIYATLI ko'rsatardi; 'error' deb belgilash esa ishlagan
+    # quvurni kasal ko'rsatardi. Ikkalasi ham yolg'on.
+    if not all_ok:
+        status, sabab = "error", "manba_xato"
+    elif bandmi and steps:
+        status, sabab = "ok", "band"
+    elif qismanmi:
+        status, sabab = "partial", "qisman"
+    else:
+        status, sabab = "ok", "tugadi"
+
     lines: List[str] = []
+    belgi = {"ok": "OK", "partial": "QISMAN", "error": "XATO"}[status]
     if conn is not None:
         found = platform_count(conn, platform)
         new = platform_count(conn, platform, since=started) if started else None
         with conn.cursor() as cur:
-            cur.execute("UPDATE etl_run SET finished_at=now(), status=%s, found=%s, "
-                        "new=%s, error=%s WHERE id=%s",
-                        ("ok" if all_ok else "error", found, new,
-                         "\n".join(errors)[:2000] or None, run_id))
+            cur.execute("UPDATE etl_run SET finished_at=now(), heartbeat_at=now(), "
+                        "status=%s, found=%s, new=%s, error=%s, "
+                        "terminal_reason=COALESCE(terminal_reason, %s) "
+                        "WHERE id=%s",
+                        (status, found, new, "\n".join(errors)[:2000] or None,
+                         sabab, run_id))
+            cur.execute("SELECT processed, succeeded, failed, retried, resumed, "
+                        "skipped FROM etl_run WHERE id=%s", (run_id,))
+            m = cur.fetchone() or (0, 0, 0, 0, 0, 0)
         conn.commit()
-        lines.append(f"  => {platform}: [{'OK' if all_ok else 'XATO'}] {dt:.0f}s | "
+        lines.append(f"  => {platform}: [{belgi}/{sabab}] {dt:.0f}s | "
                      f"jami {found}, yangi {new}")
+        lines.append(f"     ko'rildi {m[0]}, yozildi {m[1]}, yiqildi {m[2]}, "
+                     f"qayta urinish {m[3]}, tiklandi {m[4]}, o'tkazildi {m[5]}")
     else:
-        lines.append(f"  => {platform}: [{'OK' if all_ok else 'XATO'}] {dt:.0f}s")
+        lines.append(f"  => {platform}: [{belgi}/{sabab}] {dt:.0f}s")
     if conn is not None:
         conn.close()
 
     emit(lines)
-    return all_ok
+    # Qaytadigan qiymat "MA'LUMOT ISHONCHLIMI" degani — `expire_stale_tenders`
+    # shunga tayanadi. QISMAN yurishda manba to'liq ko'rilmagan, ya'ni
+    # "manbada yo'q => muddati tugadi" xulosasi noto'g'ri bo'lardi.
+    return status == "ok"
 
 
 def build_groups(args) -> List[Tuple[str, List[Tuple[str, List[str]]]]]:
-    """Platforma -> ketma-ket qadamlar ro'yxati."""
+    """Platforma -> ketma-ket qadamlar ro'yxati.
+
+    VAQT BYUDJETI GURUH BO'YICHA TAQSIMLANADI. Guruh ichidagi qadamlar
+    KETMA-KET yuradi (bir host, rate-limit hurmati), ya'ni ularning
+    byudjetlari QO'SHILADI. Byudjetni har qadamga to'liq berish
+    guruhni ikki barobar uzaytirardi va rejalashtiruvchi chegarasidan
+    oshib ketardi — o'shanda Windows uni O'LDIRADI va aynan biz
+    tuzatmoqchi bo'lgan holat qaytadi.
+    """
     status_args = ["--all-statuses"] if args.all_statuses else []
     limit_args = ["--limit", str(args.limit)] if args.limit else []
 
@@ -534,7 +637,22 @@ def build_groups(args) -> List[Tuple[str, List[Tuple[str, List[str]]]]]:
         ("etl_uzex.py", ["--type-id", "2", *limit_args]),
         ("etl_uzex.py", ["--type-id", "1", *limit_args]),
     ]
-    return [("xt-xarid", xt_steps), ("uzex", uzex_steps)]
+
+    guruhlar = [("xt-xarid", xt_steps), ("uzex", uzex_steps)]
+
+    byudjet = getattr(args, "max_seconds", 0) or 0
+    if byudjet > 0:
+        for _platform, steps in guruhlar:
+            # Byudjeti bor skriptlar: uzex va details. `etl_tenders.py`
+            # ~7 sekundda tugaydi va unga byudjet kerak emas.
+            byudjetli = [s for s in steps
+                         if s[0] in ("etl_uzex.py", "etl_details.py")]
+            if not byudjetli:
+                continue
+            ulush = max(60.0, byudjet / len(byudjetli))
+            for script, extra in byudjetli:
+                extra.extend(["--max-seconds", f"{ulush:.0f}"])
+    return guruhlar
 
 
 def limit_args_for(args) -> List[str]:
@@ -578,6 +696,14 @@ def main() -> None:
                     help="Kategoriyalash post-qadamini o'tkazib yubor")
     ap.add_argument("--skip-notify", action="store_true",
                     help="Bildirishnoma (email/Telegram) post-qadamini o'tkazib yubor")
+    ap.add_argument("--max-seconds", type=float, default=1500.0,
+                    help="Bitta PLATFORMA guruhining vaqt byudjeti (standart "
+                         "1500 = 25 daqiqa). Byudjet tugaganda skript "
+                         "checkpoint yozib TOZA to'xtaydi va keyingi yurish "
+                         "shu yerdan davom etadi. Rejalashtiruvchi "
+                         "ExecutionTimeLimit dan ANIQ KICHIK bo'lishi shart: "
+                         "chegara tugaganda Windows jarayonni O'LDIRADI va "
+                         "checkpoint yozilmay qoladi. 0 = cheksiz")
     ap.add_argument("--stale-hours", type=float, default=2.0,
                     help="Shuncha soatdan eski 'running' yozuvlar uzilgan deb "
                          "yopiladi (standart 2; ETL vaqt chegarasi ham 2 soat)")
@@ -594,10 +720,22 @@ def main() -> None:
 
     # Chiqishni QATOR-QATOR yuvamiz. Faylga yo'naltirilganda Python
     # blok-buferlaydi va majburan to'xtatishda butun jurnal yo'qoladi.
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except Exception:                                       # noqa: BLE001
-        pass
+    #
+    # KODLASH HAM SHU YERDA. O'lchangan nuqson (2026-08-30): orkestrator
+    # bola chiqishidagi `✓` belgisini chop etishda `UnicodeEncodeError`
+    # bilan YIQILDI va BUTUN yurishni to'xtatdi — ya'ni jurnal yozuvi
+    # ish jarayonini o'ldirdi.
+    #
+    # Rejalashtiruvchi orqali yurganda bu KO'RINMASDI: `register_task.ps1`
+    # cmd wrapperi `PYTHONIOENCODING=utf-8` beradi. Ya'ni nuqson faqat
+    # qo'lda yurgizganda chiqardi va shu sababli uzoq payqalmadi.
+    # Endi skript O'ZI kafolatlaydi, muhitga tayanmaydi.
+    for _oqim in (sys.stdout, sys.stderr):
+        try:
+            _oqim.reconfigure(encoding="utf-8", errors="replace",
+                              line_buffering=True)
+        except Exception:                                   # noqa: BLE001
+            pass
 
     # `--only-rag` — qulaylik bayrog'i: RAG uchun kerak bo'lgan hamma
     # narsani yoqadi, qolganini o'chiradi. Foydalanuvchi to'rtta
@@ -704,7 +842,7 @@ def main() -> None:
     # Kategoriyalash — barcha manbalar tugagach (yangi tenderlarni belgilaydi).
     # Tender qo'shmaydi, shuning uchun etl_run'ga loglanmaydi.
     if not args.skip_categorize:
-        _ok, _err, _dt, out = run_script("etl_categorize.py", [])
+        _ok, _err, _dt, out, _kod = run_script("etl_categorize.py", [])
         emit(["\n===== post: kategoriyalash =====", *out])
         if not _ok:
             post_xatolar.append(f"etl_categorize: {_err}")
@@ -736,7 +874,7 @@ def main() -> None:
     # + pozitsiyalardan quriladi) va 0.5 daqiqa oladi. Eng arzon va
     # eng ta'sirli qadam BIRINCHI turishi kerak.
     if args.with_rag:
-        _ok, _err, _dt, out = run_script("etl_embed.py", ["--tenders"])
+        _ok, _err, _dt, out, _kod = run_script("etl_embed.py", ["--tenders"])
         emit(["\n===== post: tender vektorlari =====", *out])
         if not _ok:
             post_xatolar.append(f"etl_embed --tenders: {_err}")
@@ -760,7 +898,7 @@ def main() -> None:
         if _kod_xato:
             post_xatolar.extend(_kod_xato)
         else:
-            _ok, _err, _dt, out = run_script("etl_embed.py", ["--codes"])
+            _ok, _err, _dt, out, _kod = run_script("etl_embed.py", ["--codes"])
             emit(["\n===== post: tasniflagich vektorlari =====", *out])
             if not _ok:
                 post_xatolar.append(f"etl_embed --codes: {_err}")
@@ -778,7 +916,7 @@ def main() -> None:
         elif args.docs_catalog:
             doc_args += ["--catalog"]          # eski tor qamrov
         # aks holda: `--only-open` standart, katalog filtri YO'Q
-        _ok, _err, _dt, out = run_script("etl_doc_text.py", doc_args)
+        _ok, _err, _dt, out, _kod = run_script("etl_doc_text.py", doc_args)
         emit(["\n===== post: hujjat matni =====", *out])
         if not _ok:
             post_xatolar.append(f"etl_doc_text: {_err}")
@@ -797,7 +935,7 @@ def main() -> None:
     # `embedding IS NULL` bo'lgani uchun qolgani KEYINGI yurishda davom
     # etadi — ya'ni korpus asta-sekin quvib yetadi.
     if args.with_rag:
-        _ok, _err, _dt, out = run_script("etl_embed.py", ["--chunks"])
+        _ok, _err, _dt, out, _kod = run_script("etl_embed.py", ["--chunks"])
         emit(["\n===== post: bo'laklash =====", *out])
         if not _ok:
             post_xatolar.append(f"etl_embed --chunks: {_err}")
@@ -815,7 +953,7 @@ def main() -> None:
         if args.with_requirements:
             _talab_p = {"company_id": args.company, "method": "naqsh"}
             _talab_oldin = _sanoq(SQL_TALAB_QOLGAN, _talab_p)
-            _ok, _err, _dt, out = run_script(
+            _ok, _err, _dt, out, _kod = run_script(
                 "etl_requirement.py",
                 ["--company", str(args.company), "--method", "naqsh", "--quiet"])
             emit(["\n===== post: talablar (naqsh) =====", *out])
@@ -892,7 +1030,7 @@ def main() -> None:
             _qolgan, _oldingi, _bolak_n = args.vector_budget, _vek_oldin, 0
             while _qolgan > 0:
                 _n = min(VEKTOR_BOLAK, _qolgan)
-                _ok, _err, _dt, out = run_script(
+                _ok, _err, _dt, out, _kod = run_script(
                     "etl_embed.py", ["--vectors", "--limit", str(_n)])
                 _bolak_n += 1
                 _hozir = _sanoq(SQL_VEKTOR_QOLGAN)
@@ -927,7 +1065,7 @@ def main() -> None:
     # Skript YOQILGAN kanallarga yuboradi: email (SMTP) va/yoki Telegram.
     # Ikkalasi ham o'chirilgan bo'lsa hech narsa qilmaydi, xato bermaydi.
     if not args.skip_notify:
-        _ok, _err, _dt, out = run_script("notify_new.py", [])
+        _ok, _err, _dt, out, _kod = run_script("notify_new.py", [])
         emit(["\n===== post: bildirishnoma =====", *out])
         if not _ok:
             post_xatolar.append(f"notify_new: {_err}")

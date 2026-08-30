@@ -42,6 +42,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+import etl_ishonch as ish
+
 try:
     import psycopg2
     from psycopg2.extras import execute_values
@@ -59,7 +61,15 @@ PAGE_LIMIT     = 51          # aniqlangan standart limit
 REQUEST_DELAY  = 1.0         # so'rovlar orasi (sekund) — rate-limit hurmati
 MAX_RETRIES    = 4           # bitta sahifa uchun qayta urinishlar
 RETRY_BACKOFF  = 2.0         # eksponensial kutish koeffitsienti
-TIMEOUT        = 30          # so'rov timeouti (sekund)
+#: (ulanish, o'qish). Ilgari BITTA `TIMEOUT = 30` edi va `requests` uni
+#: IKKALASIGA ham qo'llardi: tushgan host uchun ham 30 sekund kutardik.
+TIMEOUT        = (8.0, 30.0)
+#: Qayta urinish SIYOSATI — `etl_ishonch` dagi yagona mexanizm.
+#: Ilgari `rpc_call` HAR QANDAY istisnoni qayta urinardi, shu jumladan
+#: 404 va 400 ni. Ular hech qachon tuzalmaydi, ya'ni 4 urinish x
+#: eksponensial kutish = 30 sekund BEHUDA sarf, va oxirida baribir xato.
+SIYOSAT = ish.Siyosat(urinishlar=MAX_RETRIES, asos=1.0, koeff=RETRY_BACKOFF,
+                      max_kutish=45.0, jitter=0.25)
 HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
@@ -75,25 +85,40 @@ TZ = timezone(timedelta(hours=5))
 # ---------------------------------------------------------------------------
 # RPC qatlami
 # ---------------------------------------------------------------------------
+#: Metrika hisoblagichi — `main()` da o'rnatiladi.
+_HISOB: Optional[Any] = None
+
+
 def rpc_call(session: requests.Session, params: Dict[str, Any], req_id: int = 1) -> Any:
-    """Bitta JSON-RPC 'ref' chaqiruvi, retry + backoff bilan."""
+    """Bitta JSON-RPC 'ref' chaqiruvi, TASNIFLANGAN qayta urinish bilan.
+
+    UCH XATO TUZATILDI (2026-08-30):
+
+      1. `except Exception` HAMMASINI qayta urinardi. 404/400 hech qachon
+         tuzalmaydi — endi ular DARHOL ko'tariladi.
+      2. Oxirgi urinishdan KEYIN ham `time.sleep(wait)` bajarilardi:
+         4-urinish yiqilgach 16 sekund BEHUDA kutib, keyin xato berardi.
+      3. Jitter yo'q edi. Ikki reyestr (tender + selection) bir xil
+         xatoga uchraganda AYNAN bir vaqtda qayta urinib, manbaga
+         to'lqin bo'lib urilardi.
+    """
     payload = {"jsonrpc": "2.0", "id": req_id, "method": "ref", "params": params}
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = session.post(API_URL, json=payload, headers=HEADERS, timeout=TIMEOUT)
-            resp.raise_for_status()
-            data = resp.json()
-            if "error" in data and data["error"]:
-                raise RuntimeError(f"RPC error: {data['error']}")
-            return data.get("result")
-        except Exception as e:  # noqa: BLE001 — tarmoq/JSON xatolarini keng ushlaymiz
-            last_err = e
-            wait = RETRY_BACKOFF ** attempt
-            print(f"  ! urinish {attempt}/{MAX_RETRIES} muvaffaqiyatsiz ({e}); "
-                  f"{wait:.0f}s kutamiz...", file=sys.stderr)
-            time.sleep(wait)
-    raise RuntimeError(f"{MAX_RETRIES} urinishdan keyin ham muvaffaqiyatsiz: {last_err}")
+
+    def _ish():
+        data = ish.javob_json(
+            session.post(API_URL, json=payload, headers=HEADERS, timeout=TIMEOUT))
+        if isinstance(data, dict) and data.get("error"):
+            # RPC darajasidagi xato — HTTP 200 bilan keladi. Bu MAZMUNIY
+            # xato (noto'g'ri ref nomi, ruxsat yo'q), tarmoq emas:
+            # qayta urinish uni tuzatmaydi.
+            raise ish.ManbaXato(f"RPC error: {str(data['error'])[:160]}",
+                                qayta_urinsa=False)
+        return data.get("result") if isinstance(data, dict) else data
+
+    return ish.qayta_urin(
+        _ish, siyosat=SIYOSAT, nom=f"rpc[{params.get('ref')}] sahifa {req_id}",
+        ogohlantir=lambda m: print(f"  ! {m}", file=sys.stderr),
+        hisob=(lambda: _HISOB.oldinga(retried=1)) if _HISOB else None)
 
 
 def fetch_all_tenders(statuses: Optional[List[str]],
@@ -118,7 +143,9 @@ def fetch_all_tenders(statuses: Optional[List[str]],
     Takrorni shu yerda, manbaga eng yaqin joyda olib tashlaymiz: shunda
     lot/tovar qatorlari ham ikkilanmaydi.
     """
-    session = requests.Session()
+    # Keep-alive + ulanish pooli. Sahifalash 12+ so'rov qiladi, har
+    # biriga yangi TLS qo'l berish keraksiz.
+    session = ish.sessiya_yarat(pool=2, sarlavhalar=HEADERS)
     filters: Dict[str, Any] = {}
     if statuses:
         filters["status"] = statuses  # qiymatlar massiv ko'rinishida
@@ -382,7 +409,16 @@ def load_to_db(dsn: str, tenders, lots, goods, categories) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+#: Kelishilgan chiqish kodlari — `run_etl.py` shularga qarab
+#: `etl_run.status` ni ok / partial / error qilib qo'yadi.
+CHIQISH_TUGADI = 0
+CHIQISH_QISMAN = 7
+CHIQISH_BAND   = 8
+CHIQISH_XATO   = 1
+
+
 def main() -> None:
+    ish.chiqishni_sozla()
     ap = argparse.ArgumentParser(description="xt-xarid.uz protseduralarini yig'uvchi ETL")
     ap.add_argument("--ref", default=DEFAULT_REF,
                     help=f"Manba reyestri (ma'lumlari: {', '.join(KNOWN_REFS)}; "
@@ -397,13 +433,39 @@ def main() -> None:
                     help="PostgreSQL DSN (yoki XT_DB_DSN muhit o'zgaruvchisi)")
     args = ap.parse_args()
 
+    global _HISOB
+    yozuvchi = ish.BazaYozuvchi(args.dsn)
+    yurish = ish.Yurish(yozuvchi)
+    _HISOB = yurish
+
+    # USTMA-UST YURISHDAN HIMOYA — vazifa chegarasidan o'tadigan qulf.
+    # Task Scheduler ning `IgnoreNew` i faqat BITTA vazifa ichida
+    # ishlaydi. O'lchangan (etl_cron.log, 2026-08-30): ETL 01:00:02 da,
+    # RAG 01:02:14 da boshlangan va ikkalasi ham shu manbaga urilgan.
+    qulf = ish.Qulf("etl:xt-xarid", args.dsn) if not args.dry_run else None
+    if qulf is not None and not qulf.ol():
+        print("[BAND] xt-xarid allaqachon yig'ilmoqda — o'tkazib yuborildi "
+              "(manbaga ikki barobar so'rov yubormaymiz).")
+        yurish.sabab_yoz("band")
+        yozuvchi.yop()
+        sys.exit(CHIQISH_BAND)
+
     statuses = None if args.all_statuses else ["open"]
     label = "BARCHA statuslar" if args.all_statuses else "faqat 'open' (ochiq)"
     print(f"[1/3] Yig'ish boshlandi — {args.ref}, {label}")
 
     # `remain_time` shu paytga nisbatan o'lchanadi — muddatni tiklashda kerak.
     fetched_at = datetime.now(TZ)
-    records = fetch_all_tenders(statuses, args.ref)
+    try:
+        records = fetch_all_tenders(statuses, args.ref)
+    except ish.ManbaXato as e:
+        print(f"[XATO] {args.ref} ro'yxati olinmadi: {e}", file=sys.stderr)
+        yurish.sabab_yoz("manba_xato")
+        if qulf is not None:
+            qulf.qoyver()
+        yozuvchi.yop()
+        sys.exit(CHIQISH_XATO)
+    yurish.puls(majburan=True)
     if args.limit:
         records = records[:args.limit]
         print(f"  ! --limit {args.limit}: faqat birinchi {len(records)} yozuv olinadi")
@@ -411,9 +473,21 @@ def main() -> None:
 
     print("[2/3] Transform...")
     all_t, all_l, all_g, all_c = [], [], [], {}
+    buzuq = 0
     for rec in records:
-        t, l, g, c = transform(rec, fetched_at)
+        # BITTA BUZUQ YOZUV BUTUN PAKETNI YIQITMAYDI. Ilgari `transform`
+        # dagi har qanday istisno butun skriptni to'xtatardi va o'sha
+        # soatda xt-xarid'dan UMUMAN ma'lumot tushmasdi.
+        try:
+            t, l, g, c = transform(rec, fetched_at)
+        except Exception as e:                              # noqa: BLE001
+            buzuq += 1
+            print(f"  ! #{rec.get('id')} BUZUQ YOZUV tashlandi: "
+                  f"{type(e).__name__}: {str(e)[:90]}", file=sys.stderr)
+            continue
         all_t.append(t); all_l.extend(l); all_g.extend(g); all_c.update(c)
+    if buzuq:
+        yurish.oldinga(processed=buzuq, failed=buzuq)
     print(f"[2/3] {len(all_t)} protsedura, {len(all_l)} lot, {len(all_g)} tovar, "
           f"{len(all_c)} kategoriya.\n")
 
@@ -424,6 +498,7 @@ def main() -> None:
                        ["id","type","name","status","currency","totalcost",
                         "area_leaf_id","company_name"]}
             print("   ", json.dumps(preview, ensure_ascii=False, indent=2))
+        yozuvchi.yop()
         return
 
     if not args.dsn:
@@ -432,8 +507,31 @@ def main() -> None:
         sys.exit("XATO: psycopg2 o'rnatilmagan. `pip install psycopg2-binary`.")
 
     print("[3/3] DBga yuklash...")
-    load_to_db(args.dsn, all_t, all_l, all_g, all_c)
-    print("\nTayyor.")
+    try:
+        load_to_db(args.dsn, all_t, all_l, all_g, all_c)
+    except Exception as e:                                  # noqa: BLE001
+        # Yuklash BITTA tranzaksiya: yiqilsa hech narsa yozilmagan.
+        # Bu ATAYLAB — yarim yozilgan reyestr "hammasi shu" bo'lib
+        # ko'rinardi va `expire_stale_tenders` yaxshi tenderlarni
+        # "muddati tugadi" deb belgilab qo'yardi.
+        yurish.oldinga(processed=len(all_t), failed=len(all_t))
+        yurish.sabab_yoz("baza_xato")
+        print(f"[XATO] yuklash bekor qilindi (rollback): {str(e)[:200]}",
+              file=sys.stderr)
+        if qulf is not None:
+            qulf.qoyver()
+        yozuvchi.yop()
+        sys.exit(CHIQISH_XATO)
+
+    yurish.oldinga(processed=len(all_t), succeeded=len(all_t))
+    yurish.sabab_yoz("tugadi" if not buzuq else "qisman")
+    print(f"\nTayyor. Metrika: {yurish.xulosa()}")
+    if qulf is not None:
+        qulf.qoyver()
+    yozuvchi.yop()
+    # Buzuq yozuv bo'lsa yurish "to'liq tugadi" deb ko'rsatilmaydi:
+    # jimgina o'tkazib yuborish shu loyihada takroriy nuqson.
+    sys.exit(CHIQISH_QISMAN if buzuq else CHIQISH_TUGADI)
 
 
 if __name__ == "__main__":

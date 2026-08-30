@@ -40,6 +40,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+import etl_ishonch as ish
+
 try:
     import psycopg2
     from psycopg2.extras import execute_values
@@ -51,9 +53,37 @@ SOURCE        = "uzex"
 UZEX_OFFSET   = 20_000_000_000   # global ID = source_id + shu ofset
 PAGE          = 50
 REQUEST_DELAY = 0.4
-TIMEOUT       = 40
+#: (ulanish, o'qish). Ilgari BITTA `TIMEOUT = 40` edi va u ikkalasiga
+#: qo'llanardi: tushgan host uchun ham 40 sekund kutardik, holbuki
+#: ulanish 8 sekundda ma'lum bo'ladi.
+TIMEOUT       = ish.STANDART_TIMEOUT
 HEADERS = {"Content-Type": "application/json",
            "User-Agent": "tender-aggregator/0.1 (research)"}
+
+#: Vaqt byudjeti (sekund). Rejalashtiruvchi chegarasidan (45 daqiqa)
+#: ANIQ KICHIK bo'lishi SHART: byudjet tugaganda skript checkpoint
+#: yozib TOZA to'xtaydi, chegara tugaganda esa Windows uni O'LDIRADI
+#: va checkpoint yozilmay qoladi.
+STANDART_BYUDJET = 20 * 60
+
+#: `GetTrade` ni o'tkazib yuborish uchun solishtiriladigan maydonlar.
+#: TradeList da `updated_at` YO'Q (tekshirilgan), shuning uchun
+#: o'zgarishni SHU maydonlar bo'yicha aniqlaymiz. Ular savdoning
+#: mazmunini belgilaydi: nomi, muddati, narxi, sotuvchisi, hududi.
+KUZATILADIGAN = ("name", "start_date", "end_date", "cost",
+                 "seller_id", "region_name", "clarific_date")
+
+#: Bitta seans — keep-alive va ulanish pooli. Ilgari modul darajasidagi
+#: `requests.post/get` ishlatilardi, ya'ni HAR SO'ROVGA yangi TCP+TLS
+#: qo'l berish (to'liq yurishda 623 ta ortiqcha handshake).
+_SESSIYA: Optional[requests.Session] = None
+
+
+def sessiya() -> requests.Session:
+    global _SESSIYA
+    if _SESSIYA is None:
+        _SESSIYA = ish.sessiya_yarat(pool=4, sarlavhalar=HEADERS)
+    return _SESSIYA
 
 # ---------------------------------------------------------------------------
 # HUDUD MOSLASHTIRISH — UzEx viloyati -> bizdagi KANONIK dim_area kodi
@@ -173,16 +203,39 @@ def period_mult(period_name: Optional[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+#: Qayta urinish hisoblagichi va to'xtash so'rovi `main()` da
+#: o'rnatiladi. Modul darajasida turishi HTTP funksiyalarini
+#: imzosini o'zgartirmasdan metrikaga ulash uchun.
+_HISOB: Optional[Any] = None
+_TOXTATGICH: Optional[ish.Toxtatgich] = None
+
+
+def _qayta_urinish_hisobi() -> None:
+    if _HISOB is not None:
+        _HISOB.oldinga(retried=1)
+
+
+def _toxtaymi() -> bool:
+    return _TOXTATGICH.toxtaymi() if _TOXTATGICH is not None else False
+
+
 def post(path: str, body: dict) -> Any:
-    r = requests.post(f"{API}{path}", json=body, headers=HEADERS, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+    """POST + tasniflangan qayta urinish. 4xx da DARHOL yiqiladi."""
+    def _ish():
+        return ish.javob_json(
+            sessiya().post(f"{API}{path}", json=body, timeout=TIMEOUT))
+    return ish.qayta_urin(_ish, nom=f"POST {path}",
+                          ogohlantir=lambda m: print(f"  ! {m}", file=sys.stderr),
+                          hisob=_qayta_urinish_hisobi, toxtash=_toxtaymi)
 
 
 def get(path: str) -> Any:
-    r = requests.get(f"{API}{path}", headers=HEADERS, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+    """GET + tasniflangan qayta urinish."""
+    def _ish():
+        return ish.javob_json(sessiya().get(f"{API}{path}", timeout=TIMEOUT))
+    return ish.qayta_urin(_ish, nom=f"GET {path}",
+                          ogohlantir=lambda m: print(f"  ! {m}", file=sys.stderr),
+                          hisob=_qayta_urinish_hisobi, toxtash=_toxtaymi)
 
 
 def jparse(v: Any) -> Any:
@@ -248,7 +301,15 @@ def region_for(*names: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
 # Yig'ish
 # ---------------------------------------------------------------------------
 def fetch_list(type_id: int) -> List[dict]:
-    """TradeList — From/To offset-diapazon bilan sahifalaydi."""
+    """TradeList — From/To offset-diapazon bilan sahifalaydi.
+
+    NATIJA `id` BO'YICHA TAKRORSIZ. Manba OFFSET bilan sahifalaydi va
+    ro'yxatni yangisi birinchi tartibida beradi: sahifalar orasida
+    yangi savdo e'lon qilinsa chegaradagi yozuv KEYINGI sahifada YANA
+    keladi. `etl_tenders.py` da aynan shu takror butun yurishni
+    `CardinalityViolation` bilan yiqitgan edi — bu yerda ham
+    oldini olamiz.
+    """
     out: List[dict] = []
     frm = 1
     while True:
@@ -263,9 +324,38 @@ def fetch_list(type_id: int) -> List[dict]:
               f"(jami {len(out)}/{total})")
         if len(out) >= total or len(batch) < PAGE:
             break
+        if _toxtaymi():
+            print("  ! to'xtash so'raldi — sahifalash uzildi", file=sys.stderr)
+            break
         frm += PAGE
         time.sleep(REQUEST_DELAY)
-    return out
+
+    takrorsiz: Dict[Any, dict] = {}
+    for r in out:
+        takrorsiz[r.get("id")] = r
+    tashlandi = len(out) - len(takrorsiz)
+    if tashlandi:
+        print(f"  ! sahifalash takrori: {tashlandi} ta yozuv bir necha "
+              f"sahifada kelgan (id bo'yicha birlashtirildi)")
+    return list(takrorsiz.values())
+
+
+def saqlangan_listlar(conn, idlar: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Bizda saqlangan `raw_json->'list'` qatorlarini o'qiydi.
+
+    INKREMENTALNING VA TIKLASHNING ASOSI. `raw_json` da manbadan
+    kelgan TO'LIQ list-qatori saqlanadi (`transform()` shunday yozadi),
+    shuning uchun uni yangisi bilan solishtirib `GetTrade` chaqirish
+    kerakmi-yo'qmi hal qilamiz.
+    """
+    if conn is None or not idlar:
+        return {}
+    natija: Dict[int, Dict[str, Any]] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, raw_json FROM tender WHERE id = ANY(%s)", (idlar,))
+        for tid, xom in cur.fetchall():
+            natija[int(tid)] = ish.json_yukla(xom).get("list") or {}
+    return natija
 
 
 # ---------------------------------------------------------------------------
@@ -439,11 +529,54 @@ def save(conn, rec: dict) -> None:
                 fetched_at=now()""",
             [rec["detail"][c] for c in D_COLS])
 
-        cur.execute("DELETE FROM tender_document WHERE tender_id=%s", (tid,))
-        if rec["docs"]:
+        # PK = (tender_id, file_ref). UzEx da `file_ref` — fayl YO'LI va
+        # ikki xil maydon guruhi (`anno_path`, `proc_path`) BIR XIL yo'lni
+        # ko'rsatishi mumkin. Ilgari bunday tender `duplicate key` bilan
+        # yiqilardi va butun yozuv saqlanmasdi. Endi takror olib
+        # tashlanadi — yo'qolgan narsa yo'q, chunki qator AYNI bir xil.
+        docs = {d["file_ref"]: d for d in rec["docs"]}
+        if len(docs) != len(rec["docs"]):
+            print(f"    ! #{tid}: {len(rec['docs']) - len(docs)} ta takror "
+                  f"hujjat yo'li birlashtirildi", file=sys.stderr)
+
+        # DELETE + INSERT EMAS — UPSERT.
+        #
+        # O'LCHANGAN NUQSON (2026-08-30): ilgari bu yerda
+        # `DELETE FROM tender_document WHERE tender_id=%s` turardi.
+        # Ikki oqibati bor edi:
+        #
+        #   1. Manba faylni ro'yxatdan chiqarsa (yoki `file_ref`
+        #      o'zgarsa) metadata qatori YO'QOLARDI, lekin
+        #      `tender_document_text` (FK yo'q) QOLARDI. Natijada
+        #      MUVAFFAQIYATLI AJRATILGAN matn hech qanday JOIN da
+        #      ko'rinmasdi — o'lchangan: 392 yetim qator, 391 tasi `ok`.
+        #
+        #   2. Qayta ishlash HOLATI (`holat`, vaqt belgilari, urinish
+        #      soni) HAR SOATLIK ETL YURISHIDA o'chib ketardi.
+        #
+        # Endi qator SAQLANADI va manbada yo'q bo'lgani ALOHIDA
+        # belgilanadi (`manbadan_yoqoldi`) — o'chirilmaydi.
+        if docs:
             execute_values(cur,
-                f"INSERT INTO tender_document ({','.join(DOC_COLS)}) VALUES %s",
-                [tuple(d[c] for c in DOC_COLS) for d in rec["docs"]])
+                f"INSERT INTO tender_document ({','.join(DOC_COLS)}) VALUES %s "
+                "ON CONFLICT (tender_id, file_ref) DO UPDATE SET "
+                + ",".join(f"{c}=EXCLUDED.{c}" for c in DOC_COLS
+                           if c not in ("tender_id", "file_ref"))
+                + ", fetched_at = now()"
+                # Manbaga QAYTGAN hujjat yana navbatga tushadi.
+                + ", manbadan_yoqoldi_at = NULL"
+                + ", holat = CASE WHEN tender_document.holat = 'manbadan_yoqoldi' "
+                  "              THEN 'navbatda' ELSE tender_document.holat END",
+                [tuple(d[c] for c in DOC_COLS) for d in docs.values()])
+
+        # Manbada BOSHQA YO'Q hujjatlar — O'CHIRILMAYDI, BELGILANADI.
+        # `discovered_at`, `holat` va ajratilgan matn saqlanib qoladi.
+        cur.execute(
+            "UPDATE tender_document SET holat='manbadan_yoqoldi', "
+            "       manbadan_yoqoldi_at = COALESCE(manbadan_yoqoldi_at, now()) "
+            "WHERE tender_id = %s AND holat <> 'manbadan_yoqoldi' "
+            "  AND NOT (file_ref = ANY(%s))",
+            (tid, list(docs.keys()) or [""]))
     conn.commit()
 
 
@@ -502,64 +635,232 @@ def backfill_regions(conn) -> Tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+#: Chiqish kodlari — ota-jarayon (`run_etl.py`) shularga qarab
+#: `etl_run.status` ni qo'yadi. ATAYLAB 0/1 dan boshqa:
+#:   0  to'liq tugadi
+#:   7  QISMAN tugadi (vaqt byudjeti / to'xtash so'rovi) — checkpoint bor
+#:   8  BAND (boshqa yurish shu oqimni olib turibdi yoki backoff oynasi)
+#:   1  haqiqiy xato
+CHIQISH_TUGADI  = 0
+CHIQISH_QISMAN  = 7
+CHIQISH_BAND    = 8
+CHIQISH_XATO    = 1
+
+
 def main() -> None:
+    ish.chiqishni_sozla()
+    global _HISOB, _TOXTATGICH
+
     ap = argparse.ArgumentParser(description="etender.uzex.uz adapteri")
     ap.add_argument("--type-id", type=int, default=2,
                     help="2=Tender (default), 1=Eng yaxshi takliflarni tanlash")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--dsn", default=os.environ.get("XT_DB_DSN"))
+    ap.add_argument("--max-seconds", type=float, default=STANDART_BYUDJET,
+                    help="Vaqt byudjeti. Tugaganda checkpoint yozib TOZA "
+                         "to'xtaydi (0 = cheksiz)")
+    ap.add_argument("--full", action="store_true",
+                    help="Inkrementalni o'chiradi: o'zgarmagan savdolar ham "
+                         "qayta olinadi (haftalik to'liq yangilash uchun)")
+    ap.add_argument("--no-checkpoint", action="store_true",
+                    help="Checkpoint o'qilmaydi/yozilmaydi (sinov uchun)")
     args = ap.parse_args()
 
+    oqim = f"type={args.type_id}"
     ttype = TYPE_BY_ID.get(args.type_id, DEFAULT_TYPE)
-    print(f"[1/3] TradeList (TypeId={args.type_id} -> type='{ttype}') yig'ilyapti...")
-    rows = fetch_list(args.type_id)
-    if args.limit:
-        rows = rows[:args.limit]
-    print(f"[1/3] {len(rows)} ta savdo.\n")
 
-    if not args.dry_run:
-        if not args.dsn:
-            sys.exit("XATO: DSN yo'q.")
-        if psycopg2 is None:
-            sys.exit("XATO: pip install psycopg2-binary")
-        conn = psycopg2.connect(args.dsn)
-        sync_region_names(conn)
-        checked, filled = backfill_regions(conn)
-        if checked:
-            print(f"[i] Eski UzEx hududlari: {filled}/{checked} ta tiklandi.")
-    else:
-        conn = None
+    _TOXTATGICH = ish.Toxtatgich(args.max_seconds or None)
+    _TOXTATGICH.signallarni_ulash()
 
-    print("[2/3] Tafsilotlar (GetTrade) va transform...")
-    ok = failed = ndocs = nitems = 0
-    for i, row in enumerate(rows, 1):
+    yozuvchi = ish.BazaYozuvchi(args.dsn)
+    yurish = ish.Yurish(yozuvchi)
+    _HISOB = yurish
+    kp_faol = not (args.no_checkpoint or args.dry_run)
+    kp = ish.Checkpoint(yozuvchi, SOURCE, oqim, faol=kp_faol)
+    sabab = "tugadi"
+    chiqish = CHIQISH_TUGADI
+
+    # --- USTMA-UST YURISHDAN HIMOYA -----------------------------------
+    # Qulf OQIM darajasida: TypeId=1 va TypeId=2 bir vaqtda yurishi
+    # MUMKIN emas edi (bir host), lekin ular ketma-ket chaqiriladi.
+    # Bu yerdagi qulf BOSHQA VAZIFA (RAG) yoki qo'lda yurgizishdan
+    # himoya qiladi — Task Scheduler ning IgnoreNew si vazifalar
+    # ORASIDA ishlamaydi.
+    qulf = ish.Qulf(f"etl:{SOURCE}", args.dsn) if not args.dry_run else None
+    if qulf is not None and not qulf.ol():
+        print(f"[BAND] {SOURCE} allaqachon yig'ilmoqda — bu yurish "
+              f"o'tkazib yuborildi (manbaga ikki barobar so'rov yubormaymiz).")
+        yurish.sabab_yoz("band")
+        yozuvchi.yop()
+        sys.exit(CHIQISH_BAND)
+
+    try:
+        # --- MANBA BACKOFF OYNASI -------------------------------------
+        band, nega = kp.band_mi()
+        if band:
+            print(f"[BAND] {oqim}: {nega}. Yurish o'tkazib yuborildi.")
+            yurish.sabab_yoz("band")
+            sys.exit(CHIQISH_BAND)
+
+        print(f"[1/3] TradeList (TypeId={args.type_id} -> type='{ttype}') yig'ilyapti...")
         try:
-            detail = get(f"/common/GetTrade/{row['id']}/0")
-            rec = transform(row, detail, args.type_id)
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [{i}/{len(rows)}] #{row['id']} — XATO: {str(e)[:70]}")
-            time.sleep(REQUEST_DELAY)
-            continue
+            rows = fetch_list(args.type_id)
+        except ish.ManbaXato as e:
+            # RO'YXAT OLINMASA ish yo'q. Bu OQIM darajasidagi xato:
+            # keyingi urinish vaqtini yozamiz va CHIQAMIZ.
+            kutish = ish.STANDART_SIYOSAT.kutish(1)
+            kp.xato_yoz(f"TradeList: {e}", kutish)
+            print(f"[XATO] TradeList olinmadi: {e}", file=sys.stderr)
+            yurish.sabab_yoz("manba_xato")
+            sys.exit(CHIQISH_XATO)
 
-        ndocs += len(rec["docs"]); nitems += len(rec["items"]); ok += 1
-        print(f"  [{i}/{len(rows)}] #{row['id']} -> {rec['tender']['id']} | "
-              f"{len(rec['items'])} pozitsiya, {len(rec['docs'])} hujjat | "
-              f"{(rec['tender']['name'] or '')[:40]}")
+        if args.limit:
+            rows = rows[:args.limit]
+        print(f"[1/3] {len(rows)} ta savdo.\n")
+
+        conn = None
+        if not args.dry_run:
+            if not args.dsn:
+                sys.exit("XATO: DSN yo'q.")
+            if psycopg2 is None:
+                sys.exit("XATO: pip install psycopg2-binary")
+            conn = psycopg2.connect(args.dsn)
+            sync_region_names(conn)
+            checked, filled = backfill_regions(conn)
+            if checked:
+                print(f"[i] Eski UzEx hududlari: {filled}/{checked} ta tiklandi.")
+
+        # --- INKREMENTAL: nimani olish KERAK? -------------------------
+        #
+        # BU BIR VAQTNING O'ZIDA TIKLASH MEXANIZMI HAM. Oldingi yurishda
+        # saqlangan savdo `raw_json->'list'` da o'z qatorini saqlaydi;
+        # u manbadagi qator bilan bir xil bo'lsa `GetTrade` chaqirilmaydi.
+        # Ya'ni uzilgan yurish keyingi safar TABIIY ravishda qolgan
+        # joydan davom etadi — indeksga tayanmasdan, ro'yxat qayta
+        # tartiblansa ham to'g'ri.
+        eski = {}
+        if conn is not None and not args.full:
+            eski = saqlangan_listlar(conn, [UZEX_OFFSET + int(r["id"]) for r in rows])
+
+        ish_royxati: List[dict] = []
+        otkazildi = 0
+        for r in rows:
+            if args.full or ish.ozgardimi(eski.get(UZEX_OFFSET + int(r["id"])),
+                                          r, KUZATILADIGAN):
+                ish_royxati.append(r)
+            else:
+                otkazildi += 1
+        if otkazildi:
+            yurish.oldinga(processed=otkazildi, skipped=otkazildi)
+            print(f"[i] {otkazildi} ta savdo o'zgarmagan — GetTrade "
+                  f"chaqirilmaydi ({otkazildi}/{len(rows)}).")
+
+        # --- CHECKPOINT: qayerdan davom etamiz? -----------------------
+        kalit = ish.ish_kaliti(r["id"] for r in ish_royxati)
+        # `boshla()` HAR DOIM chaqiriladi, ish ro'yxati bo'sh bo'lsa ham:
+        # oqim jurnalda RO'YXATDAN O'TSIN. Aks holda "hech qachon
+        # yurmagan oqim" va "yurib, qiladigan ishi bo'lmagan oqim"
+        # bir xil ko'rinardi — ikkalasi ham bo'sh jadval.
+        boshlanish = kp.boshla(len(ish_royxati), kalit)
+        if boshlanish:
+            yurish.oldinga(resumed=boshlanish)
+            print(f"[i] CHECKPOINT: {boshlanish}/{len(ish_royxati)} "
+                  f"dan davom etamiz (oldingi yurish uzilgan).")
+
+        byudjet = _TOXTATGICH.qolgan()
+        print(f"[2/3] Tafsilotlar (GetTrade): {len(ish_royxati)} ta olinadi"
+              + (f", byudjet {byudjet:.0f}s" if byudjet else "") + "...")
+
+        ok = failed = ndocs = nitems = 0
+        jami = len(ish_royxati)
+        i = boshlanish
+        while i < jami:
+            if _TOXTATGICH.toxtaymi():
+                sabab = _TOXTATGICH.sabab or "toxtatildi"
+                chiqish = CHIQISH_QISMAN
+                print(f"\n[!] TO'XTASH ({sabab}): {i}/{jami} da to'xtadik, "
+                      f"checkpoint yozildi. Keyingi yurish shu yerdan davom etadi.")
+                break
+
+            row = ish_royxati[i]
+            i += 1
+            src_id = row.get("id")
+
+            # BITTA YOZUV BUTUN PAKETNI YIQITMAYDI. Manba xatosi ham,
+            # transform xatosi ham, baza xatosi ham SHU YOZUVDA qoladi.
+            try:
+                detail = get(f"/common/GetTrade/{src_id}/0")
+                rec = transform(row, detail, args.type_id)
+            except ish.ManbaXato as e:
+                failed += 1
+                yurish.oldinga(processed=1, failed=1)
+                print(f"  [{i}/{jami}] #{src_id} — MANBA XATO: {str(e)[:80]}")
+                kp.siljit(i, majburan=False)
+                time.sleep(REQUEST_DELAY)
+                continue
+            except Exception as e:                           # noqa: BLE001
+                # Transform xatosi (kutilmagan maydon shakli). Yozuv
+                # tashlanadi, yurish DAVOM ETADI.
+                failed += 1
+                yurish.oldinga(processed=1, failed=1)
+                print(f"  [{i}/{jami}] #{src_id} — BUZUQ YOZUV: "
+                      f"{type(e).__name__}: {str(e)[:70]}", file=sys.stderr)
+                kp.siljit(i, majburan=False)
+                time.sleep(REQUEST_DELAY)
+                continue
+
+            yozildi = True
+            if conn:
+                try:
+                    save(conn, rec)
+                except Exception as e:                       # noqa: BLE001
+                    conn.rollback()
+                    yozildi = False
+                    failed += 1
+                    yurish.oldinga(processed=1, failed=1)
+                    print(f"    ! #{src_id} DB xato: {str(e)[:110]}", file=sys.stderr)
+
+            if yozildi:
+                ndocs += len(rec["docs"]); nitems += len(rec["items"]); ok += 1
+                yurish.oldinga(processed=1, succeeded=1)
+                print(f"  [{i}/{jami}] #{src_id} -> {rec['tender']['id']} | "
+                      f"{len(rec['items'])} pozitsiya, {len(rec['docs'])} hujjat | "
+                      f"{(rec['tender']['name'] or '')[:40]}")
+
+            # Checkpoint FAQAT muvaffaqiyatli yozuvdan keyin `oxirgi_id`
+            # ni yangilaydi: "oxirgi muvaffaqiyatli tashqi ID" aynan
+            # shuni anglatishi kerak.
+            kp.siljit(i, oxirgi_id=src_id if yozildi else None)
+            yurish.puls()
+            time.sleep(REQUEST_DELAY)
+        else:
+            # Halqa to'liq aylandi — oqim tugadi.
+            kp.tugat()
 
         if conn:
-            try:
-                save(conn, rec)
-            except Exception as e:  # noqa: BLE001
-                conn.rollback(); failed += 1
-                print(f"    ! DB xato: {str(e)[:110]}", file=sys.stderr)
-        time.sleep(REQUEST_DELAY)
+            conn.close()
 
-    if conn:
-        conn.close()
-    print(f"\n[3/3] Tayyor. OK: {ok}, xato: {failed}, "
-          f"pozitsiya: {nitems}, hujjat: {ndocs}")
+        yurish.checkpoint_yoz(dict(kp.holat.dict(), oqim=oqim))
+        yurish.sabab_yoz(sabab)
+        print(f"\n[3/3] {sabab.upper()}. OK: {ok}, xato: {failed}, "
+              f"o'tkazildi: {otkazildi}, pozitsiya: {nitems}, hujjat: {ndocs}")
+        print(f"      Metrika: {yurish.xulosa()}")
+        if yozuvchi.baza_xatolari:
+            print(f"      [!] metrika bazasiga {len(yozuvchi.baza_xatolari)} ta "
+                  f"yozuv bajarilmadi: {yozuvchi.baza_xatolari[-1]}", file=sys.stderr)
+
+        # Yozuvlar YIQILGAN bo'lsa yurish "tugadi" deb ko'rsatilmaydi.
+        # Jimgina o'tkazib yuborish shu loyihada takroriy nuqson.
+        if failed and chiqish == CHIQISH_TUGADI:
+            print(f"      [!] {failed} ta yozuv yiqildi — chiqish kodi QISMAN.")
+            chiqish = CHIQISH_QISMAN
+    finally:
+        if qulf is not None:
+            qulf.qoyver()
+        yozuvchi.yop()
+
+    sys.exit(chiqish)
 
 
 if __name__ == "__main__":

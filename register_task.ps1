@@ -77,7 +77,12 @@ param(
     [ValidateSet('S4U')]
     [string] $LogonType = 'S4U',
     [switch] $Rag,
-    [int]    $VectorBudget = 1000
+    [int]    $VectorBudget = 1000,
+    # Bitta platforma guruhining vaqt byudjeti (sekund). ETL shu vaqtda
+    # TOZA to'xtaydi va checkpoint yozadi. ExecutionTimeLimit (40 daqiqa)
+    # dan ANIQ KICHIK bo'lishi SHART - aks holda Windows jarayonni
+    # o'ldiradi va holat saqlanmaydi.
+    [int]    $MaxSeconds = 1500
 )
 
 $ErrorActionPreference = 'Stop'
@@ -128,8 +133,12 @@ if (-not (Test-Path (Join-Path $Root '.env'))) {
 # yo'naltira olmaydi. /v:on = kechiktirilgan kengaytirish (!ERRORLEVEL! va
 # yakuniy !TIME! to'g'ri qiymat berishi uchun).
 # PYTHONIOENCODING=utf-8 - kirill matn log faylga buzilmasdan tushishi uchun.
-$etlArgs = ''
-if ($WithDocs) { $etlArgs = ' --with-docs' }
+# --max-seconds: SKRIPT o'zi to'xtaydi, Windows o'ldirmasin.
+# Bu qiymat ExecutionTimeLimit dan ANIQ KICHIK (25 daqiqa / 40 daqiqa).
+# Byudjet tugaganda checkpoint yoziladi va keyingi yurish shu yerdan
+# davom etadi - ya'ni uzun yig'ish soatlar bo'yicha bo'lib bajariladi.
+$etlArgs = ' --max-seconds ' + [int]($MaxSeconds)
+if ($WithDocs) { $etlArgs += ' --with-docs' }
 
 $label = 'ETL'
 if ($Rag) {
@@ -176,11 +185,42 @@ $trigger.Repetition = $repeatSource.Repetition
 # noutbuk rozetkadan uzilishi bilan yurish o'lardi. Ikkala vazifa ham
 # SHU YAGONA manbadan sozlansin.
 #
-# Vaqt chegarasi: ETL 2 soat, RAG 50 daqiqa (soatlik takrorlanishdan
-# oldin tugasin, aks holda keyingi yurish IgnoreNew bilan tushib
-# qolardi).
-$timeLimit = if ($Rag) { New-TimeSpan -Minutes 50 } else { New-TimeSpan -Hours 2 }
-$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -WakeToRun -ExecutionTimeLimit $timeLimit -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 10)
+# VAQT CHEGARASI - O'LCHANGAN SABAB BILAN QAYTA HISOBLANDI (2026-08-30).
+#
+# Ilgari ETL uchun 2 SOAT edi, interval esa 1 soat. Ikki oqibati bor edi:
+#   1. Osilgan yurish IgnoreNew bilan KEYINGI ikki yurishni ham to'sardi.
+#   2. Chegara tugaganda Windows jarayonni O'LDIRADI (0xC000013A) va
+#      hech qanday holat saqlanmasdi - yurish noldan boshlanardi.
+#
+# Endi tartib teskari: SKRIPT o'zi to'xtaydi, Windows emas.
+#   run_etl.py --max-seconds 1500  (25 daqiqa, guruh bo'yicha taqsimlanadi)
+#   ExecutionTimeLimit 40 daqiqa   (15 daqiqa zaxira)
+# Chegara endi NORMAL yo'l emas, XAVFSIZLIK TO'RI: unga yetish
+# skriptning o'z byudjeti ishlamaganini bildiradi.
+$timeLimit = if ($Rag) { New-TimeSpan -Minutes 45 } else { New-TimeSpan -Minutes 40 }
+
+# -DontStopOnIdleEnd: `IdleSettings.StopOnIdleEnd` STANDART holatda
+#   True. O'lchangan (2026-08-30): mavjud vazifada u True turgan edi.
+#   Bu "bo'sh turish tugasa vazifani to'xtat" degani va aynan
+#   foydalanuvchi mashinaga qaytgan paytda yurishni o'ldirardi.
+# -Priority 5: standart 7 (past). Modern Standby'da (bu mashinada
+#   FAQAT S0 mavjud - `powercfg /a` bilan tekshirilgan) past
+#   prioritetli jarayonlar birinchi bo'lib to'xtatiladi.
+# -WakeToRun: SAQLANADI, lekin bu mashinada u va'dani BAJARA OLMAYDI.
+#   S1/S2/S3 yo'q, faqat Modern Standby (S0 low-power idle). Uyg'otish
+#   taymeri klassik S3 dagidek ishlamaydi. Shuning uchun asosiy tayanch
+#   -StartWhenAvailable: o'tkazib yuborilgan yurish mashina uyg'onishi
+#   bilan bajariladi.
+$settings = New-ScheduledTaskSettingsSet `
+    -MultipleInstances IgnoreNew `
+    -StartWhenAvailable `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -DontStopOnIdleEnd `
+    -WakeToRun `
+    -Priority 5 `
+    -ExecutionTimeLimit $timeLimit `
+    -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 10)
 
 # LogonType tanlovi:
 #   Interactive (standart) - vazifa FAQAT siz tizimga kirgan bo'lsangiz yuradi.
@@ -224,8 +264,22 @@ if ($RunWhenLoggedOff) {
     Write-Host "[i] Rejim: S4U - tizimga kirmagan holda ham yuradi (parol saqlanmaydi)."
 } else {
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-    Write-Host "[i] Rejim: Interactive - FAQAT siz tizimga kirgan bo'lsangiz yuradi."
-    Write-Host "    Doimiy ishlashi uchun: admin PowerShell'da -RunWhenLoggedOff bilan qayta yurgizing."
+    Write-Host ''
+    Write-Host "[OGOHLANTIRISH] Rejim: Interactive - bu O'LCHANGAN NOSOZLIK SABABI."
+    Write-Host ''
+    Write-Host "    2026-08-30 tahlili (14 kun, etl_run + etl_cron.log):"
+    Write-Host "      LastTaskResult      0xC000013A (majburan to'xtatildi)"
+    Write-Host "      etl_cron.log        161 'boshlandi' / 11 'tugadi'"
+    Write-Host "      jurnalda            literal ^C belgilari"
+    Write-Host ''
+    Write-Host "    Interactive vazifa seans tugashi bilan O'LADI: hisobdan"
+    Write-Host "    chiqish, qulflash yoki foydalanuvchi almashish butun"
+    Write-Host "    jarayon daraxtini konsol hodisasi bilan o'ldiradi."
+    Write-Host ''
+    Write-Host "    TUZATISH - administrator PowerShell'da:"
+    Write-Host "      .\register_task.ps1 -RunWhenLoggedOff"
+    Write-Host "      .\register_task.ps1 -Rag -RunWhenLoggedOff"
+    Write-Host ''
 }
 
 # --- Mavjud bo'lsa qayta yaratamiz -------------------------------------------
@@ -251,6 +305,80 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Soatlik vazifani ro'yxatdan o'tkazish"))
     Write-Host "Qo'lda      : Start-ScheduledTask -TaskName $TaskName"
     Write-Host "O'chirish   : .\register_task.ps1 -Unregister"
     Write-Host "Log         : Get-Content '$LogFile' -Tail 40 -Wait"
+
+    # --- DIAGNOSTIKA JURNALI -------------------------------------------------
+    # `Microsoft-Windows-TaskScheduler/Operational` STANDART holatda
+    # O'CHIQ va bu mashinada ham o'chiq edi (o'lchangan 2026-08-30:
+    # IsEnabled=False). Natijada vazifa NEGA tugagani haqida yagona
+    # ishonchli manba YO'Q edi: biz faqat oqibatni (yetim 'running'
+    # qatorlari) ko'rardik, sababini emas.
+    try {
+        $opLog = Get-WinEvent -ListLog 'Microsoft-Windows-TaskScheduler/Operational' -ErrorAction Stop
+        if (-not $opLog.IsEnabled) {
+            $opLog.IsEnabled = $true
+            $opLog.SaveChanges()
+            Write-Host ''
+            Write-Host "[OK] TaskScheduler/Operational jurnali YOQILDI."
+            Write-Host "     Endi vazifa nega tugagani yozib boriladi (111=to'xtatildi,"
+            Write-Host "     201=tugadi, 329=vaqt chegarasi, 332=shart bajarilmadi)."
+        } else {
+            Write-Host "[i] TaskScheduler/Operational jurnali allaqachon yoqilgan."
+        }
+    } catch {
+        Write-Host "[!] TaskScheduler/Operational jurnalini yoqib bo'lmadi (admin kerak):"
+        Write-Host "    $($_.Exception.Message)"
+        Write-Host "    Qo'lda: wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true"
+    }
+
+    # --- HAQIQATAN QO'YILGAN SOZLAMALARNI CHOP ETAMIZ ------------------------
+    # Skript nima SO'RAGANINI emas, Windows nima QABUL QILGANINI
+    # ko'rsatamiz. Ilgari RAG vazifasi qo'lda yaratilgani uchun
+    # standart (taqiqlovchi) sozlamalarni olgandi va buni hech kim
+    # tekshirmagandi.
+    $t = Get-ScheduledTask -TaskName $TaskName
+    $s = $t.Settings
+    Write-Host ''
+    Write-Host "--- Qo'yilgan sozlamalar (Windows tasdiqladi) ---"
+    Write-Host ("  LogonType                 : {0}" -f $t.Principal.LogonType)
+    Write-Host ("  ExecutionTimeLimit        : {0}" -f $s.ExecutionTimeLimit)
+    Write-Host ("  Skript byudjeti           : {0}s" -f $(if ($Rag) { 'n/a' } else { $MaxSeconds }))
+    Write-Host ("  MultipleInstances         : {0}" -f $s.MultipleInstances)
+    Write-Host ("  StartWhenAvailable        : {0}" -f $s.StartWhenAvailable)
+    Write-Host ("  WakeToRun                 : {0}" -f $s.WakeToRun)
+    Write-Host ("  DisallowStartIfOnBatteries: {0}" -f $s.DisallowStartIfOnBatteries)
+    Write-Host ("  StopIfGoingOnBatteries    : {0}" -f $s.StopIfGoingOnBatteries)
+    Write-Host ("  StopOnIdleEnd             : {0}" -f $s.IdleSettings.StopOnIdleEnd)
+    Write-Host ("  Priority                  : {0}" -f $s.Priority)
+    Write-Host ("  RestartCount / Interval   : {0} / {1}" -f $s.RestartCount, $s.RestartInterval)
+
+    # --- UYQU REJIMI HAQIDA HALOL OGOHLANTIRISH ------------------------------
+    # Bu mashinada FAQAT Modern Standby (S0) mavjud - `powercfg /a` bilan
+    # tekshirilgan (2026-08-30). Unda `WakeToRun` klassik S3 dagidek
+    # ishlamaydi, shuning uchun uni "yechim" deb ko'rsatmaymiz.
+    #
+    # AVTOMATIK ANIQLASH QILINMAYDI - ATAYLAB.
+    #
+    # Ikki yo'l ham ishonchsiz chiqdi (2026-08-30 da sinaldi):
+    #   * `powercfg /a` chiqishi TARJIMA QILINADI (bu mashinada ruscha),
+    #     ya'ni matnga tayangan tekshiruv boshqa tilda JIMGINA ishlamay
+    #     qo'yardi - shu loyihada takrorlangan nuqson sinfi;
+    #   * `CsEnabled` reestr qiymati bu mashinada UMUMAN YO'Q, garchi
+    #     Modern Standby yoqilgan bo'lsa ham.
+    #
+    # Noto'g'ri avtomatik xulosadan ko'ra XOM DALILNI ko'rsatgan yaxshi.
+    Write-Host ''
+    Write-Host "--- Uyqu holatlari (powercfg /a) ---"
+    try {
+        (powercfg /a) | Select-Object -First 6 | ForEach-Object { "  $_" }
+    } catch {
+        Write-Host "  (powercfg o'qilmadi)"
+    }
+    Write-Host ''
+    Write-Host "[i] Agar yuqorida faqat S0 (Modern Standby) ko'rinsa va S3 mavjud"
+    Write-Host "    bo'lmasa: -WakeToRun klassik uyg'otishni KAFOLATLAMAYDI."
+    Write-Host "    Bu holda tayanch -StartWhenAvailable: o'tkazib yuborilgan"
+    Write-Host "    yurish mashina uyg'onishi bilan bajariladi, ETL esa"
+    Write-Host "    checkpoint dan DAVOM etadi (noldan boshlamaydi)."
 
     if ($RunNow) {
         Start-ScheduledTask -TaskName $TaskName

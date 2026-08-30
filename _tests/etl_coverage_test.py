@@ -35,6 +35,19 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+# KONSOL KODLASHI — Windows kod sahifasidan MUSTAQIL UTF-8.
+#
+# Chiqish QUVUR yoki FAYLGA yo'naltirilganda (ya'ni CI da) Python
+# `locale.getpreferredencoding()` ni oladi — bu mashinada `cp1251`.
+# O'zbek kirill (`ҳ`, `қ`, `ў`) va to'liq kenglikdagi belgilar
+# (`）`) u yerda YO'Q va chop etish `UnicodeEncodeError` bilan
+# BUTUN TO'PLAMNI o'ldiradi. `import_test` aynan shu sababdan
+# 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import konsol  # noqa: E402
+
+konsol.sozla()
+
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(os.path.join(ROOT, ".env"))
@@ -489,7 +502,7 @@ def test_qayta_urinish() -> None:
         if os.path.exists(sanoq):
             os.remove(sanoq)
         run_etl._UZILDI = False
-        ok, err, _dt, out = run_etl.run_script(
+        ok, err, _dt, out, _kod = run_etl.run_script(
             os.path.join("_tests", "fixtures", "_soxta_bola.py"), [])
         check("majburan to'xtatilgan bola QAYTA urinildi", ok,
               f"err={err}, out={out}")
@@ -502,7 +515,7 @@ def test_qayta_urinish() -> None:
         # HAQIQIY Ctrl+C dan keyin qayta urinilmasin.
         os.remove(sanoq)
         run_etl._UZILDI = True
-        ok2, _err2, _dt2, out2 = run_etl.run_script(
+        ok2, _err2, _dt2, out2, _kod2 = run_etl.run_script(
             os.path.join("_tests", "fixtures", "_soxta_bola.py"), [])
         check("Ctrl+C dan keyin QAYTA URINILMAYDI", not ok2,
               "foydalanuvchi to'xtatgan yurish davom etmasin")
@@ -536,19 +549,36 @@ def test_etl_run_log(conn) -> None:
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (source_platform)
-                   source_platform, status, found, new, finished_at
+                   source_platform, status, found, new, finished_at,
+                   terminal_reason, processed, succeeded
             FROM etl_run ORDER BY source_platform, started_at DESC""")
         rows = cur.fetchall()
-    for p, st, found, new, fin in rows:
-        print(f"        {p:10s} {st:8s} jami={found} yangi={new} {fin}")
+    for p, st, found, new, fin, sabab, proc, succ in rows:
+        print(f"        {p:10s} {st:8s} {(sabab or '-'):14s} "
+              f"jami={found} yangi={new} ko'rildi={proc} yozildi={succ}")
     check("etl_run'da ikkala platforma bor",
           {r[0] for r in rows} >= {"xt-xarid", "uzex"},
           str(sorted(r[0] for r in rows)))
-    # 'running' — sinov ETL yurayotgan paytda ishga tushirilgan bo'lishi mumkin,
-    # bu nosozlik emas. Faqat 'error' haqiqiy muammo.
+
+    # STATUS LUG'ATI KENGAYDI (schema_patch_etl_ishonch.sql):
+    #   ok      — to'liq tugadi
+    #   partial — vaqt byudjeti tugadi yoki ba'zi yozuv yiqildi;
+    #             checkpoint bor va keyingi yurish DAVOM ettiradi.
+    #             Bu NOSOZLIK EMAS: ish bajarildi.
+    #   running — sinov ETL yurayotganda ishga tushgan
+    #   error   — haqiqiy muammo
     check("oxirgi yurishlarda xato yo'q",
           all(r[1] != "error" for r in rows),
-          "; ".join(f"{r[0]}={r[1]}" for r in rows))
+          "; ".join(f"{r[0]}={r[1]}"
+                    + (f"/{r[5]}" if r[5] else "") for r in rows))
+
+    # QISMAN yurish ISH BAJARGAN bo'lishi kerak. "Qisman" ni hech narsa
+    # qilmasdan qaytarish `ok` ni yolg'on qilishning boshqa shakli bo'lardi.
+    for r in rows:
+        if r[1] == "partial":
+            check(f"{r[0]}: qisman yurish ish BAJARDI",
+                  (r[6] or 0) > 0,
+                  f"ko'rildi={r[6]} — qisman = 'tugamadi', 'hech narsa qilmadi' emas")
 
 
 # ---------------------------------------------------------------------------
