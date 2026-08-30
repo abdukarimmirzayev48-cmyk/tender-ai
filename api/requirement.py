@@ -141,6 +141,23 @@ DO UPDATE SET
              IS DISTINCT FROM EXCLUDED.attrs->>'qiymat'
             THEN NULL
         ELSE tender_requirement.review_action END,
+    -- AKTOR IZI HAM TOZALANADI. Busiz qiymat o'zgarib holat navbatga
+    -- qaytganda "falonchi tasdiqlagan" yorlig'i QOLARDI va u endi
+    -- BOSHQA qiymatga tegishli bo'lardi — ya'ni yolg'on atribut.
+    reviewed_actor_id = CASE
+        WHEN tender_requirement.review_status
+             NOT IN ('extracted', 'pending_review')
+         AND tender_requirement.attrs->>'qiymat'
+             IS DISTINCT FROM EXCLUDED.attrs->>'qiymat'
+            THEN NULL
+        ELSE tender_requirement.reviewed_actor_id END,
+    reviewed_ishonch = CASE
+        WHEN tender_requirement.review_status
+             NOT IN ('extracted', 'pending_review')
+         AND tender_requirement.attrs->>'qiymat'
+             IS DISTINCT FROM EXCLUDED.attrs->>'qiymat'
+            THEN NULL
+        ELSE tender_requirement.reviewed_ishonch END,
     -- JURNALGA YOZAMIZ. Aks holda broker "men buni tasdiqlagandim-ku"
     -- deb hayron bo'ladi va tizimga ishonchi tushadi.
     review_note = CASE
@@ -631,6 +648,10 @@ UPDATE tender_requirement
                              attrs->>'qiymat', '(bo''sh)')
            ELSE previous_value END,
        reviewed_by     = %(by)s,
+       -- AKTOR: qaysi ODAM. `reviewed_by` KOMPANIYA ni ko'rsatadi va
+       -- u yetarli emas edi — shu ikkisi ALOHIDA saqlanadi.
+       reviewed_actor_id = %(actor_id)s,
+       reviewed_ishonch  = %(ishonch)s,
        reviewed_at     = now(),
        -- INSON AYNAN NIMA QILDI. `review_status` dan kelib chiqadi,
        -- lekin ALOHIDA yoziladi va CHECK ikkalasining mosligini
@@ -641,7 +662,8 @@ UPDATE tender_requirement
                              WHEN 'corrected' THEN 'correct' END
  WHERE id = %(id)s AND company_id = %(company_id)s
 RETURNING id, tender_id, review_status, review_action, doc_type,
-          reviewed_by, reviewed_at, previous_value, corrected_value
+          reviewed_by, reviewed_actor_id, reviewed_ishonch,
+          reviewed_at, previous_value, corrected_value
 """
 
 
@@ -657,12 +679,36 @@ def review_items(tender_id: int, company_id: int) -> List[dict]:
                                        "company_id": company_id})
 
 
+def bitta(req_id: int, company_id: int) -> Optional[dict]:
+    """Bitta talabning HOZIRGI holati — audit uchun "oldin" surati.
+
+    `company_id` SHARTDA: boshqa ijarachining qatorini o'qib
+    bo'lmaydi (IDOR himoyasi o'qishda ham kerak).
+
+    NEGA ALOHIDA FUNKSIYA: audit "oldingi holat" ni talab qiladi va
+    uni o'zgarishdan KEYIN olish mumkin emas. Ilgari bu yerda
+    `hasattr()` qorovuli bor edi va u funksiya yo'qligi uchun
+    "oldin" ni HAR DOIM bo'sh qoldirardi — ya'ni audit yarim
+    yozilardi va buni hech narsa ko'rsatmasdi.
+    """
+    return db.query_one(
+        "SELECT id, review_status, review_action, mashina_holat, "
+        "       corrected_value, previous_value, review_note, doc_type, "
+        "       reviewed_by, reviewed_actor_id, reviewed_ishonch, "
+        "       attrs->>'qiymat' AS qiymat "
+        "  FROM tender_requirement "
+        " WHERE id = %(id)s AND company_id = %(c)s",
+        {"id": req_id, "c": company_id})
+
+
 def review_set(req_id: int, company_id: int, status: str,
                corrected: Optional[str] = None,
                note: Optional[str] = None,
                by: Optional[int] = None,
                doc_type: Optional[str] = None,
-               blind_value: Optional[str] = None) -> Optional[dict]:
+               blind_value: Optional[str] = None, *,
+               actor_id: Optional[int] = None,
+               ishonch: Optional[str] = None) -> Optional[dict]:
     """INSON qarorini yozadi. FAQAT inson qarori.
 
     BU FUNKSIYA MASHINA HOLATINI QO'YA OLMAYDI. `extracted` va
@@ -690,6 +736,20 @@ def review_set(req_id: int, company_id: int, status: str,
             "inson qarori uchun `by` (kim) SHART va musbat bo'lishi kerak — "
             "aks holda 'tasdiqlangan, lekin kim tasdiqlagani noma'lum' "
             "qatori paydo bo'lardi (2026-08-30 da o'lchangan: 1487 ta)")
+    # ISHONCH DARAJASI MAJBURIY. `by` (kompaniya) kim ekanini
+    # aytadi, `ishonch` esa BU MA'LUMOT QANCHALIK ISHONCHLI ekanini.
+    # Ikkinchisisiz atribut o'z sifatini yashirardi.
+    if not ishonch:
+        raise ValueError(
+            "inson qarori uchun `ishonch` darajasi SHART "
+            "(`api/aktor.py:aniqla()` beradi)")
+    if ishonch not in ("erp_sessiya", "aktor_elon", "kompaniya_sessiyasi"):
+        raise ValueError(
+            f"inson qarori uchun yaroqsiz ishonch darajasi: {ishonch}")
+    if ishonch in ("erp_sessiya", "aktor_elon") and not actor_id:
+        raise ValueError(
+            f"`{ishonch}` darajasi aktor SHART qiladi — aks holda "
+            f"'odam bor' deb yozib, kimligini bo'sh qoldirardik")
     if status == "corrected" and not (corrected or "").strip():
         raise ValueError("'corrected' uchun `corrected_value` SHART — "
                          "aks holda 'tuzatdim, lekin nimaga?' holati qoladi")
@@ -701,6 +761,7 @@ def review_set(req_id: int, company_id: int, status: str,
         "id": req_id, "company_id": company_id, "status": status,
         "corrected": (corrected or "").strip()[:2000] or None,
         "note": (note or "").strip()[:2000] or None, "by": by,
+        "actor_id": actor_id, "ishonch": ishonch,
         "doc_type": doc_type,
         "blind": (blind_value or "").strip()[:2000] or None})
 
@@ -1005,7 +1066,9 @@ def labeled(company_id: int, limit: int = 1000) -> List[dict]:
 
 
 def review_bulk(tender_id: int, company_id: int, status: str,
-                by: Optional[int] = None) -> int:
+                by: Optional[int] = None, *,
+                actor_id: Optional[int] = None,
+                ishonch: Optional[str] = None) -> int:
     """Tenderning BARCHA navbatdagi talablarini bir holatga o'tkazadi.
 
     Faqat `approved`/`rejected`: ommaviy TUZATISH ma'nosiz, har
@@ -1026,10 +1089,20 @@ def review_bulk(tender_id: int, company_id: int, status: str,
     if by is None or int(by) <= 0:
         raise ValueError(
             "ommaviy tasdiq uchun `by` (kim) SHART va musbat bo'lishi kerak")
+    # OMMAVIY AMAL — atribut uchun eng xavfli yo'l: bitta chaqiruv
+    # yuzlab qatorga tegadi. Shuning uchun ishonch darajasi bu yerda
+    # ham MAJBURIY.
+    if ishonch not in ("erp_sessiya", "aktor_elon", "kompaniya_sessiyasi"):
+        raise ValueError(
+            f"ommaviy qaror uchun yaroqsiz ishonch darajasi: {ishonch}")
+    if ishonch in ("erp_sessiya", "aktor_elon") and not actor_id:
+        raise ValueError(f"`{ishonch}` darajasi aktor SHART qiladi")
     rows = db.query("""
         UPDATE tender_requirement
            SET review_status = %(status)s,
                reviewed_by   = %(by)s,
+               reviewed_actor_id = %(actor_id)s,
+               reviewed_ishonch  = %(ishonch)s,
                reviewed_at   = now(),
                review_action = %(amal)s
          WHERE company_id = %(c)s AND tender_id = %(t)s

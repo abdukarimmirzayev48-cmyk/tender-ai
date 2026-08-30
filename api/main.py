@@ -772,6 +772,56 @@ def current_account(request: Request) -> Dict[str, Any]:
 #: bajarilishi. Bo'sh bo'lsa — yagona FAOL hisob (bittadan ko'p bo'lsa xato).
 ERP_COMPANY_ID = os.environ.get("ERP_COMPANY_ID", "").strip()
 
+def kimlik_of(request: Request, cid: Optional[int] = None):
+    """So'rov ortidagi AKTOR kimligi (`api/aktor.py:Kimlik`).
+
+    `company_id_of()` "qaysi IJARACHI" degan savolga javob beradi —
+    u hal qilingan va ishonchli. Bu funksiya "qaysi ODAM" degan
+    ALOHIDA savolga javob beradi va javob bilan birga uning
+    QANCHALIK ISHONCHLI ekanini ham qaytaradi.
+
+    Ikkisini bitta funksiyaga qo'shmadik: ijarachi aniqligi bilan
+    aktor aniqligi bir xil emas va ularni aralashtirish aynan shu
+    modul tuzatayotgan xatoning manbai edi.
+    """
+    from api import aktor as _aktor
+    try:
+        return _aktor.aniqla(request, cid if cid is not None
+                             else company_id_of(request))
+    except _aktor.RuxsatXato as e:
+        raise HTTPException(status_code=e.code, detail=str(e)) from e
+
+
+def ruxsat(k, amal: str) -> None:
+    """Huquqni tekshiradi; yetmasa HTTP xatosi."""
+    from api import aktor as _aktor
+    try:
+        _aktor.ruxsat_tekshir(k, amal)
+    except _aktor.RuxsatXato as e:
+        raise HTTPException(status_code=e.code, detail=str(e)) from e
+
+
+def audit_yoz(k, request: Request, *, amal: str, entity: str,
+              entity_id: int, oldin=None, keyin=None, izoh=None) -> None:
+    """Audit qatorini yozadi.
+
+    XATO YUTILMAYDI VA JIM QOLMAYDI: agar o'zgarish yozilib, izi
+    yozilmasa — bu audit tizimining eng yomon holati. 500 qaytarish
+    o'zgarishni qaytarmaydi (u boshqa tranzaksiyada), lekin holat
+    KO'RINADI. Jimgina yutish "audit bor" degan yolg'on beradi.
+    """
+    from api import aktor as _aktor
+    try:
+        _aktor.yoz(k, amal=amal, entity=entity, entity_id=entity_id,
+                   oldin=oldin, keyin=keyin, izoh=izoh,
+                   ip=client_ip(request),
+                   user_agent=request.headers.get("user-agent"))
+    except Exception as e:                                    # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"O'zgarish bajarildi, LEKIN audit yozilmadi: {e}") from e
+
+
 def company_id_of(request: Request) -> int:
     """So'rov QAYSI kompaniya nomidan bajarilyapti (J1.6).
 
@@ -1988,13 +2038,30 @@ def requirement_review(req_id: int, body: ReviewIn, request: Request):
     """
     from api import requirement
     cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    # `approved` va `rejected` — TASDIQLASH huquqi; `corrected` esa
+    # ko'rib chiqish. Ular ATAYLAB har xil: qiymatni tuzatish va uni
+    # rasman tasdiqlash bir xil vaznda emas.
+    ruxsat(k, "tasdiq" if body.status == "approved"
+           else "rad" if body.status == "rejected" else "korib_chiq")
+    oldin = requirement.bitta(req_id, cid)
     try:
         row = requirement.review_set(
             req_id, cid, body.status,
             corrected=body.corrected_value, note=body.note, by=cid,
-            doc_type=body.doc_type, blind_value=body.blind_value)
+            doc_type=body.doc_type, blind_value=body.blind_value,
+            actor_id=k.actor_id, ishonch=k.ishonch)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if row:
+        audit_yoz(k, request, amal=f"talab_{body.status}",
+                  entity="tender_requirement", entity_id=req_id,
+                  oldin=oldin,
+                  keyin={"review_status": row.get("review_status"),
+                         "review_action": row.get("review_action"),
+                         "corrected_value": row.get("corrected_value"),
+                         "doc_type": row.get("doc_type")},
+                  izoh=body.note)
     if not row:
         # Yo'q, yoki BOSHQA kompaniyaniki — ikkalasida ham 404.
         # Farqni aytish "bu id mavjud" degan ma'lumot sizdirardi.
@@ -2107,7 +2174,10 @@ class RoutingDecisionIn(BaseModel):
     #: 'olindi' | 'rad' | 'kutilsin'
     qaror: str
     izoh: Optional[str] = None
-    broker: Optional[str] = None
+    # `broker` MAYDONI OLIB TASHLANDI. U qarorni KIM qo'yganini
+    # MIJOZGA yozdirardi va uni hech narsa tekshirmasdi. Endi aktor
+    # SERVERDA aniqlanadi (`X-Actor` sarlavhasi yoki ERP sessiyasi)
+    # va `api/aktor.py` uni ro'yxatdan tekshiradi.
 
 
 @app.post("/routing/{routing_id}/decision")
@@ -2120,13 +2190,23 @@ def routing_decision(routing_id: int, body: RoutingDecisionIn,
     """
     from api import routing
     cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "tasdiq" if body.qaror == "olindi"
+           else "rad" if body.qaror == "rad" else "korib_chiq")
     try:
         row = routing.qaror(routing_id, cid, body.qaror,
-                            izoh=body.izoh, broker=body.broker)
+                            izoh=body.izoh, actor_id=k.actor_id,
+                            ishonch=k.ishonch, broker_nomi=k.ism)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if not row:
         raise HTTPException(status_code=404, detail="Yozuv topilmadi.")
+    audit_yoz(k, request, amal=f"yonaltirish_{body.qaror}",
+              entity="tender_routing", entity_id=routing_id,
+              keyin={"inson_qaror": row.get("inson_qaror"),
+                     "ai_qaror": row.get("ai_qaror"),
+                     "tender_id": row.get("tender_id")},
+              izoh=body.izoh)
     return row
 
 
@@ -2144,8 +2224,19 @@ def requirements_review_all(tender_id: int, body: ReviewBulkIn,
     """
     from api import requirement
     cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "tasdiq" if body.status == "approved" else "rad")
     try:
-        n = requirement.review_bulk(tender_id, cid, body.status, by=cid)
+        n = requirement.review_bulk(tender_id, cid, body.status, by=cid,
+                                    actor_id=k.actor_id, ishonch=k.ishonch)
+        # OMMAVIY AMAL BITTA audit qatori bilan yoziladi: `entity_id`
+        # — TENDER, chunki qaror aynan shu darajada qabul qilingan.
+        # Har talab uchun alohida qator yozish "har birini ko'rdim"
+        # degan yolg'on taassurot berardi.
+        audit_yoz(k, request, amal=f"talab_ommaviy_{body.status}",
+                  entity="tender", entity_id=tender_id,
+                  keyin={"tegdi": n, "status": body.status},
+                  izoh=f"{n} ta talab bir amalda")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if n:
@@ -3150,10 +3241,15 @@ def kod_qaror(body: AtamaQarorIn, request: Request):
     if not kim:
         raise HTTPException(403, "Qarorni faqat kirgan foydalanuvchi qo'ya oladi.")
     cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    # Kod berish — TASDIQ (u katalogga yoziladi va moslashtirishga
+    # darhol ta'sir qiladi). Qolganlari ko'rib chiqish.
+    ruxsat(k, "tasdiq" if body.qaror == "kod" else "korib_chiq")
 
     try:
         row = kodlash.qaror_yoz(
             cid, body.kalit, body.atama, body.qaror, kim=kim,
+            actor_id=k.actor_id, ishonch=k.ishonch,
             code=body.code, manba=body.manba, dalil=body.dalil,
             taklif_code=body.taklif_code, taklif_skor=body.taklif_skor,
             rad_takliflar=body.rad_takliflar,
@@ -3170,6 +3266,12 @@ def kod_qaror(body: AtamaQarorIn, request: Request):
         n_mahsulot = kodlash.atamaga_kod_biriktir(
             cid, body.kalit, (body.code or "").strip(), kim,
             qaror_id=row.get("id"))
+    audit_yoz(k, request, amal=f"kod_{body.qaror}",
+              entity="kod_qaror", entity_id=int(row.get("id") or 0),
+              keyin={"atama": body.atama, "qaror": body.qaror,
+                     "code": body.code, "taklif_code": body.taklif_code,
+                     "biriktirildi": n_mahsulot},
+              izoh=body.izoh)
     return {**row, "biriktirildi": n_mahsulot}
 
 
@@ -3184,6 +3286,150 @@ def kod_qaror_olchov(request: Request):
     return {"olchov": kodlash.qaror_olchov(cid),
             "pilot": kodlash.pilot_holati(cid),
             "qarorlar": kodlash.qarorlar(cid)}
+
+
+# ===========================================================================
+# AKTOR VA AUDIT (auth-6)
+#
+# Tender-AI ga KOMPANIYA kiradi, odam emas. Aktor — ERP hodimiga
+# XARITA (`api/aktor.py`), kimlik ombori emas: parol yo'q, kirish
+# bermaydi. Batafsil: `docs/erp_kimlik.md`.
+# ===========================================================================
+class AktorIn(BaseModel):
+    """Yangi aktor. `manba='erp'` bo'lsa `erp_user_id` SHART."""
+    login: str
+    ism: str
+    rol: Literal["kuzatuvchi", "koruvchi", "tasdiqlovchi", "admin"]
+    manba: Literal["erp", "mahalliy"] = "mahalliy"
+    erp_user_id: Optional[int] = None
+    izoh: Optional[str] = None
+
+
+class AktorYangilashIn(BaseModel):
+    """Berilmagan maydon O'ZGARMAYDI."""
+    rol: Optional[Literal["kuzatuvchi", "koruvchi", "tasdiqlovchi", "admin"]] = None
+    ism: Optional[str] = None
+    active: Optional[bool] = None
+    izoh: Optional[str] = None
+
+
+@app.get("/aktor")
+def aktor_royxat(request: Request, faqat_faol: bool = False):
+    """Shu IJARACHINING aktorlari.
+
+    `company_id` SQL shartida — boshqa ijarachining xodimlari
+    ro'yxati ko'rinmaydi. FK yozishni to'sadi, O'QISHNI esa faqat
+    shu shart to'sadi.
+    """
+    from api import aktor
+    cid = company_id_of(request)
+    if not aktor.ready():
+        return {"tayyor": False, "aktorlar": [],
+                "sabab": "schema_patch_aktor.sql qo'llanmagan"}
+    k = kimlik_of(request, cid)
+    ruxsat(k, "korish")
+    return {"tayyor": True, "aktorlar": aktor.royxat(cid, faqat_faol=faqat_faol),
+            "meniki": k.dict()}
+
+
+@app.post("/aktor")
+def aktor_qosh(body: AktorIn, request: Request):
+    """Aktor qo'shadi. FAQAT `sozlama` huquqi bilan.
+
+    Bu amal "kim qaror qo'ya oladi" ni belgilaydi, ya'ni qarorning
+    o'zidan KUCHLIROQ. Shuning uchun eng yuqori huquq talab qilinadi.
+    """
+    from api import aktor
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "sozlama")
+    try:
+        row = aktor.qosh(cid, login=body.login, ism=body.ism, rol=body.rol,
+                         manba=body.manba, erp_user_id=body.erp_user_id,
+                         izoh=body.izoh)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:                                    # noqa: BLE001
+        # Takroriy login/erp_user_id — baza indeksi to'sadi.
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    audit_yoz(k, request, amal="aktor_qoshildi", entity="actor",
+              entity_id=int(row["id"]),
+              keyin={"login": row["login"], "rol": row["rol"],
+                     "manba": row["manba"], "erp_user_id": row["erp_user_id"]})
+    return row
+
+
+@app.patch("/aktor/{actor_id}")
+def aktor_yangila(actor_id: int, body: AktorYangilashIn, request: Request):
+    """Aktor rolini/holatini o'zgartiradi. FAQAT `sozlama`."""
+    from api import aktor
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "sozlama")
+    oldin = aktor.bitta(cid, actor_id)
+    if not oldin:
+        # Boshqa ijarachiniki ham shu yerga tushadi — javob BIR XIL.
+        raise HTTPException(status_code=404, detail="Aktor topilmadi.")
+    try:
+        row = aktor.yangila(cid, actor_id, rol=body.rol, ism=body.ism,
+                            active=body.active, izoh=body.izoh)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    audit_yoz(k, request, amal="aktor_yangilandi", entity="actor",
+              entity_id=actor_id,
+              oldin={"rol": oldin["rol"], "ism": oldin["ism"],
+                     "active": oldin["active"]},
+              keyin={"rol": row["rol"], "ism": row["ism"],
+                     "active": row["active"]})
+    return row
+
+
+@app.get("/aktor/holat")
+def aktor_holat(request: Request):
+    """Atribut sifati — QANCHA qaror haqiqiy odamga bog'langan.
+
+    `nomalum` va `faqat_kompaniya` ustunlari YASHIRILMAYDI: ular
+    atribut qarzining o'lchovi va uni ko'rsatmaslik "hammasi
+    joyida" degan yolg'on beradi.
+    """
+    from api import aktor
+    cid = company_id_of(request)
+    if not aktor.ready():
+        return {"tayyor": False, "sabab": "schema_patch_aktor.sql qo'llanmagan"}
+    k = kimlik_of(request, cid)
+    ruxsat(k, "korish")
+    return {
+        "tayyor": True,
+        "meniki": k.dict(),
+        "aktor_majburiy": aktor.aktor_majburiymi(cid),
+        # ERP shartnoma-view i YO'Q bo'lsa eng yuqori ishonch
+        # `aktor_elon` bo'lib qoladi. Bu ochiq aytiladi.
+        "erp_kontekst": aktor.erp_kontekst_ready(),
+        "erp_moslik": aktor.erp_moslikni_tekshir(cid),
+        "atribut_sifati": aktor.atribut_sifati(cid),
+        "rollar": list(aktor.ROLLAR),
+        "ruxsat_matritsasi": {a: list(r) for a, r in aktor.RUXSAT.items()},
+    }
+
+
+@app.get("/audit")
+def audit_royxat(request: Request, entity: Optional[str] = None,
+                 entity_id: Optional[int] = None,
+                 actor_id: Optional[int] = None, limit: int = 200):
+    """Audit tarixi. FAQAT shu ijarachiniki.
+
+    Jadval APPEND-ONLY (baza trigger'i), ya'ni bu ro'yxatni
+    o'zgartirish yo'li API da ham, SQL da ham yo'q.
+    """
+    from api import aktor
+    cid = company_id_of(request)
+    if not aktor.ready():
+        return {"tayyor": False, "yozuvlar": []}
+    k = kimlik_of(request, cid)
+    ruxsat(k, "korish")
+    return {"tayyor": True,
+            "yozuvlar": aktor.tarix(cid, entity=entity, entity_id=entity_id,
+                                    actor_id=actor_id, limit=limit)}
 
 
 @app.get("/kod/qaror/tafsil")

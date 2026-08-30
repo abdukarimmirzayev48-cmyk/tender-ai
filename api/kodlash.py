@@ -1173,7 +1173,9 @@ def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
               taklif_skor: Optional[float] = None,
               rad_takliflar: Optional[Sequence[str]] = None,
               qoshimcha_kod: bool = False,
-              izoh: Optional[str] = None) -> Dict[str, Any]:
+              izoh: Optional[str] = None, *,
+              actor_id: Optional[int] = None,
+              ishonch: Optional[str] = None) -> Dict[str, Any]:
     """INSON qarorini yozadi. `qaror`: kod | talabsiz | dalilsiz | otkazildi.
 
     Ochiq qator bo'lsa u YAKUNLANADI (vaqt va qidiruv soni saqlanadi).
@@ -1195,6 +1197,14 @@ def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
     """
     if not (kim or "").strip():
         raise ValueError("kim bo'sh bo'la olmaydi")
+    # `kim` — KOMPANIYA login'i (sessiyadan). U "qaysi odam" degan
+    # savolga javob bermaydi, shuning uchun aktor va uning ishonch
+    # darajasi ALOHIDA yoziladi.
+    if ishonch not in ("erp_sessiya", "aktor_elon", "kompaniya_sessiyasi"):
+        raise ValueError(
+            f"kodlash qarori uchun yaroqsiz ishonch darajasi: {ishonch}")
+    if ishonch in ("erp_sessiya", "aktor_elon") and not actor_id:
+        raise ValueError(f"`{ishonch}` darajasi aktor SHART qiladi")
     if qaror not in QARORLAR:
         raise ValueError(
             f"noma'lum qaror: {qaror!r}. Ruxsat etilgan: {', '.join(QARORLAR)}")
@@ -1236,13 +1246,15 @@ def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
               "kod": code, "m": manba, "kim": kim.strip(),
               "d": d_json, "tc": taklif_code, "ts": taklif_skor,
               "rad": rad, "qk": bool(qoshimcha_kod),
-              "izoh": (izoh or "").strip()[:1000] or None}
+              "izoh": (izoh or "").strip()[:1000] or None,
+              "actor_id": actor_id, "ishonch": ishonch}
 
     row = db.execute_returning(
         "UPDATE kod_qaror SET qaror=%(q)s, code=%(kod)s, manba=%(m)s, "
         "       kim=%(kim)s, qaror_at=now(), dalil=%(d)s::jsonb, "
         "       taklif_code=%(tc)s, taklif_skor=%(ts)s, "
-        "       rad_takliflar=%(rad)s, qoshimcha_kod=%(qk)s, izoh=%(izoh)s "
+        "       rad_takliflar=%(rad)s, qoshimcha_kod=%(qk)s, izoh=%(izoh)s, "
+        "       actor_id=%(actor_id)s, ishonch=%(ishonch)s "
         "WHERE company_id=%(c)s AND kalit=%(k)s AND qaror IS NULL "
         "RETURNING id, ochilgan_at, qaror_at, qidiruv_soni, qidiruv_sozi",
         umumiy)
@@ -1251,9 +1263,11 @@ def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
     return db.execute_returning(
         "INSERT INTO kod_qaror (company_id, kalit, atama, qaror, code, "
         "                       manba, kim, qaror_at, dalil, taklif_code, "
-        "                       taklif_skor, rad_takliflar, qoshimcha_kod, izoh) "
+        "                       taklif_skor, rad_takliflar, qoshimcha_kod, izoh, "
+        "                       actor_id, ishonch) "
         "VALUES (%(c)s, %(k)s, %(a)s, %(q)s, %(kod)s, %(m)s, %(kim)s, now(), "
-        "        %(d)s::jsonb, %(tc)s, %(ts)s, %(rad)s, %(qk)s, %(izoh)s) "
+        "        %(d)s::jsonb, %(tc)s, %(ts)s, %(rad)s, %(qk)s, %(izoh)s, "
+        "        %(actor_id)s, %(ishonch)s) "
         "RETURNING id, ochilgan_at, qaror_at, qidiruv_soni, qidiruv_sozi",
         umumiy) or {}
 

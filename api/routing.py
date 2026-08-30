@@ -269,16 +269,45 @@ def ochildi(routing_id: int, company_id: int,
 
 
 def qaror(routing_id: int, company_id: int, inson_qaror: str,
-          izoh: Optional[str] = None,
-          broker: Optional[str] = None) -> Optional[dict]:
-    """Broker qarori. AI qarori TEGILMAYDI — u dalil bo'lib qoladi."""
+          izoh: Optional[str] = None, *,
+          actor_id: Optional[int] = None,
+          ishonch: Optional[str] = None,
+          broker_nomi: Optional[str] = None) -> Optional[dict]:
+    """Broker qarori. AI qarori TEGILMAYDI — u dalil bo'lib qoladi.
+
+    AKTOR SERVERDA ANIQLANADI, MIJOZDAN OLINMAYDI. Ilgari imzo
+    `broker: Optional[str]` edi va u to'g'ridan-to'g'ri
+    `body.broker` dan kelardi — ya'ni qarorni KIM qo'yganini
+    mijozning o'zi yozardi va uni hech narsa tekshirmasdi.
+    O'lchandi (2026-08-31): 310 qatordan 30 tasida inson qarori bor,
+    `broker_nomi` esa 0 tasida yozilgan — ya'ni yolg'on yozuv hali
+    yo'q edi, lekin yo'l ochiq edi.
+
+    Endi `broker_nomi` SERVER aniqlagan aktorning ismidan keladi
+    (`api/aktor.py:aniqla()`), `ishonch` esa uning qanchalik
+    ishonchli ekanini yozadi.
+
+    YANGI PARAMETRLAR FAQAT KALIT SO'ZLI (`*`). O'LCHANGAN SABAB:
+    eski imzoda 5-pozitsiya `broker` (matn) edi va
+    `qualification_test.py:323` uni POZITSION uzatardi. `actor_id`
+    o'sha o'ringa tushganda matn JIMGINA aktor id sifatida
+    bog'lanardi. Kalit so'zli parametr bunday xatoni chaqiruv
+    joyida BALAND OVOZDA yiqitadi.
+    """
     if inson_qaror not in INSON_QARORLAR:
         raise ValueError(f"Noma'lum qaror: {inson_qaror}")
+    if ishonch not in ("erp_sessiya", "aktor_elon", "kompaniya_sessiyasi"):
+        raise ValueError(
+            f"inson qarori uchun yaroqsiz ishonch darajasi: {ishonch}")
+    if ishonch in ("erp_sessiya", "aktor_elon") and not actor_id:
+        raise ValueError(f"`{ishonch}` darajasi aktor SHART qiladi")
     return db.execute_returning("""
         UPDATE tender_routing
            SET inson_qaror = %(q)s,
                inson_izoh  = %(i)s,
                broker_nomi = COALESCE(%(b)s, broker_nomi),
+               qaror_actor_id = %(actor_id)s,
+               qaror_ishonch  = %(ishonch)s,
                qaror_vaqti = now(),
                holat       = 'yopildi',
                -- YANGI QAROR eski ogohlantirishni yopadi. Cheklov
@@ -290,7 +319,8 @@ def qaror(routing_id: int, company_id: int, inson_qaror: str,
         RETURNING id, tender_id, ai_qaror, inson_qaror, holat,
                   ai_ozgardi""",
         {"id": routing_id, "c": company_id, "q": inson_qaror,
-         "i": (izoh or "").strip()[:2000] or None, "b": broker})
+         "i": (izoh or "").strip()[:2000] or None, "b": broker_nomi,
+         "actor_id": actor_id, "ishonch": ishonch})
 
 
 #: Moslik foizi MA'NOLI bo'lishi uchun kerakli minimal qaror soni.
