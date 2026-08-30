@@ -775,6 +775,15 @@ CATALOG_LIST_SQL = (
     "FROM catalog_product "
     "WHERE company_id = %(company_id)s ORDER BY created_at")
 
+CATALOG_GET_SQL = (
+    f"SELECT {_CP_COLS}, "
+    "  COALESCE(ARRAY(SELECT v.code FROM v_catalog_code_active v "
+    "                  WHERE v.product_id = catalog_product.id "
+    "                    AND v.company_id = catalog_product.company_id), "
+    "           '{}') AS codes "
+    "FROM catalog_product "
+    "WHERE company_id = %(company_id)s AND id = %(product_id)s")
+
 # ---------------------------------------------------------------------------
 # KATALOG MATN MOSLIGI — SQL DA, Python siklida EMAS
 #

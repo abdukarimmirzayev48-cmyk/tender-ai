@@ -32,8 +32,6 @@ const StatsView = lazy(() => import('./components/StatsView'))
 const RequirementReview = lazy(() =>
   import('./components/RequirementReview'))
 const BrokerQueue = lazy(() => import('./components/BrokerQueue'))
-// KODLASH NAVBATI — O'LCHOV asbobi (40 qaror + uch raqam).
-const KodNavbat = lazy(() => import('./components/KodNavbat'))
 
 // Tender paneli ham alohida: u AI, narx hisobi, cheklist va ombor
 // panellarini tortadi, lekin faqat qatorga bosilganda ochiladi.
@@ -63,7 +61,7 @@ function catalogReasons(c: CatalogMatchInfo | undefined,
                         t: (k: TKey, v?: Record<string, string | number>) => string): string[] {
   const items = c?.products || []
   if (!items.length) return []
-  const key: TKey = c!.by === 'category' ? 'app.matchedBy.category' : 'app.matchedBy.name'
+  const key: TKey = c!.by === 'kod' ? 'app.matchedBy.code' : 'app.matchedBy.name'
   return [t(key, { items: items.join(', ') })]
 }
 
@@ -103,6 +101,9 @@ export default function App() {
   // Cheklistdan "hujjatlarim" ga o'tilganda qaysi tur formasi ochilsin
   const [docFocus, setDocFocus] = useState<string | null>(null)
   const [catalog, setCatalog] = useState<Product[]>([])
+  // Katalogdagi son bosilganda aynan shu mahsulot bo'yicha moslar ochiladi.
+  // Ichki tasniflagich kodi interfeysga olib chiqilmaydi.
+  const [catalogProduct, setCatalogProduct] = useState<Product | null>(null)
   const [catalogNew, setCatalogNew] = useState({ new: 0, total: 0 })
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [catalogError, setCatalogError] = useState<string | null>(null)
@@ -199,6 +200,7 @@ export default function App() {
       min_cost: s.min_cost, max_cost: s.max_cost,
     })
     setActiveSearchId(s.id)
+    setCatalogProduct(null)
     setEditing(null)
     setView('match'); setOffset(0)
   }
@@ -238,8 +240,9 @@ export default function App() {
           limit: PAGE_SIZE, offset,
         })
       } else if (view === 'match') {
-        // Standart "Sizga mos" — KATALOG bo'yicha (kategoriya + nom)
+        // Standart "Sizga mos" — katalogning aniq lot kodlari bo'yicha.
         const r = await api.catalogMatch({
+          product_id: catalogProduct?.id ?? null,
           region: filters.region, currency: filters.currency,
           products: filters.products, services: filters.services,
           limit: PAGE_SIZE, offset,
@@ -275,7 +278,7 @@ export default function App() {
     } finally {
       if (!opts.silent) setLoading(false)
     }
-  }, [view, filters, offset, source, profile, activeSearchId, t])
+  }, [view, filters, offset, source, profile, activeSearchId, catalogProduct, t])
 
   useEffect(() => { load() }, [load])
 
@@ -291,13 +294,17 @@ export default function App() {
   }
   function goto(v: string) {
     // "Sizga mos"ga nav orqali kirilsa — katalog rejimi (qidiruv rejimidan chiqamiz)
-    if (v === 'match') { setActiveSearchId(null); setProfile(null) }
+    if (v === 'match') {
+      setActiveSearchId(null); setProfile(null); setCatalogProduct(null)
+    }
     setView(v); setOffset(0)
   }
   // Katalogda mahsulot "N mos"ini bosish -> shu mahsulotni mos ko'rsatadi
   function openProductMatch(p: Product) {
     setActiveSearchId(null)
-    updateFilter({ category: p.category_code || '' })
+    setProfile(null)
+    setCatalogProduct(p)
+    updateFilter({ category: '', q: '', products: [], services: [] })
     setView('match'); setOffset(0)
   }
   // Tender cheklistidagi "Hujjatlarim bo'limiga o'tish"
@@ -398,6 +405,15 @@ export default function App() {
                   onClick={() => goto('match')}>{t('app.byCatalog')}</button>
               </Info>
             )}
+            {view === 'match' && !activeSearch && catalogProduct && (
+              <Info>
+                {t('app.catalogProductMatch')} <b>{catalogProduct.name}</b>
+                <button
+                  className="ml-2 font-semibold underline underline-offset-2"
+                  onClick={() => { setCatalogProduct(null); setOffset(0) }}
+                >{t('app.allCatalog')}</button>
+              </Info>
+            )}
             {emptyCatalog && (
               <Info>
                 {t('app.emptyCatalog')}
@@ -463,11 +479,6 @@ export default function App() {
             <RequirementReview
               onOpenSource={(_ref, _pos) => { /* keyingi qadam: DocumentText ga chuqur havola */ }}
             />
-          </Suspense>
-        )}
-        {view === 'kodlash' && (
-          <Suspense fallback={<Skeleton className="h-[420px] w-full rounded-xl" />}>
-            <KodNavbat />
           </Suspense>
         )}
         {view === 'broker' && (

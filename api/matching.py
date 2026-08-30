@@ -189,7 +189,8 @@ def score_tender(tender: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, A
 # hujjat qamrovi (`etl_doc_text.py --catalog`). Uch nusxa bo'lmasligi uchun
 # yagona manba shu funksiya (reja_ai_chat.md §15.3.1).
 # ---------------------------------------------------------------------------
-def product_matches(cand: Dict[str, Any], product: Dict[str, Any]) -> Optional[str]:
+def product_matches(cand: Dict[str, Any], product: Dict[str, Any], *,
+                    allow_text: bool = True) -> Optional[str]:
     """Tender mahsulotga mos keladimi? -> 'kod' | 'nom' | None.
 
     `cand` — `queries.match_candidates_sql()` qatori: `good_codes`,
@@ -234,6 +235,12 @@ def product_matches(cand: Dict[str, Any], product: Dict[str, Any]) -> Optional[s
         return None
 
     # --- 2. NOM (ikkilamchi) — faqat kodi YO'Q mahsulot uchun ---
+    # Standart "Mos tenderlar" faqat kod dalilini qabul qiladi. Matn yo'li
+    # alohida taxminiy rejim uchun saqlangan: "monitor" so'zi kompyuter va
+    # tibbiy qurilmada bir xil bo'lishi mumkin.
+    if not allow_text:
+        return None
+
     terms = [product.get("name")] + (product.get("keywords") or [])
     blob = _norm(f"{cand.get('name') or ''} {cand.get('goods_blob') or ''}")
     for t in terms:

@@ -263,9 +263,9 @@ function ProductForm({ product, categories, onSaved, onCancel }: {
       </h3>
 
       <div className="mb-4 grid gap-3 sm:grid-cols-[2fr_1fr]">
-        <Label text={t('cat.fName')}>
+        <Label text={t('cat.fName')} note={t('cat.fNameNote')}>
           <Input value={name} onChange={(e) => setName(e.target.value)}
-            placeholder={t('cat.fNamePlaceholder')} />
+            placeholder={t('cat.fNamePlaceholder')} autoFocus />
         </Label>
         <Label text={t('cat.fCategory')}>
           <Select value={cat || 'none'} onValueChange={(v) => setCat(v === 'none' ? '' : v)}>
@@ -306,11 +306,18 @@ function ProductForm({ product, categories, onSaved, onCancel }: {
         </Label>
       </div>
 
-      <Label text={t('cat.fKeywords')} note={t('cat.fKeywordsNote')}>
-        <TagField value={keywords} input={kwInput} setInput={setKwInput} add={addKw}
-          onRemove={(k) => setKeywords(keywords.filter((x) => x !== k))}
-          placeholder={t('cat.fKeywordsPlaceholder')} />
-      </Label>
+      <details className="rounded-lg border bg-muted/20 px-3 py-2">
+        <summary className="cursor-pointer select-none text-body font-medium text-muted-foreground">
+          {t('cat.moreOptions')}
+        </summary>
+        <div className="mt-3">
+          <Label text={t('cat.fKeywords')} note={t('cat.fKeywordsNote')}>
+            <TagField value={keywords} input={kwInput} setInput={setKwInput} add={addKw}
+              onRemove={(k) => setKeywords(keywords.filter((x) => x !== k))}
+              placeholder={t('cat.fKeywordsPlaceholder')} />
+          </Label>
+        </div>
+      </details>
 
       <div className="mt-5 flex items-center gap-3">
         <Button onClick={save} disabled={saving}>

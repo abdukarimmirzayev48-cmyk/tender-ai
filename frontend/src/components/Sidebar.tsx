@@ -16,7 +16,6 @@ const NAV: { key: string; icon: string; label: TKey; section?: TKey }[] = [
   { key: 'requirements', icon: 'check', label: 'nav.requirements' },
   // Talablardan KEYIN: zanjir tender -> talab -> malaka -> NAVBAT.
   { key: 'broker', icon: 'send', label: 'nav.broker' },
-  { key: 'kodlash', icon: 'check', label: 'nav.kodlash' },
   { key: 'stats', icon: 'stats', label: 'nav.stats' },
 ]
 
