@@ -515,6 +515,17 @@ def _load_embedder() -> Callable[[List[str], str], List[List[float]]]:
     return _embed_fn
 
 
+def embedder_yuklandi() -> bool:
+    """Embedding modeli XOTIRAGA yuklanganmi.
+
+    `/ready` uchun: model yuklanmagani xizmatni to'xtatmaydi (birinchi
+    chat savoli ~17 s kutadi, qolgani ishlaydi), shuning uchun bu
+    OGOHLANTIRISH, xato emas. Modelni bu yerda YUKLAMAYMIZ — tayyorlik
+    tekshiruvi 17 soniya osilib qolmasin.
+    """
+    return _embed_fn is not None
+
+
 def embed_query(text: str) -> List[float]:
     """Savolni vektorga. Xato bo'lsa `AIUnavailable` — chaqiruvchi leksik
     qidiruvga tushib qoladi ("AI ixtiyoriy" tamoyili)."""

@@ -20,7 +20,9 @@ Endpointlar:
 """
 import json
 import logging
+import io
 import os
+import time
 import re
 import secrets
 from contextlib import asynccontextmanager
@@ -38,7 +40,7 @@ from pydantic import BaseModel, field_validator
 
 load_dotenv()  # .env ni import paytida yuklaymiz (pool DSN'ni ko'rishi uchun)
 
-from api import (ai, ai_chat, ai_docs, ai_gonogo, ai_match, auth,  # noqa: E402
+from api import (ai, ai_chat, ai_docs, ai_gonogo, ai_match, auth, jurnal,  # noqa: E402
                  catalog_auto, compliance, db, erp_status, erp_stock, i18n, importer,
                  kodlash, matching, notify, pricing, queries, stock, telegram,
                  translit)
@@ -318,6 +320,12 @@ class MatchIn(BaseModel):
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # JURNAL BIRINCHI — undan keyingi har qadam yozilsin.
+    fmt = jurnal.sozla()
+    logging.getLogger("api").info(
+        "ishga tushdi", extra={"muhit": os.environ.get("APP_ENV", "dev"),
+                               "log_format": fmt,
+                               "docs": API_DOCS})
     db.init_pool()
     # Embedding modelini FON IPIDA isitamiz: yuklanish ~17 s, keyingi
     # so'rovlar 19-54 ms. Isitmasak birinchi chat savoli 17 soniya
@@ -344,6 +352,11 @@ async def lifespan(app: FastAPI):
 PUBLIC_PATHS = {
     # Interfeys login OLDIDAN holatni ko'rsatadi (baza tirikmi).
     "/health",
+    # TAYYORLIK — reverse-proxy va systemd shuni so'raydi, ular esa
+    # token ushlab turolmaydi. Javob ATAYLAB TAFSILOTSIZ: faqat
+    # `ok|ogohlantirish|xato` so'zlari. Sabablar server jurnaliga
+    # yoziladi — ular u yerda kerak, tashqarida emas.
+    "/ready",
     # Kirishning o'zi.
     "/auth/login",
     # Swagger — ishlab chiqishda kerak; javob bermaydi, faqat sxema.
@@ -499,6 +512,18 @@ def gate(request: Request,
 # unutib qoldirish" xavfsiz tomonga tushsin.
 API_DOCS = os.environ.get("API_DOCS", "0").strip().lower() in ("1", "true", "yes")
 
+#: Qaysi muhitda ishlayapmiz: dev | staging | production.
+#:
+#: NEGA KERAK: ba'zi tekshiruvlar FAQAT ishlab chiqarishda qat'iy
+#: bo'lishi kerak. Masalan bildirishnoma havolasi `localhost` bo'lsa
+#: — bu `dev` da normal, `production` da esa BUZUQ havola yuborish
+#: demak. Muhitni bilmasak ikkalasini ajratib bo'lmaydi.
+#:
+#: Standart `dev`: sozlanmagan muhit ISHLAB CHIQARISH deb
+#: hisoblanmaydi, ya'ni qat'iy tekshiruvlar tasodifan ishlab
+#: turgan mahalliy nusxani to'xtatmaydi.
+APP_ENV = os.environ.get("APP_ENV", "dev").strip().lower()
+
 app = FastAPI(
     title="xt-xarid Tender Aggregator API",
     version="0.1.0",
@@ -558,6 +583,36 @@ _XAVFSIZLIK_SARLAVHALARI = {
 #: freym ichiga olmaydi, forma yuborilmaydi.
 _CSP = ("default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
         "form-action 'none'; sandbox")
+
+
+@app.middleware("http")
+async def sorov_jurnali(request: Request, call_next):
+    """Har so'rovga IDENTIFIKATOR beradi va natijasini yozadi.
+
+    Identifikator javobga ham qo'yiladi (`X-Request-Id`) — foydalanuvchi
+    xato haqida aytganda o'sha id bo'yicha jurnalni topish mumkin.
+    Mijoz o'zi id yuborsa, u ISHLATILADI (proksi zanjiri uzilmasin),
+    lekin UZUNLIGI cheklanadi — jurnalga cheksiz matn tushmasin.
+    """
+    kelgan = (request.headers.get("x-request-id") or "").strip()[:64]
+    sid = kelgan or jurnal.yangi_sorov_id()
+    if kelgan:
+        jurnal.sorov_id.set(kelgan)
+    t0 = time.time()
+    javob = await call_next(request)
+    javob.headers.setdefault("X-Request-Id", sid)
+    # `/health` va `/ready` HAR DAQIQA so'raladi — ular jurnalni
+    # to'ldirib, haqiqiy hodisalarni ko'mib tashlardi. Faqat muammo
+    # bo'lganda yoziladi.
+    shovqin = request.url.path in ("/health", "/ready")
+    if not shovqin or javob.status_code >= 400:
+        logging.getLogger("api.sorov").info(
+            "%s %s -> %s", request.method, request.url.path,
+            javob.status_code,
+            extra={"metod": request.method, "yol": request.url.path,
+                   "kod": javob.status_code,
+                   "ms": int((time.time() - t0) * 1000)})
+    return javob
 
 
 @app.middleware("http")
@@ -1049,9 +1104,93 @@ def _token_opt(authorization: Optional[str]) -> Optional[str]:
 
 @app.get("/health")
 def health():
-    """Baza ulanishini tekshiradi."""
+    """TIRIKLIK (liveness) — jarayon javob beryaptimi.
+
+    Baza ulanishini ham tekshiradi (tarixiy xulq, interfeys shunga
+    tayanadi). Chuqurroq tekshiruv — `/ready`.
+    """
     db.scalar("SELECT 1")
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready(response: Response):
+    """TAYYORLIK (readiness) — TRAFIK YUBORSA BO'LADIMI.
+
+    `/health` dan FARQI ATAYLAB: jarayon tirik bo'lishi mumkin, lekin
+    xizmatga TAYYOR bo'lmasligi mumkin — migratsiya qo'llanmagan,
+    embedding modeli hali yuklanmagan. Ikkalasini bitta endpointga
+    qo'shish "tirik = tayyor" degan yolg'on beradi va reverse-proxy
+    tayyor bo'lmagan jarayonga trafik yuborardi.
+
+    TAYYOR EMAS bo'lsa **503** qaytadi — proksi (Caddy) va systemd
+    shu kodga qarab kutadi.
+
+    Har tekshiruv `ok | ogohlantirish | xato` beradi. Faqat `xato`
+    503 ga olib keladi: model yuklanmagani xizmatni to'xtatmaydi
+    (chat sekinroq ishlaydi, qolgani ishlaydi) — bu OGOHLANTIRISH.
+    """
+    tekshiruv: Dict[str, Any] = {}
+    xato = False
+
+    # 1) BAZA
+    try:
+        db.scalar("SELECT 1")
+        tekshiruv["baza"] = {"holat": "ok"}
+    except Exception as e:                                    # noqa: BLE001
+        xato = True
+        tekshiruv["baza"] = {"holat": "xato", "sabab": str(e)[:120]}
+
+    # 2) MIGRATSIYALAR. Manifestdagi va bazada yozilganlar mos kelmasa —
+    #    kod sxemadan oldinda yoki orqada. Bu jimgina yiqilishga olib
+    #    keladigan holat, shuning uchun XATO.
+    try:
+        kutilgan = 0
+        man = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "migratsiya_manifest.tsv")
+        if os.path.exists(man):
+            with io.open(man, encoding="utf-8") as f:
+                kutilgan = sum(1 for ln in f
+                               if ln.strip() and not ln.lstrip().startswith("#"))
+        bor = db.scalar("SELECT count(*) FROM schema_migration "
+                        "WHERE holat IN ('ok','bootstrap')") or 0
+        if not kutilgan:
+            tekshiruv["migratsiya"] = {"holat": "ogohlantirish",
+                                       "sabab": "manifest topilmadi"}
+        elif int(bor) < kutilgan:
+            xato = True
+            tekshiruv["migratsiya"] = {
+                "holat": "xato", "qollangan": int(bor), "kutilgan": kutilgan,
+                "sabab": "migratsiya qo'llanmagan"}
+        else:
+            tekshiruv["migratsiya"] = {"holat": "ok", "qollangan": int(bor),
+                                       "kutilgan": kutilgan}
+    except Exception as e:                                    # noqa: BLE001
+        xato = True
+        tekshiruv["migratsiya"] = {"holat": "xato", "sabab": str(e)[:120]}
+
+    # 3) EMBEDDING MODELI — OGOHLANTIRISH, xato emas.
+    try:
+        yuklandi = ai_chat.embedder_yuklandi()
+        tekshiruv["embedding"] = {
+            "holat": "ok" if yuklandi else "ogohlantirish",
+            "yuklandi": bool(yuklandi),
+            "provayder": os.environ.get("EMBED_PROVIDER", "local")}
+    except Exception as e:                                    # noqa: BLE001
+        tekshiruv["embedding"] = {"holat": "ogohlantirish",
+                                  "sabab": str(e)[:120]}
+
+    if xato:
+        response.status_code = 503
+        logging.getLogger("api").error("TAYYOR EMAS: %s", tekshiruv)
+    elif any(v.get("holat") == "ogohlantirish" for v in tekshiruv.values()):
+        logging.getLogger("api").warning("tayyorlik ogohlantirishi: %s",
+                                         tekshiruv)
+    # TAFSILOT TASHQARIGA CHIQMAYDI. `/ready` ochiq endpoint bo'lgani
+    # uchun migratsiya sanog'i, xato matni va muhit nomi javobda
+    # BERILMAYDI — ular server jurnalida (yuqorida).
+    return {"tayyor": not xato,
+            "tekshiruv": {k: v["holat"] for k, v in tekshiruv.items()}}
 
 
 @app.get("/tenders")
