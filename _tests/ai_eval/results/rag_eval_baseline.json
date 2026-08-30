@@ -1,0 +1,850 @@
+{
+  "k": 8,
+  "holat_soni": 18,
+  "usullar": {
+    "leksik": {
+      "holatlar": {
+        "A1": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575
+        },
+        "A2": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 3,
+          "qaytdi": 8,
+          "recall": 0.0,
+          "precision": 0.0,
+          "mrr": 0.0,
+          "ndcg": 0.0
+        },
+        "A3": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 1.0,
+          "ndcg": 1.0
+        },
+        "A4": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 4,
+          "qaytdi": 8,
+          "recall": 0.25,
+          "precision": 0.125,
+          "mrr": 0.3333333333333333,
+          "ndcg": 0.19519002499605084
+        },
+        "A5": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 0.25,
+          "ndcg": 0.43067655807339306
+        },
+        "B1": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 1,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B2": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 0,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B3": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B4": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 0,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C1": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 0,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C2": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 0,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C3": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 0,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C4": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C5": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 0,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "D1": {
+          "guruh": "D",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 2,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.25,
+          "mrr": 1.0,
+          "ndcg": 1.0
+        },
+        "D2": {
+          "guruh": "D",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 5,
+          "qaytdi": 8,
+          "recall": 0.6,
+          "precision": 0.375,
+          "mrr": 1.0,
+          "ndcg": 0.6661998717660157
+        },
+        "E1": {
+          "guruh": "E",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 0,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "E2": {
+          "guruh": "E",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 0,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        }
+      },
+      "vaqt_sek": 0.82,
+      "recall_at_k": 0.6928571428571428,
+      "precision_at_k": 0.16071428571428573,
+      "mrr": 0.5833333333333333,
+      "ndcg_at_k": 0.5604280297724167,
+      "javobsizda_bosh_qaytdi": 8,
+      "javobsizda_bosh_ulush": 0.7272727272727273,
+      "til_recall": {
+        "lotin": 0.6928571428571428
+      },
+      "dalil_til_recall": {
+        "kirill": 0.75,
+        "lotin": 0.6166666666666667
+      },
+      "dalil_til_soni": {
+        "kirill": 4,
+        "lotin": 3
+      }
+    },
+    "semantik": {
+      "holatlar": {
+        "A1": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575
+        },
+        "A2": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 3,
+          "qaytdi": 8,
+          "recall": 0.3333333333333333,
+          "precision": 0.125,
+          "mrr": 0.2,
+          "ndcg": 0.18154179253735267
+        },
+        "A3": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 0.14285714285714285,
+          "ndcg": 0.3333333333333333
+        },
+        "A4": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 4,
+          "qaytdi": 8,
+          "recall": 0.25,
+          "precision": 0.125,
+          "mrr": 0.5,
+          "ndcg": 0.24630238874073
+        },
+        "A5": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 0.25,
+          "ndcg": 0.43067655807339306
+        },
+        "B1": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B2": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B3": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B4": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C1": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C2": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C3": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C4": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C5": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "D1": {
+          "guruh": "D",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 2,
+          "qaytdi": 8,
+          "recall": 0.0,
+          "precision": 0.0,
+          "mrr": 0.0,
+          "ndcg": 0.0
+        },
+        "D2": {
+          "guruh": "D",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 5,
+          "qaytdi": 8,
+          "recall": 0.8,
+          "precision": 0.5,
+          "mrr": 1.0,
+          "ndcg": 0.7469385177900298
+        },
+        "E1": {
+          "guruh": "E",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "E2": {
+          "guruh": "E",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        }
+      },
+      "vaqt_sek": 21.88,
+      "recall_at_k": 0.6261904761904763,
+      "precision_at_k": 0.16071428571428573,
+      "mrr": 0.3704081632653061,
+      "ndcg_at_k": 0.3671031920066138,
+      "javobsizda_bosh_qaytdi": 0,
+      "javobsizda_bosh_ulush": 0.0,
+      "til_recall": {
+        "lotin": 0.6261904761904763
+      },
+      "dalil_til_recall": {
+        "kirill": 0.5833333333333334,
+        "lotin": 0.6833333333333332
+      },
+      "dalil_til_soni": {
+        "kirill": 4,
+        "lotin": 3
+      }
+    },
+    "gibrid": {
+      "holatlar": {
+        "A1": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 1.0,
+          "ndcg": 1.0
+        },
+        "A2": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 3,
+          "qaytdi": 8,
+          "recall": 0.3333333333333333,
+          "precision": 0.125,
+          "mrr": 0.14285714285714285,
+          "ndcg": 0.15642624200758548
+        },
+        "A3": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575
+        },
+        "A4": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 4,
+          "qaytdi": 8,
+          "recall": 0.5,
+          "precision": 0.25,
+          "mrr": 1.0,
+          "ndcg": 0.5205067333228022
+        },
+        "A5": {
+          "guruh": "A",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 1,
+          "qaytdi": 8,
+          "recall": 1.0,
+          "precision": 0.125,
+          "mrr": 1.0,
+          "ndcg": 1.0
+        },
+        "B1": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B2": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B3": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "B4": {
+          "guruh": "B",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C1": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C2": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C3": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C4": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "C5": {
+          "guruh": "C",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 8,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "D1": {
+          "guruh": "D",
+          "til": "lotin",
+          "dalil_til": "kirill",
+          "mos_bolak": 2,
+          "qaytdi": 8,
+          "recall": 0.5,
+          "precision": 0.125,
+          "mrr": 0.25,
+          "ndcg": 0.2640681225725909
+        },
+        "D2": {
+          "guruh": "D",
+          "til": "lotin",
+          "dalil_til": "lotin",
+          "mos_bolak": 5,
+          "qaytdi": 8,
+          "recall": 0.6,
+          "precision": 0.375,
+          "mrr": 1.0,
+          "ndcg": 0.6992148198508501
+        },
+        "E1": {
+          "guruh": "E",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        },
+        "E2": {
+          "guruh": "E",
+          "til": "lotin",
+          "dalil_til": "-",
+          "mos_bolak": 0,
+          "qaytdi": 7,
+          "recall": null,
+          "precision": null,
+          "mrr": null,
+          "ndcg": null
+        }
+      },
+      "vaqt_sek": 1.84,
+      "recall_at_k": 0.7047619047619048,
+      "precision_at_k": 0.17857142857142858,
+      "mrr": 0.6989795918367347,
+      "ndcg_at_k": 0.6101636673321836,
+      "javobsizda_bosh_qaytdi": 0,
+      "javobsizda_bosh_ulush": 0.0,
+      "til_recall": {
+        "lotin": 0.7047619047619048
+      },
+      "dalil_til_recall": {
+        "kirill": 0.7083333333333334,
+        "lotin": 0.7000000000000001
+      },
+      "dalil_til_soni": {
+        "kirill": 4,
+        "lotin": 3
+      }
+    }
+  },
+  "holatlar": [
+    {
+      "id": "A1",
+      "guruh": "A",
+      "tur": "javob_bor",
+      "til": "lotin",
+      "tender_id": 7475137,
+      "mos_bolak": 1
+    },
+    {
+      "id": "A2",
+      "guruh": "A",
+      "tur": "javob_bor",
+      "til": "lotin",
+      "tender_id": 20000503556,
+      "mos_bolak": 3
+    },
+    {
+      "id": "A3",
+      "guruh": "A",
+      "tur": "javob_bor",
+      "til": "lotin",
+      "tender_id": 7475137,
+      "mos_bolak": 1
+    },
+    {
+      "id": "A4",
+      "guruh": "A",
+      "tur": "javob_bor",
+      "til": "lotin",
+      "tender_id": 7886728,
+      "mos_bolak": 4
+    },
+    {
+      "id": "A5",
+      "guruh": "A",
+      "tur": "javob_bor",
+      "til": "lotin",
+      "tender_id": 7886728,
+      "mos_bolak": 1
+    },
+    {
+      "id": "B1",
+      "guruh": "B",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 3953913,
+      "mos_bolak": 0
+    },
+    {
+      "id": "B2",
+      "guruh": "B",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 3953913,
+      "mos_bolak": 0
+    },
+    {
+      "id": "B3",
+      "guruh": "B",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 1989315,
+      "mos_bolak": 0
+    },
+    {
+      "id": "B4",
+      "guruh": "B",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 3873590,
+      "mos_bolak": 0
+    },
+    {
+      "id": "C1",
+      "guruh": "C",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 7393512,
+      "mos_bolak": 0
+    },
+    {
+      "id": "C2",
+      "guruh": "C",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 7393512,
+      "mos_bolak": 0
+    },
+    {
+      "id": "C3",
+      "guruh": "C",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 7393512,
+      "mos_bolak": 0
+    },
+    {
+      "id": "C4",
+      "guruh": "C",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 3023848,
+      "mos_bolak": 0
+    },
+    {
+      "id": "C5",
+      "guruh": "C",
+      "tur": "topilmadi",
+      "til": "lotin",
+      "tender_id": 1989315,
+      "mos_bolak": 0
+    },
+    {
+      "id": "D1",
+      "guruh": "D",
+      "tur": "ziddiyat",
+      "til": "lotin",
+      "tender_id": 7475137,
+      "mos_bolak": 2
+    },
+    {
+      "id": "D2",
+      "guruh": "D",
+      "tur": "ziddiyat",
+      "til": "lotin",
+      "tender_id": 7886728,
+      "mos_bolak": 5
+    },
+    {
+      "id": "E1",
+      "guruh": "E",
+      "tur": "injection_rad",
+      "til": "lotin",
+      "tender_id": 7393512,
+      "mos_bolak": 0
+    },
+    {
+      "id": "E2",
+      "guruh": "E",
+      "tur": "injection_rad",
+      "til": "lotin",
+      "tender_id": 7393512,
+      "mos_bolak": 0
+    }
+  ],
+  "javobli_holat": 7,
+  "javobsiz_holat": 11,
+  "ground_truth": {
+    "A1": 1,
+    "A2": 3,
+    "A3": 1,
+    "A4": 4,
+    "A5": 1,
+    "B1": 0,
+    "B2": 0,
+    "B3": 0,
+    "B4": 0,
+    "C1": 0,
+    "C2": 0,
+    "C3": 0,
+    "C4": 0,
+    "C5": 0,
+    "D1": 2,
+    "D2": 5,
+    "E1": 0,
+    "E2": 0
+  },
+  "iqtibos": {
+    "javobli_holat": 7,
+    "iqtibos_mumkin": 7,
+    "citation_hit_rate": 1.0,
+    "izoh": "Iqtibos KELTIRISH MUMKINLIGI o'lchanadi: qaytgan bo'laklar orasida dalil bormi. Model AYNAN o'shanga ko'rsatdimi — bu MODEL chaqiruvini talab qiladi va bu yerda o'lchanmaydi."
+  },
+  "sana": "2026-08-31 00:17:55",
+  "embed_model": "multilingual-e5-small",
+  "embed_dims": 384,
+  "cheklovlar": [
+    "NAMUNA KICHIK: 7 javobli holat. Metrikalar YO'NALISH beradi, statistik xulosa EMAS.",
+    "C/D/E qatlamlari (javob, tool, gallyutsinatsiya) O'LCHANMADI — model chaqiruvi pullik va qulf ostida.",
+    "Ground truth `manba_matn` dan chiqadi: bo'lak dalil satrini o'z ichiga olsa MOS. Semantik jihatdan mos, lekin AYNAN shu satrsiz bo'lak MOS EMAS deb sanaladi — ya'ni Recall PAST baholanishi mumkin.",
+    "Til kesimi ALIFBO bo'yicha, TIL bo'yicha emas: `kirill` o'zbek kirill ham, rus ham bo'lishi mumkin — alifbo ularni ajratmaydi va so'z lug'ati bilan ajratish TAXMIN bo'lardi.",
+    "Javobsiz holatlarda 'bo'sh qaytdi' raqami sifat ko'rsatkichi EMAS — rad etish qarorini model qabul qiladi."
+  ]
+}

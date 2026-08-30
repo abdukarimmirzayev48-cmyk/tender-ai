@@ -1,0 +1,91 @@
+==============================================================================
+RAG QIDIRUV VA IQTIBOS BAHOLASHI — BAZAVIY O'LCHOV
+==============================================================================
+sana        : 2026-08-31 00:17:55
+K           : 8
+holatlar    : 18 (7 javobli, 11 javobsiz)
+model       : multilingual-e5-small (384 o'lcham)
+
+A. QIDIRUV SIFATI — usullar taqqoslandi
+  usul        Recall@K   Prec@K     MRR   nDCG@K    vaqt
+  leksik         0.693    0.161   0.583    0.560    0.8s
+  semantik       0.626    0.161   0.370    0.367   21.9s
+  gibrid         0.705    0.179   0.699    0.610    1.8s
+
+  Metrikalar FAQAT javobli holatlar bo'yicha. Javobsizlarda mos
+  bo'lak yo'q, ya'ni Recall ta'riflanmagan (NULL, nol EMAS).
+
+B. IQTIBOS TO'G'RILIGI (gibrid — ishlab chiqarish yo'li)
+  citation hit rate :  1.000  (7/7)
+  Iqtibos KELTIRISH MUMKINLIGI o'lchanadi: qaytgan bo'laklar orasida dalil bormi. Model AYNAN o'shanga ko'rsatdimi — bu MODEL chaqiruvini talab qiladi va bu yerda o'lchanmaydi.
+
+C-E. JAVOB TO'G'RILIGI / TOOL TANLASH / GALLYUTSINATSIYA
+  O'LCHANMADI — model chaqiruvini talab qiladi va u
+  `AI_PAID_ENABLED` qulfi ostida (standart O'CHIQ).
+  Bu qatlamlar `run_eval.py` da; ularsiz bu hisobot
+  QIDIRUVNING yuqori chegarasini beradi, javob sifatini EMAS.
+
+F. JAVOB YO'Q BO'LGANDA (guruh B/C — qidiruv darajasi)
+  leksik     bo'sh qaytardi: 8/11  ( 0.727)
+  semantik   bo'sh qaytardi: 0/11  ( 0.000)
+  gibrid     bo'sh qaytardi: 0/11  ( 0.000)
+  DIQQAT: bo'sh qaytarish 'yaxshi' degani EMAS. Javobsiz
+  tenderda ham kontekst bo'lagi qaytishi TO'G'RI — 'dalil
+  yetarli emas' qarorini MODEL qabul qiladi, qidiruv emas.
+  Bu raqam faqat kuzatuv uchun.
+
+G. TIL BO'YICHA — Recall@K
+  G1. SAVOL yozuvi bo'yicha:
+    usul           lotin
+    leksik         0.693
+    semantik       0.626
+    gibrid         0.705
+    DIQQAT: to'plamdagi HAMMA savol `lotin` — bu kesim
+    hech narsa AJRATMAYDI. To'plamda o'zbek kirill va rus
+    tilidagi savollar YO'Q. Ularni O'YLAB CHIQARMADIM:
+    soxta holat soxta metrika beradi.
+
+  G2. DALIL (hujjat) tili bo'yicha — ASOSIY O'Q:
+    usul          kirill     lotin
+    leksik         0.750     0.617
+    semantik       0.583     0.683
+    gibrid         0.708     0.700
+    holat              4         3
+    HAR HOLAT TILLARARO: savol lotin yozuvida, dalil esa kirill
+    yoki lotin yozuvida. Sifat farqi SAVOL yozuvida emas,
+    DALIL yozuvida ko'rinadi — u aynan shu yerda o'lchanadi.
+
+    ALIFBO ANIQLANADI, TIL EMAS. `kirill` — o'zbek kirill ham,
+    rus ham bo'lishi mumkin: `12 ой кафолат муддати` o'zbekcha,
+    lekin har harfi rus alifbosida ham bor. Ularni ajratish
+    so'z lug'ati talab qiladi va bu TAXMIN bo'lardi.
+    Namuna kichik: har yozuv bo'yicha 3-4 holat.
+
+H. HOLAT DARAJASIDA (gibrid)
+  id    gr  savol   dalil    mos  qaytdi  recall    mrr   ndcg
+  A1    A   lotin   kirill     1       8   1.000  1.000  1.000
+  A2    A   lotin   kirill     3       8   0.333  0.143  0.156
+  A3    A   lotin   kirill     1       8   1.000  0.500  0.631
+  A4    A   lotin   lotin      4       8   0.500  1.000  0.521
+  A5    A   lotin   lotin      1       8   1.000  1.000  1.000
+  B1    B   lotin   -          0       8       —      —      —
+  B2    B   lotin   -          0       8       —      —      —
+  B3    B   lotin   -          0       8       —      —      —
+  B4    B   lotin   -          0       8       —      —      —
+  C1    C   lotin   -          0       7       —      —      —
+  C2    C   lotin   -          0       7       —      —      —
+  C3    C   lotin   -          0       7       —      —      —
+  C4    C   lotin   -          0       8       —      —      —
+  C5    C   lotin   -          0       8       —      —      —
+  D1    D   lotin   kirill     2       8   0.500  0.250  0.264
+  D2    D   lotin   lotin      5       8   0.600  1.000  0.699
+  E1    E   lotin   -          0       7       —      —      —
+  E2    E   lotin   -          0       7       —      —      —
+
+CHEKLOVLAR — HALOL RO'YXAT
+  * NAMUNA KICHIK: 7 javobli holat. Metrikalar YO'NALISH beradi, statistik xulosa EMAS.
+  * C/D/E qatlamlari (javob, tool, gallyutsinatsiya) O'LCHANMADI — model chaqiruvi pullik va qulf ostida.
+  * Ground truth `manba_matn` dan chiqadi: bo'lak dalil satrini o'z ichiga olsa MOS. Semantik jihatdan mos, lekin AYNAN shu satrsiz bo'lak MOS EMAS deb sanaladi — ya'ni Recall PAST baholanishi mumkin.
+  * Til kesimi ALIFBO bo'yicha, TIL bo'yicha emas: `kirill` o'zbek kirill ham, rus ham bo'lishi mumkin — alifbo ularni ajratmaydi va so'z lug'ati bilan ajratish TAXMIN bo'lardi.
+  * Javobsiz holatlarda 'bo'sh qaytdi' raqami sifat ko'rsatkichi EMAS — rad etish qarorini model qabul qiladi.
+==============================================================================
