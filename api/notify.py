@@ -42,6 +42,7 @@ BALL QAYERDAN OLINADI — YANGI MANTIQ YOZILMAGAN, mavjudi qayta ishlatilgan:
 SIRLAR BAZADA EMAS: `.env` dagi `SMTP_PASSWORD` va `TELEGRAM_BOT_TOKEN`.
 Ular yo'q bo'lsa `NotifyError`/`TelegramError` otiladi — JIMGINA O'TILMAYDI.
 """
+import logging
 import os
 import re
 import secrets
@@ -85,6 +86,11 @@ CYCLE_WINDOW = "30 minutes"
 
 # etl_run bo'sh bo'lsa (ETL hali yurmagan) shu oynaга qaytamiz — soatlik tsikl.
 FALLBACK_HOURS = 1
+
+
+#: Modul jurnali. Tuzilmali chiqish `api/jurnal.py` da sozlanadi;
+#: bu yerda oddiy nom yetarli.
+log = logging.getLogger("api.notify")
 
 
 class NotifyError(RuntimeError):
@@ -536,7 +542,9 @@ def get_settings(company_id: Optional[int] = None) -> Dict[str, Any]:
         "id": 1, "enabled": False, "email": None, "min_score": 70,
         "smtp_host": None, "smtp_port": 587, "smtp_user": None,
         "smtp_use_tls": True, "from_email": None,
-        "base_url": "http://localhost:5173",
+        # Muhitdan (`PUBLIC_BASE_URL`) — mahalliy manzil qattiq
+        # yozilmaydi. Sabab `card_url()` ustidagi izohda.
+        "base_url": bazaviy_url(None),
         "telegram_enabled": False, "telegram_chat_id": None,
         "lang": i18n.DEFAULT_LANG, "updated_at": None,
     }
@@ -589,7 +597,7 @@ def save_settings(data: Dict[str, Any],
         "smtp_user": (take("smtp_user") or None),
         "smtp_use_tls": bool(take("smtp_use_tls", True)),
         "from_email": (take("from_email") or None),
-        "base_url": (take("base_url") or "http://localhost:5173").rstrip("/"),
+        "base_url": bazaviy_url(take("base_url")),
         "telegram_enabled": bool(take("telegram_enabled", False)),
         "telegram_chat_id": (str(take("telegram_chat_id") or "").strip() or None),
         # Xabar tili — interfeys tili bilan bir xil (frontend uni tanlanganда
@@ -936,11 +944,79 @@ def find_candidates(min_score: Optional[int] = None,
 # ---------------------------------------------------------------------------
 # Xabar matni
 # ---------------------------------------------------------------------------
+#: Joylashtirishning OMMAVIY manzili. Bu MUHIT xossasi, ijarachi
+#: sozlamasi emas: bitta joylashtirishda bitta ommaviy URL bo'ladi.
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+#: Bu nomlar OMMAVIY havolada BO'LMASLIGI kerak.
+_MAHALLIY = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal")
+
+APP_ENV = os.environ.get("APP_ENV", "dev").strip().lower()
+
+
+def mahalliymi(url: Optional[str]) -> bool:
+    """URL mahalliy manzilga ishora qiladimi."""
+    u = (url or "").lower()
+    return any(m in u for m in _MAHALLIY)
+
+
+def bazaviy_url(db_qiymati: Optional[str] = None) -> str:
+    """Ommaviy bazaviy URL. Tartib MUHIM.
+
+    1. Bazadagi qiymat — LEKIN u mahalliy bo'lsa VA muhitda haqiqiy
+       manzil berilgan bo'lsa, MUHIT yutadi. Sabab o'lchangan:
+       ishlab chiquvchi bazasida `base_url = 'http://localhost:5173'`
+       yozib qo'yilgan va u joylashtirishga KO'CHIB o'tardi.
+    2. `PUBLIC_BASE_URL` muhit o'zgaruvchisi.
+    3. Oxirgi zaxira — mahalliy manzil (FAQAT `dev` uchun ma'noli).
+
+    Bu funksiya HAVOLANI BLOKLAMAYDI — u faqat tanlaydi. Bloklash
+    `url_tekshir()` da va u yuborishdan OLDIN chaqiriladi.
+    """
+    db_q = (db_qiymati or "").strip().rstrip("/")
+    if db_q and not (mahalliymi(db_q) and PUBLIC_BASE_URL):
+        return db_q
+    if PUBLIC_BASE_URL:
+        if db_q:
+            log.warning("bazadagi base_url mahalliy (%s) — muhitdagi "
+                        "PUBLIC_BASE_URL ishlatildi", db_q)
+        return PUBLIC_BASE_URL
+    return "http://localhost:5173"
+
+
+def url_tekshir(url: str) -> None:
+    """Ommaviy havola yuborishga YAROQLIMI. Yaroqsiz bo'lsa TO'XTATADI.
+
+    `dev` DAN BOSHQA muhitda mahalliy manzilli havola yuborish —
+    foydalanuvchiga ISHLAMAYDIGAN havola yuborish demak. Jimgina
+    yuborilsa, buni faqat qabul qiluvchi payqardi.
+
+    ATAYLAB XATO KO'TARADI, jimgina almashtirmaydi: to'g'ri manzil
+    NOMA'LUM, taxmin qilib qo'yish esa yana bir buzuq havola berardi.
+    """
+    if APP_ENV != "dev" and mahalliymi(url):
+        raise NotifyError(
+            f"Ommaviy havola MAHALLIY manzilga ishora qilyapti: {url}\n"
+            f"  APP_ENV={APP_ENV} da bu ISHLAMAYDIGAN havola.\n"
+            f"  Tuzatish: `PUBLIC_BASE_URL=https://<domen>` muhitda "
+            f"bering yoki bildirishnoma sozlamasida `base_url` ni "
+            f"to'g'rilang.")
+
+
 def card_url(base_url: Optional[str], tender_id: int) -> str:
     """TZ TALABI: tizimdagi tender KARTOCHKASIGA havola.
-    Frontend `?tender=<id>` parametrini o'qib drawer'ni ochadi."""
-    base = (base_url or "http://localhost:5173").rstrip("/")
-    return f"{base}/?tender={tender_id}"
+
+    Frontend `?tender=<id>` parametrini o'qib drawer'ni ochadi.
+
+    HAVOLA SHU YERDA TEKSHIRILADI — ya'ni tekshiruv HAR uchala
+    ko'rinishni (email matni, email HTML, Telegram) avtomatik
+    qamrab oladi. Yuborish funksiyalariga alohida qo'shilsa,
+    yangi kanal qo'shilganda uni UNUTISH oson bo'lardi.
+    """
+    base = bazaviy_url(base_url)
+    url = f"{base}/?tender={tender_id}"
+    url_tekshir(url)
+    return url
 
 
 def _money(v: Any, currency: Optional[str],
