@@ -54,6 +54,7 @@ Manba ma'lumoti ham mukammal emas: 21.31 (farmatsevtika) kodi ostida
 "Стол психолога" uchraydi — xaridor pozitsiyani noto'g'ri kodlagan.
 Inson tasdig'i aynan shuni ushlaydi.
 """
+import json
 import re
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -331,7 +332,8 @@ def taklif_yoz(company_id: int, product_id: int,
     return n
 
 
-def tasdiqla(company_id: int, product_id: int, code: str, kim: str) -> bool:
+def tasdiqla(company_id: int, product_id: int, code: str, kim: str,
+             qaror_id: Optional[int] = None) -> bool:
     """Inson tasdig'i. `kim` — `company_account.username`, MAJBURIY.
 
     `kim` bo'sh bo'lsa baza CHECK bilan rad etadi
@@ -345,10 +347,14 @@ def tasdiqla(company_id: int, product_id: int, code: str, kim: str) -> bool:
     # (_tests/multitenant_test.py) shu qoidani majburlaydi.
     row = db.execute_returning(
         "UPDATE catalog_product_code "
-        "SET tasdiqlandi = now(), tasdiqlagan = %(kim)s, rad_etildi = NULL "
+        "SET tasdiqlandi = now(), tasdiqlagan = %(kim)s, rad_etildi = NULL, "
+        # `COALESCE` — mavjud bog'lanish YO'QOLMAYDI: qayta tasdiqlash
+        # audit izini o'chirib yubormasin.
+        "    qaror_id = COALESCE(%(q)s, qaror_id) "
         "WHERE product_id = %(p)s AND code = %(k)s AND company_id = %(c)s "
         "RETURNING product_id",
-        {"p": product_id, "k": code, "c": company_id, "kim": kim.strip()})
+        {"p": product_id, "k": code, "c": company_id, "kim": kim.strip(),
+         "q": qaror_id})
     return row is not None
 
 
@@ -384,6 +390,8 @@ WITH kodlar AS (
     SELECT DISTINCT v.code, v.product_id, v.product_name
     FROM v_catalog_code_active v
     WHERE v.company_id = %(company_id)s
+      AND (%(product_ids)s::bigint[] IS NULL
+           OR v.product_id = ANY(%(product_ids)s::bigint[]))
 )
 SELECT t.id                                   AS tender_id,
        count(DISTINCT g.good_code)            AS mos_pozitsiya,
@@ -403,7 +411,8 @@ LIMIT %(limit)s
 
 
 def moslik(company_id: int, only_open: bool = True,
-           limit: int = 200) -> List[Dict[str, Any]]:
+           limit: int = 200,
+           product_ids: Optional[Sequence[int]] = None) -> List[Dict[str, Any]]:
     """Kompaniyaning TASDIQLANGAN kodlari bo'yicha mos tenderlar.
 
     Tasdiqlangan kodi yo'q bo'lsa BO'SH ro'yxat qaytadi — va chaqiruvchi
@@ -411,7 +420,9 @@ def moslik(company_id: int, only_open: bool = True,
     ko'rsatishi shart (`v_catalog_kodsiz`). Ikkisi butunlay boshqa holat.
     """
     return db.query(SQL_MOSLIK, {"company_id": company_id,
-                                 "only_open": only_open, "limit": limit})
+                                 "only_open": only_open, "limit": limit,
+                                 "product_ids": (list(product_ids)
+                                                 if product_ids else None)})
 
 
 #: Bitta tenderning MOS POZITSIYALARI — dalil bilan.
@@ -430,6 +441,8 @@ FROM tender_good g
 JOIN v_catalog_code_active v
   ON g.good_code LIKE v.code || '%%'
  AND v.company_id = %(company_id)s
+ AND (%(product_ids)s::bigint[] IS NULL
+      OR v.product_id = ANY(%(product_ids)s::bigint[]))
 WHERE g.tender_id = ANY(%(ids)s)
   AND g.name IS NOT NULL
 ORDER BY g.tender_id, g.good_code
@@ -478,7 +491,9 @@ def _ozgarish(katalog_nomi: str, pozitsiya: str) -> float:
 
 
 def pozitsiya_moslik(company_id: int,
-                     tender_ids: Sequence[int]) -> Dict[int, List[Dict[str, Any]]]:
+                     tender_ids: Sequence[int],
+                     product_ids: Optional[Sequence[int]] = None
+                     ) -> Dict[int, List[Dict[str, Any]]]:
     """Tender -> mos pozitsiyalar ro'yxati, TO'G'RI mahsulot atributi bilan.
 
     Bir kodni bir necha mahsulot baham ko'rsa, pozitsiyaga NOMI eng
@@ -488,7 +503,8 @@ def pozitsiya_moslik(company_id: int,
     if not tender_ids:
         return {}
     rows = db.query(SQL_POZITSIYALAR,
-                    {"company_id": company_id, "ids": list(tender_ids)})
+                    {"company_id": company_id, "ids": list(tender_ids),
+                     "product_ids": (list(product_ids) if product_ids else None)})
 
     # Pozitsiya bo'yicha guruhlaymiz: bitta pozitsiyaga bir nechta
     # mahsulot da'vogar bo'lishi mumkin.
@@ -757,6 +773,11 @@ def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
 
     Qaytadi: {"atamalar": [...], "qolgan": N}
 
+    QAROR QILINGAN ATAMA KO'RSATILMAYDI. `talabsiz`/`otkazildi` kod
+    bermaydi, ya'ni mahsulot kodsiz qoladi — filtrsiz atama navbatga
+    QAYTARDI va navbat hech qachon tugamasdi (o'lchandi). U yo'qolmaydi:
+    `qaror_qilingan` toifasida sanaladi va `toifa_yigindi` ga kiradi.
+
     Har element:
         kalit       `atama.normal()` — qoida kaliti (shu bilan saqlanadi)
         atama       ko'rsatish uchun ASL matn
@@ -809,6 +830,25 @@ def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
             continue
         g = guruh.setdefault(kalit, {"atama": xom, "n_mahsulot": 0})
         g["n_mahsulot"] += 1
+
+    # --- ALLAQACHON QAROR QILINGAN ATAMALAR NAVBATDAN CHIQADI ---
+    #
+    # O'lchandi (2026-08-30): `talabsiz` yoki `otkazildi` qarori KOD
+    # bermaydi, ya'ni mahsulotlar kodsiz qoladi va atama keyingi
+    # yuklashda navbatga QAYTARDI — o'sha joyda, o'sha tartibda.
+    # Navbat hech qachon tugamasdi va har takror bosish `kod_qaror` ga
+    # YANGI qator qo'yardi: bir atamani uch marta "o'tkazish" ->
+    # `qaror_soni = 3`. Ya'ni "40 qaror" maqsadiga bir tugmani qayta
+    # bosib ham yetish mumkin edi va hech qanday xato chiqmasdi.
+    #
+    # Endi qaror qilingan atama ko'rsatilmaydi. LEKIN U YO'QOLMAYDI:
+    # o'z toifasida sanaladi va `toifa_yigindi` ga kiradi — qoldiqsiz
+    # toifalash qoidasi shu yerda ham amal qiladi.
+    qaror_kalit = {r["kalit"] for r in db.query(
+        "SELECT DISTINCT kalit FROM kod_qaror "
+        "WHERE company_id = %(c)s AND qaror IS NOT NULL", {"c": company_id})}
+    qaror_qilingan = [(k, g) for k, g in guruh.items() if k in qaror_kalit]
+    guruh = {k: g for k, g in guruh.items() if k not in qaror_kalit}
 
     # --- KORPUSDAGI TALAB o'lchanadi ---
     #
@@ -896,6 +936,13 @@ def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
             "takliflar": [{
                 "code": x["code"],
                 "name_ru": x["name_ru"],
+                # SKOR ham beriladi: qaror paytida u `kod_qaror.
+                # taklif_skor` ga yozib olinadi va "mashina qanchalik
+                # ishonchli edi" degan savolga javob beradi. Busiz
+                # kelishuv foizi bor-yo'g'i "to'g'ri/noto'g'ri"
+                # bo'lardi, ishonch darajasi bo'yicha kesib
+                # bo'lmasdi.
+                "skor": x.get("skor"),
                 "n_tender_open": x["n_tender_open"],
                 # DALIL — qarorning asosi. Kod nomi begona bo'lishi
                 # mumkin, pozitsiyalar esa tanish.
@@ -917,6 +964,15 @@ def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
         "turi_aniqmas": [{"id": x["id"], "name": x["name"]}
                          for x in aniqmas[:20]],
         "turi_aniqmas_jami": len(aniqmas),
+        # QAROR QILINGAN — inson allaqachon ko'rgan. Ular navbatda
+        # ko'rsatilmaydi (aks holda navbat tugamasdi), lekin YO'QOLMAYDI:
+        # yig'indiga kiradi va bu yerda sanaladi. Kodi bo'lmagani uchun
+        # mahsulotlari hali kodsiz — bu HOLAT, xato emas ('talabsiz' va
+        # 'otkazildi' ataylab kod bermaydi).
+        "qaror_qilingan": [{"kalit": k, "atama": g["atama"],
+                            "n_mahsulot": g["n_mahsulot"]}
+                           for k, g in qaror_qilingan[:20]],
+        "qaror_qilingan_jami": len(qaror_qilingan),
         # QOLDIQSIZ TOIFALASH — yig'indi JAMIGA teng.
         #
         # Bu umumiy qoida, alohida holat emas: har toifalashda QOLDIQ
@@ -930,6 +986,7 @@ def navbat(company_id: int, limit: int = NAVBAT_LIMIT,
             sum(g["n_mahsulot"] for _k, g in tanlangan)
             + sum(g["n_mahsulot"] for _k, g in qolgan_koriladigan)
             + sum(g["n_mahsulot"] for _k, g in talabsiz)
+            + sum(g["n_mahsulot"] for _k, g in qaror_qilingan)
             + len(aniqmas)),
     }
 
@@ -1065,9 +1122,13 @@ def qaror_ochish(company_id: int, kalit: str, atama: str) -> Dict[str, Any]:
     indeks buni majburlaydi), aks holda `qidiruv_soni` bo'linib
     ketardi.
     """
+    # `ochilgan_at` ANIQ yoziladi. Ustunning DEFAULT i ataylab olib
+    # tashlangan (schema_patch_kod_qaror_2.sql): NULL endi "o'lchanmadi"
+    # degani va uni faqat SHU funksiya to'ldiradi. Aks holda har qanday
+    # INSERT jimgina `now()` qo'yib, o'tgan vaqtni 0 qilardi.
     row = db.execute_returning(
-        "INSERT INTO kod_qaror (company_id, kalit, atama) "
-        "VALUES (%(c)s, %(k)s, %(a)s) "
+        "INSERT INTO kod_qaror (company_id, kalit, atama, ochilgan_at) "
+        "VALUES (%(c)s, %(k)s, %(a)s, now()) "
         "ON CONFLICT (company_id, kalit) WHERE qaror IS NULL "
         "  DO UPDATE SET atama = EXCLUDED.atama "
         "RETURNING id, ochilgan_at, qidiruv_soni",
@@ -1075,48 +1136,137 @@ def qaror_ochish(company_id: int, kalit: str, atama: str) -> Dict[str, Any]:
     return row or {}
 
 
-def qaror_qidiruv(company_id: int, kalit: str) -> int:
-    """Qidiruv qilindi — sanoqni oshiradi. Qaytadi: yangi son."""
+def qaror_qidiruv(company_id: int, kalit: str,
+                  soz: Optional[str] = None) -> int:
+    """Qidiruv qilindi — sanoqni oshiradi. Qaytadi: yangi son.
+
+    `soz` ham saqlanadi: `qidiruv_soni` "nechta marta qidirdi" deydi,
+    `qidiruv_sozi` esa "NIMANI qidirdi". Ikkinchisisiz qaror sababini
+    keyin tiklab bo'lmaydi — "turniket" deb qidirib 26.30 ni topgan
+    inson bilan hech nima qidirmagan inson bir xil ko'rinardi.
+    """
     row = db.execute_returning(
-        "UPDATE kod_qaror SET qidiruv_soni = qidiruv_soni + 1 "
+        "UPDATE kod_qaror SET qidiruv_soni = qidiruv_soni + 1, "
+        "       qidiruv_sozi = COALESCE(NULLIF(btrim(%(s)s), ''), qidiruv_sozi) "
         "WHERE company_id = %(c)s AND kalit = %(k)s AND qaror IS NULL "
         "RETURNING qidiruv_soni",
-        {"c": company_id, "k": kalit})
+        {"c": company_id, "k": kalit, "s": soz})
     return (row or {}).get("qidiruv_soni") or 0
+
+
+#: Ruxsat etilgan qaror turlari. Baza CHECK i bilan AYNAN mos
+#: bo'lishi shart (`kod_qaror_turi`) — ikki joyda ikki lug'at
+#: bo'lsa biri jimgina eskiradi.
+QARORLAR = ("kod", "talabsiz", "dalilsiz", "otkazildi")
+
+#: `dalil` JSON ning yuqori chegarasi (bayt). Chegara bor, chunki
+#: mijoz istalgan hajmni yuborishi mumkin va `kod_qaror` har qaror
+#: uchun bitta qator — cheksiz JSON jadvalni shishirardi.
+DALIL_MAX = 64 * 1024
 
 
 def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
               kim: str, code: Optional[str] = None,
-              manba: Optional[str] = None) -> Dict[str, Any]:
-    """Qarorni yozadi. `qaror`: 'kod' | 'talabsiz' | 'otkazildi'.
+              manba: Optional[str] = None,
+              dalil: Optional[Dict[str, Any]] = None,
+              taklif_code: Optional[str] = None,
+              taklif_skor: Optional[float] = None,
+              rad_takliflar: Optional[Sequence[str]] = None,
+              qoshimcha_kod: bool = False,
+              izoh: Optional[str] = None) -> Dict[str, Any]:
+    """INSON qarorini yozadi. `qaror`: kod | talabsiz | dalilsiz | otkazildi.
 
     Ochiq qator bo'lsa u YAKUNLANADI (vaqt va qidiruv soni saqlanadi).
     Bo'lmasa — YANGI yakunlangan qator (bir atamaga IKKINCHI kod
     berilgan holat; `UNIQUE(kalit)` ataylab yo'q).
+
+    ZAXIRA YO'LDA `ochilgan_at` NULL QOLADI — ya'ni "O'LCHANMADI".
+    Ilgari ustunda `DEFAULT now()` bor edi va bu qator
+    `ochilgan_at = qaror_at` bo'lib "0 soniya ketdi" deb o'qilardi.
+    O'lchandi: uchta sinov qarordan keyin `ortacha_sek = 0` chiqdi,
+    holbuki hech qaysi qarorning vaqti o'lchanmagan edi. Nol —
+    o'lchov, NULL — o'lchov yo'qligi; ikkisi aralashmasin.
+
+    DALIL NEGA SAQLANADI: qarorning o'zi ML uchun YETARLI EMAS.
+    "Кабель -> 27.32" degan yorliq, inson NIMA KO'RIB shunday
+    deganini bilmasdan, o'rgatish uchun yaroqsiz. `dalil` ekranda
+    ko'rsatilgan takliflar, qidiruv natijasi va korpus raqamlarini
+    saqlaydi.
     """
     if not (kim or "").strip():
         raise ValueError("kim bo'sh bo'la olmaydi")
+    if qaror not in QARORLAR:
+        raise ValueError(
+            f"noma'lum qaror: {qaror!r}. Ruxsat etilgan: {', '.join(QARORLAR)}")
+
+    # BO'SH KODNI TASODIFAN TASDIQLASH — ANIQ XATO BERADI.
+    # Baza ham to'sadi (`kod_qaror_kod_mos` + `kod_qaror_code_bosh_emas`
+    # + FK), lekin u yerdan kelgan xabar brokerga tushunarsiz bo'lardi.
+    code = (code or "").strip() or None
+    if qaror == "kod" and not code:
+        raise ValueError(
+            "'kod' qarori uchun KOD SHART — bo'sh kod bilan tasdiqlab "
+            "bo'lmaydi")
+    if qaror != "kod" and code:
+        raise ValueError(
+            f"{qaror!r} qarorida kod bo'lmaydi (kod berildi: {code!r})")
+    if qoshimcha_kod and qaror != "kod":
+        raise ValueError("qo'shimcha kod faqat 'kod' qarorida bo'ladi")
+
+    taklif_code = (taklif_code or "").strip() or None
+    if taklif_skor is not None and taklif_code is None:
+        taklif_skor = None
+
+    rad = [str(x).strip() for x in (rad_takliflar or []) if str(x).strip()]
+    # Tanlangan kod "rad etilgan" ro'yxatida turmasin — o'qib
+    # bo'lmaydigan qator bo'lardi.
+    rad = sorted({x for x in rad if x != code}) or None
+
+    d_json = None
+    if dalil is not None:
+        matn = json.dumps(dalil, ensure_ascii=False)
+        if len(matn.encode("utf-8")) > DALIL_MAX:
+            # KESMAYMIZ va JIMGINA TASHLAMAYMIZ: yarim dalil to'liq
+            # dalildek ko'rinardi. Aniq xato — mijoz kichraytirsin.
+            raise ValueError(
+                f"dalil juda katta ({len(matn)} belgi), chegara {DALIL_MAX} bayt")
+        d_json = matn
+
+    umumiy = {"c": company_id, "k": kalit, "a": atama, "q": qaror,
+              "kod": code, "m": manba, "kim": kim.strip(),
+              "d": d_json, "tc": taklif_code, "ts": taklif_skor,
+              "rad": rad, "qk": bool(qoshimcha_kod),
+              "izoh": (izoh or "").strip()[:1000] or None}
+
     row = db.execute_returning(
         "UPDATE kod_qaror SET qaror=%(q)s, code=%(kod)s, manba=%(m)s, "
-        "       kim=%(kim)s, qaror_at=now() "
+        "       kim=%(kim)s, qaror_at=now(), dalil=%(d)s::jsonb, "
+        "       taklif_code=%(tc)s, taklif_skor=%(ts)s, "
+        "       rad_takliflar=%(rad)s, qoshimcha_kod=%(qk)s, izoh=%(izoh)s "
         "WHERE company_id=%(c)s AND kalit=%(k)s AND qaror IS NULL "
-        "RETURNING id, ochilgan_at, qaror_at, qidiruv_soni",
-        {"c": company_id, "k": kalit, "q": qaror, "kod": code,
-         "m": manba, "kim": kim.strip()})
+        "RETURNING id, ochilgan_at, qaror_at, qidiruv_soni, qidiruv_sozi",
+        umumiy)
     if row:
         return row
     return db.execute_returning(
         "INSERT INTO kod_qaror (company_id, kalit, atama, qaror, code, "
-        "                       manba, kim, qaror_at) "
-        "VALUES (%(c)s, %(k)s, %(a)s, %(q)s, %(kod)s, %(m)s, %(kim)s, now()) "
-        "RETURNING id, ochilgan_at, qaror_at, qidiruv_soni",
-        {"c": company_id, "k": kalit, "a": atama, "q": qaror,
-         "kod": code, "m": manba, "kim": kim.strip()}) or {}
+        "                       manba, kim, qaror_at, dalil, taklif_code, "
+        "                       taklif_skor, rad_takliflar, qoshimcha_kod, izoh) "
+        "VALUES (%(c)s, %(k)s, %(a)s, %(q)s, %(kod)s, %(m)s, %(kim)s, now(), "
+        "        %(d)s::jsonb, %(tc)s, %(ts)s, %(rad)s, %(qk)s, %(izoh)s) "
+        "RETURNING id, ochilgan_at, qaror_at, qidiruv_soni, qidiruv_sozi",
+        umumiy) or {}
 
 
 def atamaga_kod_biriktir(company_id: int, kalit: str, code: str,
-                         kim: str) -> int:
+                         kim: str, qaror_id: Optional[int] = None) -> int:
     """Kalitga tegishli MAHSULOTLARGA kodni biriktiradi. Qaytadi: soni.
+
+    `qaror_id` — AUDIT IZI: bu biriktirma QAYSI inson qaroridan
+    kelgani. Ilgari `catalog_product_code` da faqat `tasdiqlagan`
+    (ism) bor edi va "bu kod qayerdan keldi" degan savolga javob
+    yo'q edi — mavjud 960 qator aynan shu holatda
+    (`tasdiqlagan='kompaniya'`, ya'ni na foydalanuvchi, na skript).
 
     Qaror darhol kuchga kirsin — broker natijani o'sha yurishda
     ko'rsin, keyingi ETL ni kutmasin.
@@ -1140,23 +1290,55 @@ def atamaga_kod_biriktir(company_id: int, kalit: str, code: str,
         if _atama.normal(xom) != kalit:
             continue
         taklif_yoz(company_id, p["id"], [{"code": code, "skor": None}])
-        if tasdiqla(company_id, p["id"], code, kim=kim):
+        if tasdiqla(company_id, p["id"], code, kim=kim, qaror_id=qaror_id):
             n += 1
     return n
 
 
 def qaror_olchov(company_id: int) -> Dict[str, Any]:
-    """Uch savolning javobi — 40 qarordan keyin o'qiladi."""
+    """Pilot o'lchovi — FAQAT haqiqiy inson harakatidan hisoblanadi.
+
+    `v_kod_qaror_olchov` da har raqam `qaror IS NOT NULL` sharti
+    ostida: ochilgan-u qaror qilinmagan qator hech qayerda
+    sanalmaydi. Aynan shu chalkashlik 2026-08-30 da "40 qaror"
+    degan soxta raqam bergan edi (aslida 40 ta RENDER).
+    """
     return db.query_one(
         "SELECT * FROM v_kod_qaror_olchov WHERE company_id = %(c)s",
         {"c": company_id}) or {}
+
+
+def pilot_holati(company_id: int) -> Dict[str, Any]:
+    """40 ta ATAMA qaroriga qancha qolgani.
+
+    MAQSAD ATAMA BO'YICHA, qator bo'yicha EMAS: bir atamaga ikkinchi
+    kod berish ikki qator yaratadi va qator bo'yicha sanash maqsadni
+    SOXTA yaqinlashtirardi.
+    """
+    return db.query_one(
+        "SELECT * FROM v_kod_pilot WHERE company_id = %(c)s",
+        {"c": company_id}) or {}
+
+
+def qaror_tafsil(company_id: int, limit: int = 500) -> List[Dict[str, Any]]:
+    """Har qaror dalili bilan — ML to'plamining XOM manbai.
+
+    Hech qanday qoida qo'llanmaydi va qo'llanmasligi kerak: birinchi
+    40 qarorning maqsadi O'LCHASH, qoida chiqarish EMAS.
+    """
+    return db.query(
+        "SELECT * FROM v_kod_qaror_tafsil WHERE company_id = %(c)s "
+        "ORDER BY qaror_at DESC LIMIT %(l)s",
+        {"c": company_id, "l": limit})
 
 
 def qarorlar(company_id: int, limit: int = 200) -> List[Dict[str, Any]]:
     """Qabul qilingan qarorlar — ekranda qaysi atama bajarilganini
     ko'rsatish uchun."""
     return db.query(
-        "SELECT kalit, atama, qaror, code, manba, qidiruv_soni, qaror_at "
+        "SELECT kalit, atama, qaror, code, manba, qidiruv_soni, qidiruv_sozi, "
+        "       taklif_code, qoshimcha_kod, rad_takliflar, "
+        "       (dalil IS NOT NULL) AS dalil_bor, qaror_at "
         "FROM kod_qaror WHERE company_id = %(c)s AND qaror IS NOT NULL "
         "ORDER BY qaror_at DESC LIMIT %(l)s",
         {"c": company_id, "l": limit})

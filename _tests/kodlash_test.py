@@ -30,10 +30,19 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except (AttributeError, ValueError):                   # pragma: no cover
-    pass
+# KONSOL KODLASHI — Windows kod sahifasidan MUSTAQIL UTF-8.
+#
+# Chiqish QUVUR yoki FAYLGA yo'naltirilganda (ya'ni CI da) Python
+# `locale.getpreferredencoding()` ni oladi — bu mashinada `cp1251`.
+# O'zbek kirill (`ҳ`, `қ`, `ў`) va to'liq kenglikdagi belgilar
+# (`）`) u yerda YO'Q va chop etish `UnicodeEncodeError` bilan
+# BUTUN TO'PLAMNI o'ldiradi. `import_test` aynan shu sababdan
+# 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import konsol  # noqa: E402
+
+konsol.sozla()
+
 
 _results = []
 
@@ -234,6 +243,81 @@ def test_sxema_qulflari():
     check("markazlangan vektor markazni YOZIB BORADI",
           "tender_embedding_c_needs_centroid" in sql2)
     check("eskirganlik ko'rinishi bor", "v_centroid_stale" in sql2)
+
+
+def test_qaror_sxema_qulflari():
+    """`kod_qaror` sxemasining qulflari — MATN bo'yicha.
+
+    Bu sinov shu sababli bor: birinchi patch (`schema_patch_kod_qaror.sql`)
+    hech qanday sinovda tekshirilmasdi. Uni ochib qo'yish, CHECK ni
+    olib tashlash yoki ko'rinishni buzish HECH QANDAY sinovni
+    yiqitmasdi — 67/67 yashil qolardi.
+
+    NASR EMAS, KOD skanerlanadi: izoh qatorlari olib tashlanadi, aks
+    holda skaner o'z tushuntirishini "qulf bor" deb o'qirdi.
+    """
+    section("A. kod_qaror sxema qulflari")
+
+    def kodsiz(matn: str) -> str:
+        """`--` izohlarini olib tashlaydi (satr ichidagisini ham)."""
+        return "\n".join(q.split("--")[0] for q in matn.splitlines())
+
+    p1 = os.path.join(ROOT, "schema_patch_kod_qaror.sql")
+    p2 = os.path.join(ROOT, "schema_patch_kod_qaror_2.sql")
+    check("ikkinchi patch mavjud", os.path.exists(p2), p2)
+    if not os.path.exists(p2):
+        return
+    s1 = kodsiz(open(p1, encoding="utf-8").read())
+    s2 = kodsiz(open(p2, encoding="utf-8").read())
+
+    # --- Birinchi patchning qulflari joyida ---
+    check("qaror ODAMSIZ yozilmaydi (CHECK)",
+          "kod_qaror_odam" in s1 and "kim IS NOT NULL" in s1)
+    check("'kod' qarorida kod BOR, boshqasida YO'Q (CHECK)",
+          "kod_qaror_kod_mos" in s1
+          and "(qaror = 'kod') = (code IS NOT NULL)" in s1)
+    check("bir atamaga BITTA ochiq qator (qisman UNIQUE indeks)",
+          "kod_qaror_ochiq_uq" in s1 and "WHERE qaror IS NULL" in s1)
+
+    # --- Ikkinchi patch: "o'lchanmadi" != "0 soniya" ---
+    check("ochilgan_at NULL bo'la oladi (o'lchanmadi ifodalanadi)",
+          "ALTER COLUMN ochilgan_at DROP NOT NULL" in s2)
+    check("DEFAULT now() olib tashlangan",
+          "ALTER COLUMN ochilgan_at DROP DEFAULT" in s2,
+          "default qolsa har INSERT jimgina 0 soniya yozardi")
+    check("ochiq qatorda soat MAJBURIY (CHECK)", "kod_qaror_ochiq_soat" in s2)
+    check("qaror ochilishdan oldin bo'lmaydi (CHECK)",
+          "kod_qaror_vaqt_tartibi" in s2)
+    # O'rtacha O'LCHANMAGAN qatorni nol deb sanamasin.
+    check("ortacha_sek FAQAT o'lchangan qatorlar bo'yicha",
+          re.search(r"avg\(extract.*?FILTER \(WHERE qaror IS NOT NULL\s*"
+                    r"AND ochilgan_at IS NOT NULL\)", s2, re.S) is not None,
+          "filtrsiz bo'lsa o'lchanmagan qator o'rtachani nolga tortadi")
+    check("o'lchanmaganlar alohida sanaladi", "AS olchovsiz" in s2)
+    check("takror bosish ajratiladi (atama_soni)",
+          "AS atama_soni" in s2 and "count(DISTINCT kalit)" in s2)
+
+
+def test_navbat_qaror_filtri_kodda():
+    """`navbat()` `kod_qaror` ni O'QIYDI — statik tekshiruv.
+
+    Kimdir filtrni olib tashlasa navbat yana tugamas holga qaytardi.
+    Dinamik sinov bazani talab qiladi, bu esa CI da doim yuriladi.
+    """
+    section("A. Navbat qaror filtri")
+    import inspect
+    from api import kodlash
+
+    src = inspect.getsource(kodlash.navbat)
+    # IZOHLAR OLIB TASHLANADI: aks holda skaner o'z tushuntirishidagi
+    # "kod_qaror" so'zini topib, filtr bor deb yolg'on gapirardi.
+    kod = "\n".join(q.split("#")[0] for q in src.splitlines())
+    check("navbat() kod_qaror dan o'qiydi", "kod_qaror" in kod,
+          "izohsiz manbada topilmadi")
+    check("faqat QAROR QILINGANLARI (qaror IS NOT NULL)",
+          "qaror IS NOT NULL" in kod)
+    check("company_id bo'yicha filtrlaydi (ko'p-ijarachilik)",
+          "company_id = %(c)s" in kod)
 
 
 def test_moslik_sql_faol_korinishdan():
@@ -484,6 +568,144 @@ def test_kodsiz_korinadi(cid: int):
           or 0 <= h["qamrov_pct"] <= 100, str(h))
 
 
+def test_qaror_navbatni_kamaytiradi(cid: int):
+    """QAROR NAVBATNI KAMAYTIRADI — asosiy kafolat.
+
+    O'lchangan nosozlik (2026-08-30): `talabsiz`/`otkazildi` kod
+    BERMAYDI, ya'ni mahsulot kodsiz qoladi. `navbat()` esa faqat
+    "kodi yo'q" ni tekshirardi va atama keyingi yuklashda QAYTARDI —
+    o'sha joyda, o'sha tartibda. Navbat hech qachon tugamasdi.
+
+    Hech qanday istisno chiqmasdi va 67/67 sinov yashil edi. Shuning
+    uchun bu yerda "xato chiqmadi" emas, OLDIN/KEYIN SONI o'lchanadi.
+    """
+    section("B. Qaror navbatni kamaytiradi")
+    from api import db, kodlash
+
+    KIM = "zztest-qaror"
+    nav = kodlash.navbat(cid, limit=40, takliflar_bilan=False)
+    if not nav["atamalar"]:
+        check("sinov uchun navbatda atama bor", False, "navbat bo'sh")
+        return
+    a = nav["atamalar"][0]
+    k, atama = a["kalit"], a["atama"]
+    oldin = len(nav["atamalar"])
+    oldin_qq = nav["qaror_qilingan_jami"]
+
+    try:
+        kodlash.qaror_ochish(cid, k, atama)
+        kodlash.qaror_yoz(cid, k, atama, "otkazildi", kim=KIM)
+
+        nav2 = kodlash.navbat(cid, limit=40, takliflar_bilan=False)
+        kalitlar = [x["kalit"] for x in nav2["atamalar"]]
+        check("qaror qilingan atama navbatdan CHIQDI", k not in kalitlar,
+              f"{k!r} hali navbatda")
+        check("navbat qatori KAMAYDI yoki o'rniga boshqasi keldi",
+              k not in kalitlar and len(nav2["atamalar"]) <= oldin,
+              f"oldin={oldin} keyin={len(nav2['atamalar'])}")
+        # JIMGINA YO'QOLMASIN: qoldiqsiz toifalash shu yerda ham.
+        check("atama YO'QOLMADI — 'qaror_qilingan' toifasida",
+              nav2["qaror_qilingan_jami"] == oldin_qq + 1,
+              f"oldin={oldin_qq} keyin={nav2['qaror_qilingan_jami']}")
+        check("yig'indi HALI HAM jamiga teng",
+              nav2["jami_mahsulot"] == nav2["toifa_yigindi"],
+              f"jami={nav2['jami_mahsulot']} yig'indi={nav2['toifa_yigindi']}")
+
+        # --- TAKROR bosish qaror sonini SHISHIRMASIN (ko'rinadi) ---
+        kodlash.qaror_yoz(cid, k, atama, "otkazildi", kim=KIM)
+        o = kodlash.qaror_olchov(cid)
+        check("takror bosish `atama_soni` ni oshirmaydi",
+              (o.get("qaror_soni") or 0) > (o.get("atama_soni") or 0),
+              f"qaror_soni={o.get('qaror_soni')} atama_soni={o.get('atama_soni')}")
+    finally:
+        db.execute_returning(
+            "DELETE FROM kod_qaror WHERE kim = %(kim)s RETURNING id",
+            {"kim": KIM})
+        db.execute_returning(
+            "DELETE FROM kod_qaror WHERE company_id=%(c)s AND kalit=%(k)s "
+            "AND qaror IS NULL RETURNING id", {"c": cid, "k": k})
+
+
+def test_olchanmagan_vaqt_nol_emas(cid: int):
+    """O'LCHANMAGAN vaqt NOL deb sanalmaydi.
+
+    `qaror_yoz()` ochiq qator topmasa `ochilgan_at` NULL qoladi.
+    Ilgari ustunda `DEFAULT now()` bor edi va bunday qator
+    `ochilgan_at = qaror_at` bo'lib "0 soniya" deb o'qilardi —
+    o'lchandi: uchta qarordan keyin `ortacha_sek = 0`.
+    """
+    section("B. O'lchanmagan vaqt")
+    from api import db, kodlash
+
+    KIM = "zztest-vaqt"
+    K = "zztest atama kaliti"
+    try:
+        # OCHILISHSIZ qaror -> o'lchov YO'Q.
+        kodlash.qaror_yoz(cid, K, "ZZTEST atama", "otkazildi", kim=KIM)
+        r = db.query_one(
+            "SELECT ochilgan_at, qaror_at FROM kod_qaror "
+            "WHERE company_id=%(c)s AND kalit=%(k)s", {"c": cid, "k": K})
+        check("ochilishsiz qarorda ochilgan_at NULL (o'lchanmadi)",
+              r is not None and r["ochilgan_at"] is None,
+              str(r))
+        o = kodlash.qaror_olchov(cid)
+        check("o'lchovsiz qator alohida sanaladi",
+              (o.get("olchovsiz") or 0) >= 1, str(o.get("olchovsiz")))
+        check("o'lchovsiz qator o'rtachaga QO'SHILMADI",
+              (o.get("olchangan") or 0) == 0 and o.get("ortacha_sek") is None,
+              f"olchangan={o.get('olchangan')} ortacha={o.get('ortacha_sek')}")
+
+        # Endi OCHIB qaror qilamiz -> o'lchov BOR va u nol emas.
+        db.execute_returning("DELETE FROM kod_qaror WHERE kim=%(kim)s "
+                             "RETURNING id", {"kim": KIM})
+        kodlash.qaror_ochish(cid, K, "ZZTEST atama")
+        ochiq = db.query_one("SELECT ochilgan_at FROM kod_qaror "
+                             "WHERE company_id=%(c)s AND kalit=%(k)s",
+                             {"c": cid, "k": K})
+        check("ochilgan qatorda soat ISHGA TUSHDI",
+              ochiq is not None and ochiq["ochilgan_at"] is not None)
+
+        # QIDIRUV SANOG'I ochiq qatorga tushadi.
+        n = kodlash.qaror_qidiruv(cid, K)
+        check("qidiruv sanog'i ochiq qatorga yozildi", n == 1, str(n))
+
+        kodlash.qaror_yoz(cid, K, "ZZTEST atama", "talabsiz", kim=KIM)
+        o2 = kodlash.qaror_olchov(cid)
+        check("ochilgan qaror O'LCHANDI", (o2.get("olchangan") or 0) >= 1,
+              str(o2.get("olchangan")))
+        check("qidiruv soni SAQLANDI (talabsiz qidiruvli)",
+              (o2.get("talabsiz_qidiruvli") or 0) >= 1, str(o2))
+    finally:
+        db.execute_returning(
+            "DELETE FROM kod_qaror WHERE kim=%(kim)s OR kalit=%(k)s "
+            "RETURNING id", {"kim": KIM, "k": K})
+
+
+def test_ochiq_soat_qulfi(cid: int):
+    """OCHIQ qator soatsiz yozilmasin — CHECK majburlaydi.
+
+    `qaror_ochish()` ni chetlab o'tgan kod ochiq qator yaratsa, keyingi
+    qaror uchun vaqt yana jimgina o'lchanmasdi.
+    """
+    section("B. Ochiq qator soat qulfi")
+    from api import db
+
+    K = "zztest soat kaliti"
+    xato = None
+    try:
+        db.execute_returning(
+            "INSERT INTO kod_qaror (company_id, kalit, atama, ochilgan_at) "
+            "VALUES (%(c)s, %(k)s, 'ZZTEST', NULL) RETURNING id",
+            {"c": cid, "k": K})
+    except Exception as e:                                   # noqa: BLE001
+        xato = str(e)
+    check("soatsiz OCHIQ qator rad etildi (CHECK ushladi)",
+          xato is not None and "ochiq_soat" in (xato or ""),
+          xato or "yozildi!")
+    db.execute_returning("DELETE FROM kod_qaror WHERE kalit=%(k)s RETURNING id",
+                         {"k": K})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--offline", action="store_true", help="Faqat statik qism")
@@ -496,6 +718,8 @@ def main() -> int:
     test_product_matches()
     test_atribut()
     test_sxema_qulflari()
+    test_qaror_sxema_qulflari()
+    test_navbat_qaror_filtri_kodda()
     test_moslik_sql_faol_korinishdan()
     test_semantik_hublik()
 
@@ -511,6 +735,9 @@ def main() -> int:
             test_navbat_qoldiqsiz(args.company)
             test_qidiruv_ijarachi(args.company)
             test_kodsiz_korinadi(args.company)
+            test_qaror_navbatni_kamaytiradi(args.company)
+            test_olchanmagan_vaqt_nol_emas(args.company)
+            test_ochiq_soat_qulfi(args.company)
         except Exception as e:                               # noqa: BLE001
             # BAZA YO'QLIGI SINOVNI "O'TDI" QILMASIN.
             check("dinamik qism yurdi", False, f"{type(e).__name__}: {e}")
