@@ -489,13 +489,90 @@ def gate(request: Request,
     request.state.service = False
 
 
+# --- SWAGGER ISHLAB CHIQARISHDA YOPIQ ------------------------------------
+# `/docs`, `/openapi.json`, `/redoc` `PUBLIC_PATHS` da — ya'ni ular
+# TOKENSIZ ochiladi va BUTUN API yuzasini (har endpoint, har maydon)
+# ko'rsatadi. Ishlab chiqishda bu qulay, ishlab chiqarishda esa bu
+# hujumchiga tayyor xarita.
+#
+# Standart YOPIQ. Ochish uchun ANIQ `API_DOCS=1` kerak — "sozlamani
+# unutib qoldirish" xavfsiz tomonga tushsin.
+API_DOCS = os.environ.get("API_DOCS", "0").strip().lower() in ("1", "true", "yes")
+
 app = FastAPI(
     title="xt-xarid Tender Aggregator API",
     version="0.1.0",
     description="O'zbekiston davlat xaridlari agregatori — backend API (3-bosqich).",
     lifespan=lifespan,
     dependencies=[Depends(gate)],
+    docs_url="/docs" if API_DOCS else None,
+    redoc_url="/redoc" if API_DOCS else None,
+    openapi_url="/openapi.json" if API_DOCS else None,
 )
+
+
+# ---------------------------------------------------------------------------
+# XAVFSIZLIK SARLAVHALARI
+#
+# O'LCHANGAN HOLAT (2026-08-31): javoblarda BIRORTA ham xavfsizlik
+# sarlavhasi yo'q edi — `X-Content-Type-Options`, `X-Frame-Options`,
+# `Referrer-Policy`, CSP, HSTS — hech biri.
+#
+# HAR SARLAVHA NIMANI TO'SADI:
+#   nosniff        — brauzer JSON ni HTML deb "taxmin qilib" ijro
+#                    etmasin. `/documents/.../download` yuqori oqim
+#                    `Content-Type` ini o'tkazadi (`attachment` bilan),
+#                    bu ikkinchi qatlam.
+#   frame-ancestors— clickjacking. `X-Frame-Options` eski brauzerlar
+#                    uchun, CSP esa zamonaviylari uchun — IKKALASI ham
+#                    qo'yiladi, chunki ular har xil brauzerda ishlaydi.
+#   Referrer-Policy— manzildagi id lar tashqi saytga ketmasin.
+#   CSP            — bu API JSON qaytaradi, shuning uchun `default-src
+#                    'none'` XAVFSIZ. Swagger yoqilganda unga JS kerak,
+#                    shuning uchun o'sha yo'llarga CSP QO'YILMAYDI —
+#                    aks holda sahifa buzilib, "CSP bor" degan yolg'on
+#                    taassurot qolardi.
+#
+# HSTS ATAYLAB STANDART O'CHIQ. Uni yoqish domenni HTTPS ga QULFLAYDI
+# (brauzer `max-age` davomida HTTP ga umuman bormaydi). TLS hali
+# sozlanmagan muhitda bu saytni YO'Q QILADI. Shuning uchun u ANIQ
+# `HSTS_MAX_AGE` bilan yoqiladi va odatda TLS terminatorida (nginx /
+# Caddy) qo'yiladi — `docs/xavfsizlik.md` §3.
+HSTS_MAX_AGE = int(os.environ.get("HSTS_MAX_AGE", "0") or 0)
+
+#: Swagger ishlaganda unga CSP qo'yilmaydi (CDN dan JS/CSS oladi).
+_CSP_ISTISNO = ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
+
+_XAVFSIZLIK_SARLAVHALARI = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    # Bu API brauzer qurilmalariga MUHTOJ EMAS — hammasi o'chiriladi.
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=(), "
+                          "payment=(), usb=(), interest-cohort=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
+
+#: JSON API uchun ENG QAT'IY siyosat: hech narsa yuklanmaydi, hech kim
+#: freym ichiga olmaydi, forma yuborilmaydi.
+_CSP = ("default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'none'; sandbox")
+
+
+@app.middleware("http")
+async def xavfsizlik_sarlavhalari(request: Request, call_next):
+    javob = await call_next(request)
+    for k, v in _XAVFSIZLIK_SARLAVHALARI.items():
+        javob.headers.setdefault(k, v)
+    if request.url.path not in _CSP_ISTISNO:
+        javob.headers.setdefault("Content-Security-Policy", _CSP)
+    # HSTS FAQAT HTTPS da ma'noli va faqat ANIQ yoqilganda.
+    if HSTS_MAX_AGE > 0:
+        javob.headers.setdefault(
+            "Strict-Transport-Security",
+            f"max-age={HSTS_MAX_AGE}; includeSubDomains")
+    return javob
 
 # CORS — .env dagi CORS_ORIGINS bo'sh bo'lmasa yoqiladi (frontend ulanganда)
 _cors = os.environ.get("CORS_ORIGINS", "").strip()
@@ -520,9 +597,21 @@ if _cors:
 # DB mavjud emasligini 503 ga aylantiramiz
 @app.exception_handler(db.DBUnavailable)
 async def _db_unavailable_handler(request, exc: db.DBUnavailable):
+    """Baza yetib bo'lmadi.
+
+    TAFSILOT MIJOZGA CHIQMAYDI. psycopg2 ning ulanish xatosi HOST,
+    PORT va FOYDALANUVCHI nomini o'z ichiga oladi
+    (`connection to server at "localhost" (::1), port 5432 failed:
+    ... user "postgres"`). Ilgari u to'g'ridan-to'g'ri javobga
+    tushardi va bu infratuzilma xaritasini oshkor qilardi.
+
+    Tafsilot SERVER jurnaliga yoziladi — u yerda kerak, mijozda emas.
+    """
+    logging.getLogger("api").error("DB yetib bo'lmadi: %s", exc)
     return JSONResponse(
         status_code=503,
-        content={"error": "database_unavailable", "detail": str(exc)},
+        content={"error": "database_unavailable",
+                 "detail": "Ma'lumotlar bazasi vaqtincha mavjud emas."},
     )
 
 
@@ -1647,6 +1736,36 @@ def tender_documents_text(
 MAX_IMPORT_MB = 5
 
 
+def _yuklangani(file: UploadFile, max_mb: int = MAX_IMPORT_MB) -> bytes:
+    """Yuklangan faylni CHEGARANI OSHIRMASDAN o'qiydi.
+
+    ILGARIGI XATO: `data = file.file.read()` — BUTUN fayl xotiraga
+    o'qilar, CHEGARA esa SHUNDAN KEYIN tekshirilardi. Ya'ni 5 GB
+    yuborilsa server chegarani tekshirishga YETIB BORMASDAN xotirani
+    tugatardi. Chegara bor edi, lekin u KECH ishlardi.
+
+    Endi bo'laklab o'qiladi va chegaradan oshgan ZAHOTI to'xtaydi:
+    xotiraga eng ko'pi bilan `max_mb + 1 bo'lak` tushadi.
+
+    Starlette `UploadFile` ni diskka spool qiladi, ya'ni bu yerdagi
+    himoya "xotira" uchun; TARMOQ darajasidagi chegara (nginx
+    `client_max_body_size`) infratuzilma vazifasi —
+    `docs/xavfsizlik.md` §5.
+    """
+    chegara = max_mb * 1024 * 1024
+    bolaklar, jami = [], 0
+    while True:
+        b = file.file.read(1024 * 1024)
+        if not b:
+            break
+        jami += len(b)
+        if jami > chegara:
+            raise HTTPException(
+                status_code=413, detail=f"Fayl {max_mb} MB dan katta.")
+        bolaklar.append(b)
+    return b"".join(bolaklar)
+
+
 @app.post("/catalog/import")
 def catalog_import(
     request: Request,
@@ -1655,10 +1774,7 @@ def catalog_import(
 ):
     """Format xatolari QATOR BO'YICHA qaytadi: bitta qatordagi xato butun
     importni to'xtatmaydi. `dry_run=true` (default) bazaga umuman tegmaydi."""
-    data = file.file.read()
-    if len(data) > MAX_IMPORT_MB * 1024 * 1024:
-        raise HTTPException(status_code=413,
-                            detail=f"Fayl {MAX_IMPORT_MB} MB dan katta.")
+    data = _yuklangani(file)
     try:
         return importer.import_catalog(data, file.filename or "",
                                        company_id_of(request), dry_run=dry_run)
@@ -1852,10 +1968,7 @@ def company_documents_import(
     """To'ldirilgan shablonni yuklaydi. Katalog importi bilan bir xil
     shartnoma: xato BITTA QATORNI to'xtatadi, importni emas; `dry_run=true`
     (default) bazaga umuman tegmaydi."""
-    data = file.file.read()
-    if len(data) > MAX_IMPORT_MB * 1024 * 1024:
-        raise HTTPException(status_code=413,
-                            detail=f"Fayl {MAX_IMPORT_MB} MB dan katta.")
+    data = _yuklangani(file)
     try:
         return compliance.import_documents(data, file.filename or "",
                                            company_id_of(request),
@@ -1879,10 +1992,7 @@ def company_documents_parse(
 
     Javobdagi `rows` — tozalangan qatorlar (sanalar ISO satr ko'rinishida),
     chaqiruvchi ularni o'zi saqlaydi."""
-    data = file.file.read()
-    if len(data) > MAX_IMPORT_MB * 1024 * 1024:
-        raise HTTPException(status_code=413,
-                            detail=f"Fayl {MAX_IMPORT_MB} MB dan katta.")
+    data = _yuklangani(file)
     try:
         ok, report = compliance.parse_document_file(data, file.filename or "")
     except importer.ImportFormatError as e:

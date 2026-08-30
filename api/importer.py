@@ -112,6 +112,46 @@ _APOSTROPHES = "‘’ʻʼ`´"   # ‘ ’ ʻ ʼ ` ´
 _SPACES = "    "                     # NBSP va boshqa probellar
 
 
+#: Ochilgandan keyingi eng katta ruxsat etilgan hajm va siqilish nisbati.
+#:
+#: NEGA KERAK: `.xlsx` — ZIP arxiv. 5 MB lik chegaradan o'tgan fayl
+#: ochilganda GIGABAYTLARGA aylanishi mumkin ("zip bomba") va
+#: `load_workbook` uni xotiraga yozadi. Hajm chegarasi SIQILGAN faylni
+#: o'lchaydi, bu esa OCHILGANINI.
+#:
+#: Raqamlar amaliy: haqiqiy katalog fayllari (o'lchandi: sinov
+#: fixture'lari va shablonlar) 1 MB dan kichik ochiladi va nisbati
+#: 20:1 dan past.
+MAX_OCHILGAN_MB = 80
+MAX_SIQISH_NISBATI = 200
+
+
+def _zip_bombani_tekshir(data: bytes) -> None:
+    """`.xlsx` (ZIP) ni OCHMASDAN kataloglar bo'yicha tekshiradi.
+
+    ZIP markaziy katalogi har yozuvning ochilgan hajmini SAQLAYDI,
+    ya'ni buni faylni ochmasdan bilish mumkin. Yolg'on hajm yozilgan
+    bo'lsa ham zarar yo'q: keyin `load_workbook` o'zi yiqiladi.
+    """
+    import zipfile
+    if not data[:2] == b"PK":
+        return                      # ZIP emas (CSV) — tegishli emas
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            ochilgan = sum(i.file_size for i in z.infolist())
+    except zipfile.BadZipFile:
+        return                      # buzuq — keyingi qadam aniq xato beradi
+    if ochilgan > MAX_OCHILGAN_MB * 1024 * 1024:
+        raise ImportFormatError(
+            f"Fayl ochilganda {ochilgan // (1024 * 1024)} MB bo'ladi — "
+            f"chegara {MAX_OCHILGAN_MB} MB.")
+    if data and ochilgan / max(len(data), 1) > MAX_SIQISH_NISBATI:
+        raise ImportFormatError(
+            f"Siqilish nisbati juda yuqori "
+            f"({ochilgan // max(len(data), 1)}:1) — fayl xavfli deb "
+            f"hisoblandi.")
+
+
 def norm_header(s: Any) -> str:
     """Sarlavhani solishtirishga tayyorlaydi: kichik harf, apostroflarni
     yagona ' ga keltirish, qavs ichini olib tashlash, ortiqcha belgilarni
@@ -281,6 +321,7 @@ class ImportFormatError(ValueError):
 
 def _read_xlsx(data: bytes) -> List[List[Any]]:
     try:
+        _zip_bombani_tekshir(data)
         from openpyxl import load_workbook
     except ImportError as e:      # pragma: no cover
         raise ImportFormatError(

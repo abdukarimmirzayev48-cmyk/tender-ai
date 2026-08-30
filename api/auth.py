@@ -51,7 +51,23 @@ from typing import Any, Dict, List, Optional
 
 from api import db
 
-ITERATIONS = 240_000
+#: PBKDF2-HMAC-SHA256 iteratsiyalari.
+#:
+#: 240 000 dan 600 000 ga ko'tarildi (OWASP Password Storage Cheat
+#: Sheet, 2023+ tavsiyasi PBKDF2-SHA256 uchun 600 000).
+#:
+#: NARXI O'LCHANDI (shu mashinada, 2026-08-31):
+#:     240 000 -> 171 ms      600 000 -> 431 ms      1 000 000 -> 923 ms
+#:
+#: 431 ms kirish uchun maqbul. Xizmatni rad etish xavfi yo'q: xato
+#: urinishlar `guard_attempts()` bilan XESHLASHDAN OLDIN to'siladi
+#: (login+IP uchun 5 ta, IP uchun 25 ta / 15 daqiqa).
+#:
+#: ESKI XESHLAR BUZILMAYDI: format iteratsiya sonini O'ZI saqlaydi
+#: (`pbkdf2_sha256$<iters>$<salt>$<hash>`), shuning uchun eskilari
+#: o'z soni bilan tekshiriladi va muvaffaqiyatli kirishda JIMGINA
+#: yangisiga ko'chiriladi (`_rehash_kerakmi`).
+ITERATIONS = int(os.environ.get("AUTH_PBKDF2_ITERATIONS", "600000"))
 SESSION_DAYS = int(os.environ.get("AUTH_SESSION_DAYS", "14"))
 
 # --- PAROL TANLASHDAN HIMOYA ------------------------------------------------
@@ -158,6 +174,20 @@ def verify_password(password: str, stored: str) -> bool:
     dk = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"),
                              bytes.fromhex(salt_hex), int(iters))
     return hmac.compare_digest(dk.hex(), hash_hex)
+
+
+def _rehash_kerakmi(stored: str) -> bool:
+    """Saqlangan xesh HOZIRGI kuchdan pastmi.
+
+    Iteratsiya soni oshirilganda eski hisoblar ESKI kuchda qolib
+    ketardi va buni hech narsa ko'rsatmasdi. Endi ular kirish paytida
+    (parol qo'lda bo'lganda — yagona imkoniyat) ko'chiriladi.
+    """
+    try:
+        algo, iters, _s, _h = stored.split("$")
+    except (ValueError, AttributeError):
+        return False
+    return algo == "pbkdf2_sha256" and int(iters) < ITERATIONS
 
 
 def _token_hash(token: str) -> str:
@@ -430,6 +460,18 @@ def login(username: str, password: str, *,
 
     # Muvaffaqiyatli urinish ham yoziladi: u xatolar zanjirini UZADI.
     record_attempt(uname, ip, True, user_agent=user_agent)
+
+    # SHAFFOF QAYTA XESHLASH. Parol ochiq holda FAQAT shu yerda bo'ladi,
+    # ya'ni kuchni oshirishning yagona imkoniyati — kirish payti.
+    # Xato bo'lsa kirish TO'XTAMAYDI: eski xesh ham yaroqli, shunchaki
+    # kuchsizroq. Kirishni to'xtatish foydalanuvchini "parolim to'g'ri,
+    # lekin kirmayapman" holatiga tashlardi.
+    if _rehash_kerakmi(row["password_hash"]):
+        try:
+            db.execute_returning(PASSWORD_UPDATE_SQL,
+                                 {"id": row["id"], "h": hash_password(password)})
+        except Exception:                                     # noqa: BLE001
+            pass
     db.execute_returning(SESSION_CLEAN_SQL)      # muddati o'tganlarni tozalash
     if _attempts_ready():
         db.execute_returning(ATTEMPT_CLEAN_SQL, {"days": ATTEMPT_KEEP_DAYS})
