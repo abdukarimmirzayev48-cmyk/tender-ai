@@ -13,6 +13,11 @@ import type { Dict } from './uz'
 // ради экономии: длинная форма в узкой ячейке таблицы всё равно
 // обрезалась бы.
 export const ru: Dict = {
+  'app.catalogProductMatch': 'Тендеры именно для товара:',
+  'app.allCatalog': 'Весь каталог',
+  'app.matchedBy.code': 'Точное совпадение с позицией лота: {items}',
+  'cat.fNameNote': 'Укажите точный тип, например: «Компьютерный монитор».',
+  'cat.moreOptions': 'Дополнительные данные',
   // ── Общее ─────────────────────────────────────────────────────────────
   'common.save': 'Сохранить',
   'common.saving': 'Сохранение…',
@@ -329,6 +334,7 @@ export const ru: Dict = {
   'compliance.validUntil': 'действует до: {date}',
   'compliance.perpetual': 'бессрочно',
   'compliance.daysLeft': '(осталось {n} дн.)',
+  'compliance.expiresToday': '(истекает сегодня — ещё действует)',
   'compliance.daysAgo': '(истёк {n} дн. назад)',
   'compliance.addDoc': 'Добавить документ →',
   'compliance.renewDoc': 'Обновить →',
@@ -754,7 +760,7 @@ export const ru: Dict = {
   'req.growthBad': 'НЕ ХВАТАЕТ — очередь растёт ({q}/день)',
   'req.growthCold': 'конвейер новый — разовое заполнение, не темп',
   'req.items.title': 'Требования тендера',
-  'req.items.stats': 'Всего {jami} · ожидают {kutayotgan} · подтверждено {tasdiqlangan}',
+  'req.items.stats': 'Всего {jami} · в очереди {kutayotgan} · извлечено машиной {mashina} · подтверждено человеком {tasdiqlangan}',
   'req.items.empty': 'По этому тендеру требования не извлечены.',
   'req.mandatory': 'обязательное',
   'req.source': 'Источник',
@@ -774,6 +780,10 @@ export const ru: Dict = {
   'req.status.rejected': 'отклонено',
   'req.status.corrected': 'исправлено',
   'req.status.pending': 'ожидает',
+  'req.status.extracted': 'извлечено машиной — человек не смотрел',
+  'req.status.pending_review': 'ожидает человека',
+  'req.machine.manba': 'официальная запись реестра',
+  'req.machine.ajratilgan': 'извлечено из текста',
   'chat.title': 'AI-помощник',
   'chat.scope.tender': 'Контекст: тендер {id}',
   'chat.scope.global': 'Общий диалог',

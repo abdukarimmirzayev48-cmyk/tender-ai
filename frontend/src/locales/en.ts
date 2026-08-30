@@ -8,6 +8,11 @@ import type { Dict } from './uz'
 // English has two plural forms; where a count is prominent the `_one` /
 // `_other` keys below are picked by `Intl.PluralRules`.
 export const en: Dict = {
+  'app.catalogProductMatch': 'Tenders for this product:',
+  'app.allCatalog': 'Entire catalogue',
+  'app.matchedBy.code': 'Exact product line match: {items}',
+  'cat.fNameNote': 'Be specific, for example: “Computer monitor”.',
+  'cat.moreOptions': 'Additional details',
   // ── Common ────────────────────────────────────────────────────────────
   'common.save': 'Save',
   'common.saving': 'Saving…',
@@ -321,6 +326,7 @@ export const en: Dict = {
   'compliance.validUntil': 'valid until: {date}',
   'compliance.perpetual': 'no expiry',
   'compliance.daysLeft': '({n} days left)',
+  'compliance.expiresToday': '(expires today — still valid)',
   'compliance.daysAgo': '(expired {n} days ago)',
   'compliance.addDoc': 'Add document →',
   'compliance.renewDoc': 'Renew →',
@@ -747,7 +753,7 @@ export const en: Dict = {
   'req.growthBad': 'CAPACITY INSUFFICIENT — queue grows ({q}/day)',
   'req.growthCold': 'pipeline is new — one-off backfill, not a rate',
   'req.items.title': 'Tender requirements',
-  'req.items.stats': 'Total {jami} · pending {kutayotgan} · approved {tasdiqlangan}',
+  'req.items.stats': 'Total {jami} · in queue {kutayotgan} · machine-extracted {mashina} · human-approved {tasdiqlangan}',
   'req.items.empty': 'No requirements extracted for this tender.',
   'req.mandatory': 'mandatory',
   'req.source': 'Source',
@@ -767,6 +773,10 @@ export const en: Dict = {
   'req.status.rejected': 'rejected',
   'req.status.corrected': 'corrected',
   'req.status.pending': 'pending',
+  'req.status.extracted': 'machine-extracted — not reviewed',
+  'req.status.pending_review': 'awaiting human review',
+  'req.machine.manba': 'official registry record',
+  'req.machine.ajratilgan': 'extracted from text',
   'chat.title': 'AI assistant',
   'chat.scope.tender': 'Context: tender {id}',
   'chat.scope.global': 'General chat',

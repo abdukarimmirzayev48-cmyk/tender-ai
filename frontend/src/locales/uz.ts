@@ -9,6 +9,11 @@
 // bitta, shuning uchun bu yerda ular kamdan-kam uchraydi — asosan rus
 // tilidagi variantlar uchun kerak.
 export const uz = {
+  'app.catalogProductMatch': 'Aynan shu mahsulot uchun:',
+  'app.allCatalog': 'Barcha katalog',
+  'app.matchedBy.code': 'Mahsulot lotiga aniq mos: {items}',
+  'cat.fNameNote': 'Turini aniq yozing, masalan: “Kompyuter monitori”.',
+  'cat.moreOptions': 'Qo‘shimcha ma’lumotlar',
   // ── Umumiy ────────────────────────────────────────────────────────────
   'common.save': 'Saqlash',
   'common.saving': 'Saqlanmoqda…',
@@ -324,6 +329,7 @@ export const uz = {
   'compliance.validUntil': 'amal qiladi: {date}',
   'compliance.perpetual': 'muddatsiz',
   'compliance.daysLeft': '({n} kun qoldi)',
+  'compliance.expiresToday': '(bugun tugaydi — hali amal qiladi)',
   'compliance.daysAgo': '({n} kun oldin tugagan)',
   'compliance.addDoc': 'Hujjat qo‘shish →',
   'compliance.renewDoc': 'Yangilash →',
@@ -748,7 +754,7 @@ export const uz = {
   'req.growthBad': 'QUVVAT YETMAYDI — navbat o‘sib boradi ({q} ta/kun)',
   'req.growthCold': 'quvur yangi — bu bir martalik to‘ldirish, sur’at emas',
   'req.items.title': 'Tender talablari',
-  'req.items.stats': 'Jami {jami} · kutayotgan {kutayotgan} · tasdiqlangan {tasdiqlangan}',
+  'req.items.stats': 'Jami {jami} · navbatda {kutayotgan} · mashina chiqargan {mashina} · inson tasdiqlagan {tasdiqlangan}',
   'req.items.empty': 'Bu tenderda talab ajratilmagan.',
   'req.mandatory': 'majburiy',
   'req.source': 'Manba',
@@ -768,6 +774,10 @@ export const uz = {
   'req.status.rejected': 'rad etilgan',
   'req.status.corrected': 'tuzatilgan',
   'req.status.pending': 'kutmoqda',
+  'req.status.extracted': 'mashina chiqargan — inson ko‘rmagan',
+  'req.status.pending_review': 'insonni kutmoqda',
+  'req.machine.manba': 'rasmiy reyestr yozuvi',
+  'req.machine.ajratilgan': 'matndan ajratilgan',
   'chat.title': 'AI yordamchi',
   'chat.scope.tender': 'Kontekst: {id}-tender',
   'chat.scope.global': 'Umumiy suhbat',

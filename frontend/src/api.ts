@@ -5,9 +5,10 @@ import type {
   DocumentTextResult, DocumentType, Freshness, GoNoGoResult, Paged, PricingInputs,
   PricingSaved, Product, ProductSuggestion, Region, SavedSearch, Stats, Status,
   StockCheckResult, TelegramBot, TelegramLink, TelegramLinkStatus,
-  HujjatTuri, ReviewRejim, ReviewTezlik, Talab, TalabHolat, TalabNavbat,
+  HujjatTuri, InsonQarori, ReviewRejim, ReviewTezlik, Talab, TalabHolat,
+  TalabNavbat,
   AiQaror, InsonQaror, MalakaNatija, RoutingHolat, RoutingItem,
-  KodNavbat, KodQidiruv, KodOlchov,
+  KodNavbat, KodQaror, KodQidiruv, KodOlchov, Manba,
   RoutingMoslik,
   TalabXulosa,
   TelegramSubscriber, TenderDetail, TenderRow, NotifySettingsData, Nullable,
@@ -282,10 +283,19 @@ export const api = {
     request<ReviewTezlik>('GET', '/requirements/speed'),
   hujjatTurlari: () =>
     request<{ doc_types: HujjatTuri[] }>('GET', '/requirements/doc-types'),
+  /**
+   * INSON qarorini yozadi. `status` FAQAT inson qarori bo'lishi
+   * mumkin (`InsonQarori`) — mashina holatlarini bu yerdan yuborib
+   * bo'lmaydi va server ham ularni rad etadi (`Literal` sxemasi).
+   */
   talabReview: (reqId: number, body: {
-    status: TalabHolat; corrected_value?: string; note?: string
+    status: InsonQarori; corrected_value?: string; note?: string
     doc_type?: string; blind_value?: string
-  }) => request<{ id: number; tender_id: number; review_status: TalabHolat;
+  }) => request<{ id: number; tender_id: number; review_status: TalabHolat
+                 review_action: 'approve' | 'reject' | 'correct'
+                 reviewed_by: number; reviewed_at: string
+                 previous_value: string | null
+                 corrected_value: string | null
                  qolgan_kutayotgan: number }>(
     'POST', `/requirements/${reqId}/review`, { body }),
   talabReviewAll: (tenderId: number, status: 'approved' | 'rejected') =>
@@ -398,14 +408,39 @@ export const api = {
   kodQidir: (soz: string, kalit?: string, limit = 6) =>
     request<KodQidiruv>('GET', '/kod/qidir',
       { params: kalit ? { soz, kalit, limit } : { soz, limit } }),
+  /**
+   * Atama KO'RIB CHIQISHGA ochildi — vaqt hisobi shundan.
+   *
+   * `qaror` YUBORILMAYDI. Ilgari `qaror: 'kod'` to'ldiruvchi sifatida
+   * yuborilardi va u "ochish" ni "qaror" ga o'xshatib qo'yardi —
+   * ikkisi BUTUNLAY boshqa hodisa. Server endi alohida model
+   * (`AtamaOchishIn`) kutadi va qaror maydonlarini QABUL QILMAYDI.
+   */
   kodQarorOchish: (kalit: string, atama: string) =>
     request<{ id: number; ochilgan_at: string }>(
-      'POST', '/kod/qaror/ochish',
-      { body: { kalit, atama, qaror: 'kod' } }),
+      'POST', '/kod/qaror/ochish', { body: { kalit, atama } }),
+  /**
+   * INSON qarorini yozadi.
+   *
+   * `dalil` — inson EKRANDA KO'RGAN hamma narsa. Server uni qayta
+   * hisoblamaydi: ML uchun "haqiqat" emas, "inson nimaga qarab
+   * qaror qildi" kerak.
+   */
   kodQaror: (body: {
-    kalit: string; atama: string; qaror: 'kod' | 'talabsiz' | 'otkazildi'
-    code?: string | null; manba?: 'taklif' | 'qidiruv' | 'qolda' | null
-  }) => request<{ biriktirildi: number; qidiruv_soni: number }>(
+    kalit: string; atama: string; qaror: KodQaror
+    code?: string | null; manba?: Manba | null
+    dalil?: Record<string, unknown> | null
+    taklif_code?: string | null; taklif_skor?: number | null
+    rad_takliflar?: string[] | null
+    qoshimcha_kod?: boolean
+    izoh?: string | null
+  }) => request<{ id: number; biriktirildi: number; qidiruv_soni: number
+                  ochilgan_at: string | null; qaror_at: string }>(
     'POST', '/kod/qaror', { body }),
   kodOlchov: () => request<KodOlchov>('GET', '/kod/qaror/olchov'),
+  kodQarorOlchov: () => request<KodOlchov>('GET', '/kod/qaror/olchov'),
+  /** Har qaror DALILI bilan — ML to'plamining xom manbai. */
+  kodQarorTafsil: (limit = 500) =>
+    request<{ tafsil: Record<string, unknown>[] }>(
+      'GET', '/kod/qaror/tafsil', { params: { limit } }),
 }

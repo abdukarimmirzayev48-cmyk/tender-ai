@@ -354,8 +354,16 @@ function DocumentRow({ doc, onEdit, onRemove }: {
           ? t('compliance.validUntil', { date: dateFmt(doc.valid_until) })
           : t('compliance.perpetual')}
       </span>
+      {/* CHEGARA ANIQ KO'RSATILADI. `valid_until` — hujjat yaroqli
+          OXIRGI kun va u KIRADI: "0 kun qoldi" aslida "BUGUN tugaydi"
+          degani, ya'ni bugun hali amal qiladi. Raqam bilan ko'rsatish
+          uni "allaqachon tugagan" deb o'qishga yo'l qo'yardi. */}
       {doc.status === 'expiring_soon' && doc.days_left != null && (
-        <span className="text-soon-strong">{t('compliance.daysLeft', { n: doc.days_left })}</span>
+        <span className="text-soon-strong">
+          {doc.days_left === 0
+            ? t('compliance.expiresToday')
+            : t('compliance.daysLeft', { n: doc.days_left })}
+        </span>
       )}
       {doc.status === 'expired' && doc.days_left != null && (
         <span className="text-urgent-strong">

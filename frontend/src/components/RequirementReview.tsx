@@ -7,8 +7,8 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
-import type { HujjatTuri, ReviewRejim, ReviewTezlik, Talab, TalabNavbat,
-  TalabUsul, TalabXulosa } from '@/types'
+import type { HujjatTuri, InsonQarori, ReviewRejim, ReviewTezlik, Talab,
+  TalabNavbat, TalabUsul, TalabXulosa } from '@/types'
 
 // TALABLARNI TASDIQLASH (J3)
 // ══════════════════════════
@@ -107,8 +107,14 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
     else setLoading(false)
   }, [tanlangan, talablarniYukla])
 
-  /** Bitta talabni belgilash. Navbat SHU YERDA yangilanadi. */
-  async function belgila(it: Talab, status: Talab['review_status'],
+  /**
+   * Bitta talabga INSON qarorini yozadi. Navbat SHU YERDA yangilanadi.
+   *
+   * Tur `InsonQarori` — `extracted` yoki `pending_review` ni bu
+   * yerdan yuborib bo'lmaydi. Server ham ularni rad etadi
+   * (`Literal` sxemasi), lekin xato KOMPILYATSIYADA tutilsin.
+   */
+  async function belgila(it: Talab, status: InsonQarori,
                          qiymat?: string, docType?: string) {
     setSaqlanmoqda(it.id)
     try {
@@ -167,7 +173,7 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
   /** Bu qator hozir YOPIQmi (model javobi yashirinmi). */
   function yopiq(it: Talab): boolean {
     return rejim === 'blind'
-      && it.review_status === 'pending'
+      && it.review_status === 'pending_review'
       && !ochilgan.has(it.id)
   }
 
@@ -176,7 +182,10 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
     setOchilgan((s) => new Set(s).add(it.id))
   }
 
-  const kutayotgan = items.filter((x) => x.review_status === 'pending')
+  const kutayotgan = items.filter((x) => x.review_status === 'pending_review')
+  /** MASHINA chiqargani — inson ko'rmagan va navbatda ham emas. */
+  const mashinaChiqargan = items.filter(
+    (x) => x.review_status === 'extracted')
 
   return (
     <div className="space-y-4">
@@ -309,9 +318,14 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
             )}
             {xulosa && (
               <span className="text-xs text-muted-foreground">
+                {/* MASHINA CHIQARGANI ALOHIDA SANALADI.
+                    Ilgari u "tasdiqlangan" ga qo'shilardi va
+                    interfeys inson ko'rmagan 1 487 talabni
+                    "tasdiqlangan" deb ko'rsatardi. */}
                 {t('req.items.stats', {
                   jami: xulosa.jami,
                   kutayotgan: xulosa.kutayotgan ?? 0,
+                  mashina: xulosa.mashina_chiqargan ?? mashinaChiqargan.length,
                   tasdiqlangan: xulosa.tasdiqlangan ?? 0,
                 })}
               </span>
@@ -338,10 +352,14 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
               {items.map((it) => {
                 const u = USUL[it.method]
                 const band = saqlanmoqda === it.id || saqlanmoqda === -1
-                const korilgan = it.review_status !== 'pending'
+                // "Ko'rilgan" = INSON qaror qilgan. `extracted`
+                // (reyestr) ham `pending_review` emas, lekin uni
+                // ko'rilgan deb ko'rsatish aynan tuzatilgan yolg'on.
+                const insonKordi = it.reviewed_by != null
+                const navbatda = it.review_status === 'pending_review'
                 return (
                   <li key={it.id}
-                    className={cn('px-4 py-3', korilgan && 'opacity-60')}>
+                    className={cn('px-4 py-3', insonKordi && 'opacity-60')}>
                     <div className="flex flex-wrap items-center gap-2">
                       {it.is_mandatory && (
                         <span className="rounded bg-urgent-soft px-1.5 py-0.5
@@ -444,7 +462,7 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
                         QAYTADAN ko'rib chiqish kerak bo'lardi. */}
                     {(it.is_mandatory
                       || (it.attrs as { tur?: string })?.tur === 'sertifikat')
-                      && it.review_status === 'pending' && turlar.length > 0 && (
+                      && navbatda && turlar.length > 0 && (
                       <div className="mt-2 flex items-center gap-2">
                         <span className="shrink-0 text-xs text-muted-foreground">
                           {t('req.docType')}
@@ -464,7 +482,7 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
                         </select>
                       </div>
                     )}
-                    {it.doc_type && it.review_status !== 'pending' && (
+                    {it.doc_type && !navbatda && (
                       <div className="mt-1 text-xs text-muted-foreground">
                         {t('req.docType')}{' '}
                         {turlar.find((d) => d.code === it.doc_type)?.label
@@ -481,7 +499,7 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
                           <span className="ml-1">{t('req.source')}</span>
                         </Button>
                       )}
-                      {yopiq(it) ? null : it.review_status === 'pending' ? (
+                      {yopiq(it) ? null : navbatda ? (
                         <>
                           <Button size="sm" disabled={band}
                             onClick={() => void belgila(
@@ -504,10 +522,25 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
                             {t('req.correct')}
                           </Button>
                         </>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">
+                      ) : insonKordi ? (
+                        /* INSON qarori — kim va qachon ekani ham
+                           ko'rinadi. Ilgari bu yerda faqat holat
+                           turardi va reyestr pozitsiyalari ham
+                           "tasdiqlangan" bo'lib chiqardi. */
+                        <span className="text-xs text-ok">
                           {t(`req.status.${it.review_status}` as
                              'req.status.approved')}
+                          {it.reviewed_at && (
+                            <span className="ml-1 text-muted-foreground">
+                              · {f.dateFmt(it.reviewed_at)}
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        /* MASHINA chiqargan, INSON KO'RMAGAN.
+                           Bu yorliq ATAYLAB "tasdiqlangan" demaydi. */
+                        <span className="text-xs text-muted-foreground">
+                          {t('req.status.extracted')}
                         </span>
                       )}
                     </div>

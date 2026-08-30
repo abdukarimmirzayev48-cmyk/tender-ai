@@ -88,7 +88,14 @@ export interface MatchInfo {
 export interface CatalogMatchInfo {
   score: number
   products: string[]
-  by: 'category' | 'name'
+  by: 'kod' | 'nom'
+  positions?: {
+    pozitsiya: string
+    mahsulot: Nullable<string>
+    aniq: boolean
+    kod: Nullable<string>
+  }[]
+  position_count?: number
 }
 
 export interface TenderRow {
@@ -667,7 +674,34 @@ export interface TelegramBot {
 // `reyestr` rasmiy yozuv (tasdiqlash talab qilmaydi), `naqsh` va
 // `llm` esa AI natijasi va TEKSHIRILISHI kerak.
 export type TalabUsul = 'reyestr' | 'naqsh' | 'llm'
-export type TalabHolat = 'pending' | 'approved' | 'rejected' | 'corrected'
+/**
+ * Talabning KO'RIB CHIQISH holati — FAQAT INSON o'qi.
+ *
+ * `extracted` va `pending_review` — mashina qo'yadi.
+ * `approved` / `rejected` / `corrected` — INSON qarori, va baza
+ * ularni `reviewed_by` bo'lmasdan yozishga yo'l qo'ymaydi
+ * (`tender_requirement_inson_qarori_chk`).
+ *
+ * ILGARI `pending | approved | rejected | corrected` edi va reyestr
+ * pozitsiyalari `approved` bo'lib yozilardi — interfeys 1 487 ta
+ * ko'rilmagan talabni "tasdiqlangan" deb ko'rsatardi.
+ */
+export type TalabHolat =
+  | 'extracted'
+  | 'pending_review'
+  | 'approved'
+  | 'rejected'
+  | 'corrected'
+
+/** INSON qo'ya oladigan holatlar (API `Literal` bilan qulflangan). */
+export type InsonQarori = 'approved' | 'rejected' | 'corrected'
+
+/**
+ * MASHINA o'qi — ma'lumot QAYERDAN keldi. `TalabHolat` dan MUSTAQIL.
+ *   manba       platformaning rasmiy reyestr yozuvi (xulosa emas)
+ *   ajratilgan  matndan naqsh yoki model chiqargan
+ */
+export type MashinaHolat = 'manba' | 'ajratilgan'
 
 /** `blind` — model javobi YASHIRIN (anchoring ga qarshi). */
 export type ReviewRejim = 'blind' | 'anchored'
@@ -705,6 +739,10 @@ export interface Talab {
   char_start: Nullable<number>
   char_end: Nullable<number>
   review_status: TalabHolat
+  mashina_holat: MashinaHolat
+  review_action: Nullable<'approve' | 'reject' | 'correct'>
+  reviewed_by: Nullable<number>
+  previous_value: Nullable<string>
   corrected_value: Nullable<string>
   review_note: Nullable<string>
   reviewed_at: Nullable<string>
@@ -730,6 +768,9 @@ export interface TalabXulosa {
   modeldan: number
   past_ishonchli: number
   kutayotgan?: number
+  /** MASHINA chiqargani — inson ko'rmagan va navbatda ham emas. */
+  mashina_chiqargan?: number
+  /** FAQAT inson tasdiqlagani (`approved` + `corrected`). */
   tasdiqlangan?: number
   eng_past_ishonch: Nullable<number>
   usullar: string[]
@@ -784,9 +825,17 @@ export interface KodPozitsiya {
   namunalar: string[]
 }
 
+/** Qaror turlari — baza `kod_qaror_turi` CHECK i bilan AYNAN mos. */
+export type KodQaror = 'kod' | 'talabsiz' | 'dalilsiz' | 'otkazildi'
+
+/** Qaror QAYERDAN keldi. */
+export type Manba = 'taklif' | 'qidiruv' | 'qolda'
+
 export interface KodTaklif {
   code: string
   name_ru: Nullable<string>
+  /** Mashina skori — kelishuv foizini hisoblashda yozib olinadi. */
+  skor?: Nullable<number>
   n_tender_open: number
   /** DALIL — kod ostidagi HAQIQIY pozitsiyalar. Qaror shundan chiqadi:
    *  kod nomi begona bo'lishi mumkin, pozitsiyalar esa tanish. */
@@ -814,6 +863,11 @@ export interface KodNavbat {
   talabsiz_jami: number
   turi_aniqmas: { id: number; name: string }[]
   turi_aniqmas_jami: number
+  /** Inson allaqachon qaror qilgan atamalar — navbatda KO'RSATILMAYDI,
+   *  lekin yig'indida sanaladi. Filtrsiz ular navbatga qaytardi
+   *  ('talabsiz'/'otkazildi' kod bermaydi) va navbat tugamasdi. */
+  qaror_qilingan: { kalit: string; atama: string; n_mahsulot: number }[]
+  qaror_qilingan_jami: number
   /** Toifalar yig'indisi JAMIGA teng bo'lishi shart. */
   jami_mahsulot: number
   toifa_yigindi: number
@@ -829,15 +883,75 @@ export interface KodQidiruv {
 
 export interface KodOlchov {
   olchov: {
-    qaror_soni: number; kod_berildi: number; talabsiz: number
-    otkazildi: number; ortacha_sek: Nullable<number>
+    qaror_soni: number
+    /** AJRATILGAN atama soni. `qaror_soni` QATORLARNI sanaydi — bir
+     *  atamani takror bosish uni oshiradi, buni oshirmaydi. */
+    atama_soni: number
+    kod_berildi: number; talabsiz: number
+    /** INSON QAROR QILA OLMADI. `talabsiz` dan ATAYLAB alohida:
+     *  birinchisi XULOSA, bu XULOSA YO'QLIGI. */
+    dalilsiz: number
+    otkazildi: number
+    /** Qaror qilinmagan ochiq qatorlar. Hisoblagichlarga TUSHMAYDI. */
+    ochiq_qator: number
+    /** FAQAT `ochilgan_at IS NOT NULL` qatorlar bo'yicha. */
+    ortacha_sek: Nullable<number>
+    median_sek: Nullable<number>
+    olchangan: number
+    /** Vaqti O'LCHANMAGAN qarorlar. Nol deb sanalmaydi. */
+    olchovsiz: number
     taklifdan: number; qidiruvdan: number; qoldan: number
     talabsiz_qidiruvsiz: number; talabsiz_qidiruvli: number
     kop_kodli_atama: number
+    /** --- TAKLIF BILAN KELISHUV --- */
+    taklifli_qaror: number
+    taklif_qabul: number
+    taklif_ozgartirildi: number
+    taklif_rad: number
+    taklif_kelishuv_foiz: Nullable<number>
+    /** ANIQ rad etilgan takliflar — MANFIY misollar. */
+    rad_taklif_soni: number
+    /** --- QIDIRUV --- */
+    qidiruvli_qaror: number
+    qidiruv_foiz: Nullable<number>
+    /** --- KO'P KOD --- */
+    qoshimcha_kod_soni: number
+    /** --- DALIL QAMROVI --- dalilsiz qaror ML uchun yaroqsiz. */
+    dalilli_qaror: number
+    dalil_qamrov_foiz: Nullable<number>
   } | null
+  pilot?: KodPilot | null
   qarorlar: {
-    kalit: string; atama: string; qaror: string
-    code: Nullable<string>; manba: Nullable<string>
-    qidiruv_soni: number; qaror_at: string
+    kalit: string; atama: string; qaror: KodQaror
+    code: Nullable<string>; manba: Nullable<Manba>
+    qidiruv_soni: number; qidiruv_sozi: Nullable<string>
+    taklif_code: Nullable<string>
+    qoshimcha_kod: boolean
+    rad_takliflar: Nullable<string[]>
+    dalil_bor: boolean
+    qaror_at: string
   }[]
+}
+
+/**
+ * Pilot holati — "40 ta ATAMA qaroriga qancha qoldi".
+ *
+ * MAQSAD ATAMA BO'YICHA, qator bo'yicha EMAS: bir atamaga ikkinchi
+ * kod berish ikki qator yaratadi va qator bo'yicha sanash maqsadni
+ * SOXTA yaqinlashtirardi.
+ */
+export interface KodPilot {
+  company_id: number
+  maqsad: number
+  qaror_soni: number
+  atama_soni: number
+  qolgan: number
+  olchangan: number
+  dalilli: number
+  /** NULL = O'LCHANMADI (nol EMAS). */
+  ortacha_sek: Nullable<number>
+  median_sek: Nullable<number>
+  taklif_kelishuv_foiz: Nullable<number>
+  qidiruv_foiz: Nullable<number>
+  kodsiz_mahsulot: number
 }
