@@ -594,9 +594,12 @@ ogohlantiradi — `_talab()` ning YUQORI CHEGARA ekani interfeysda ham ko'rinadi
 ## 17. Ishga tushirish
 
 ```powershell
-# 1) Baza patchlari — 53 ta, idempotent, tartib muhim emas (har biri mustaqil)
-psql $env:XT_DB_DSN -f xt_xarid_schema.sql
-Get-ChildItem schema_patch_*.sql | ForEach-Object { psql $env:XT_DB_DSN -f $_.Name }
+# 1) Baza migratsiyalari — 55 ta, KUZATILADIGAN va TARTIBLI
+#    Alfavit tartibi 67 ta bog'liqlikni buzadi (o'lchandi) — shuning
+#    uchun `Get-ChildItem` BILAN QO'LLAMANG.
+.venv\Scripts\python.exe migratsiya.py --holat      # nima qo'llangan
+.venv\Scripts\python.exe migratsiya.py --qolla      # bo'sh/yangi baza
+.venv\Scripts\python.exe migratsiya.py --bootstrap  # MAVJUD bazani ro'yxatga olish
 
 # 2) .env — 35 ta sozlama (.env.example dan nusxa oling)
 #    XT_DB_DSN, DB_POOL_MIN/MAX, ANTHROPIC_API_KEY, AI_PAID_ENABLED(=0),
@@ -727,6 +730,7 @@ raqam kiyimidagi shakli.
 | 2026-08-31 | `530b9d8` | Muvofiqlik biznes vaqt mintaqasiga (UTC+5) o'tdi — 5 yiqilish tuzaldi |
 | 2026-08-31 | `24ed971` | RAG bazaviy o'lchovi: gibrid Recall@8 = 0.705, MRR = 0.699 |
 | 2026-08-31 | `7825fd3` | **Ishchi daraxt tozalandi** — 64 ta o'zgarish 13 ta commit'ga ajratildi (§21) |
+| 2026-08-31 | (§22) | **Migratsiya versiyalash** — 55 ta patch kuzatuvga olindi; alfavit tartibi 67 bog'liqlikni buzardi |
 
 ---
 
@@ -744,6 +748,7 @@ raqam kiyimidagi shakli.
 | `docs/erp_bosqichlar.md` | ERP integratsiya bosqichlari |
 | `docs/erp_integratsiya.md`, `_2.md` | ERP integratsiya tafsilotlari |
 | `docs/erp_texnik.md` | ERP texnik shartnoma |
+| `docs/integration/migratsiya.md` | **Migratsiya versiyalash — operator qo'llanmasi** |
 | `docs/integration/etl.md` | ETL integratsiya qadamlari |
 | `docs/integration/import.md` | Katalog importi |
 | `docs/integration/doctext.md` | Hujjat matni |
@@ -835,6 +840,85 @@ kerak edi. Kamchilik yashirilmadi — izohda yozildi.
 | Sir | 12 489 satrda **0 ta moslik** |
 | `git status` | **toza** (kuzatilmagan fayl yo'q) |
 | Fixture'lar sinovdan keyin | e'tiborsiz — daraxt toza qoladi |
+
+
+---
+
+## 22. Migratsiya versiyalash — 2026-08-31
+
+`schema_patch_*.sql` fayllari **kuzatiladigan** migratsiyaga aylandi.
+Batafsil: `docs/integration/migratsiya.md`.
+
+### Nima o'lchandi
+
+Bazada `schema_migration` jadvali **yo'q edi** — "qaysi patch qo'llangan"
+degan savolga javob beradigan hech narsa yo'q edi. Yagona qo'llash usuli
+`Get-ChildItem schema_patch_*.sql` edi, ya'ni **alfavit tartibi**.
+
+Fayllardan bog'liqlik grafi chiqarildi (e'lon qilingan `Talab:` sarlavhalari,
+raqamli suffikslar, obyekt bog'liqliklari). **Alfavit tartibi bu grafdagi
+67 ta yoyni teskari qo'yadi.** Masalan `notify_subscribers.sql` sarlavhasida
+"OLDIN `notify_telegram.sql` qo'llanilgan bo'lishi kerak" deb **yozgan**,
+alfavitda esa `_subscribers` `_telegram` dan oldin keladi.
+
+Va tartib natijani belgilaydi: 8 ta obyektni bir nechta patch yaratadi —
+`v_requirement_review` ni **to'rtta**.
+
+### Nega Alembic emas
+
+Qaror o'lchovga tayanadi: 53 fayl sof SQL (~4 800 satr DDL); 4 tasi psql
+meta-buyruqlarini ishlatadi va `multitenant.sql` `\if :{?tenant_id}` —
+psql **o'zgaruvchisi**, SQLAlchemy ulanishi orqali yurmaydi; ORM modellari
+yo'q, ya'ni `autogenerate` foydasi mavjud emas; chiziqli `down_revision`
+zanjiri yo'q va uni retroaktiv tiklash taxminni fakt qilib ko'rsatish
+bo'lardi.
+
+### Nima qurildi
+
+| Fayl | Nima |
+|---|---|
+| `schema_patch_migratsiya.sql` | `schema_migration` jurnali + 2 ko'rinish |
+| `migratsiya.py` | Yurgizuvchi (manifest, checksum, qulf, bootstrap) |
+| `migratsiya_manifest.tsv` | **Muzlatilgan** tartib, 55 yozuv |
+| `_tests/migratsiya_test.py` | 62 tekshiruv, 4 stsenariy |
+
+**Qayta qo'llash to'sig'i izohda emas, indeksda:**
+
+```sql
+CREATE UNIQUE INDEX schema_migration_bir_marta
+    ON schema_migration (migratsiya_id) WHERE holat IN ('ok','bootstrap');
+```
+
+Yana 6 ta CHECK — `xato` uchun **dalil**, `bootstrap` uchun **izoh**
+majburiy. 11 ta buzuq yozuv sinab ko'rildi, **11 tasi ham rad etildi**.
+
+`ok` va `bootstrap` **ataylab farqli atalgan**: birinchisi *bajarilgan*,
+ikkinchisi *o'lchangan*.
+
+### Tekshirilgan holat
+
+| Stsenariy | Natija |
+|---|---|
+| Bo'sh baza → joriy sxema | **55/55**. Ishlab chiqarishdagi har jadval, ko'rinish va ustun qurilgan bazada bor — **0 ta yetishmaydi** |
+| Mavjud baza → qayta qo'llash yo'q | `--qolla` hech narsa qilmadi; **52 jadvalda** qator soni o'zgarmadi |
+| Uzilgan migratsiya | To'xtadi (kod 2); tranzaksionlikka qarab boshqa maslahat |
+| Checksum o'zgarishi | To'xtadi; izohsiz qayta muhrlash rad etildi; eski qator saqlandi |
+
+**`xtxarid` bazasi ro'yxatga olindi:** 55/55, yetishmaydigan 0 ta,
+checksum farqi 0.
+
+### Ochiq yozilgan cheklovlar
+
+1. **`multitenant.sql` bo'sh bazada to'xtaydi** — u faol `company_account`
+   talab qiladi. Yurgizuvchi buni oldindan tekshiradi va tushunarli xabar
+   beradi, migratsiyani **umuman boshlamaydi**.
+2. **Tartib chiqarish jadval darajasida** — `ADD COLUMN` bog'liqligini
+   ko'rmaydi. Bunday yoylar `QOLDA_YOY` da, har biri aynan bitta psql
+   xatosidan. Shuning uchun manifest **bo'sh bazada qurib** tekshiriladi.
+3. **`erp` sxemasi boshqa repozitoriyda.** `auth_2.sql` `public.app_user`
+   ni faqat `erp.app_user` to'la bo'lsa tashlaydi. Toza qurilgan bazada
+   `app_user` **qoladi** — bu patchning himoya xulqi. Migratsiya kuzatuvi
+   bu old shartni majburlay olmaydi.
 
 
 ---
