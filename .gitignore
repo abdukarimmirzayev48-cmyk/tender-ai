@@ -46,3 +46,11 @@ _pgvector/
 
 # TypeScript inkremental qurish keshi — mashinaga xos, kodga aloqasi yo'q
 *.tsbuildinfo
+
+# Sinov fixture'lari — `_tests/import_test.py:make_fixtures()` HAR YURISHDA
+# qayta yasaydi. Kuzatilganda `.xlsx` ichidagi yaratilish vaqti tufayli
+# ishchi daraxt har sinovdan keyin "iflos" bo'lardi (o'lchangan: faqat
+# `docProps/core.xml` farq qiladi, mazmun bir xil). Ular manba emas —
+# qurish artefakti. Sinov ularsiz ham to'liq yuradi (tekshirilgan).
+_tests/fixtures/*.xlsx
+_tests/fixtures/*.csv
