@@ -320,7 +320,7 @@ def test_yonaltirish():
 
     # OCHILDI -> QAROR -> qayta ochilmaydi
     check("navbatdagi yozuv ochiladi", bool(R.ochildi(rid, cid, _BROKER)))
-    q = R.qaror(rid, cid, "olindi", "sinov", _BROKER)
+    q = R.qaror(rid, cid, "olindi", "sinov", ishonch="kompaniya_sessiyasi")
     check("broker qarori yozildi", q and q["inson_qaror"] == "olindi", str(q))
     check("holat 'yopildi'", q and q["holat"] == "yopildi")
     check("yopilgan yozuv QAYTA OCHILMAYDI",
@@ -339,7 +339,7 @@ def test_yonaltirish():
     # NOMA'LUM qaror rad etilsin.
     xato = None
     try:
-        R.qaror(rid, cid, "bilmadim")
+        R.qaror(rid, cid, "bilmadim", ishonch="kompaniya_sessiyasi")
     except ValueError as e:
         xato = str(e)
     check("noma'lum qaror rad etiladi", xato is not None, str(xato))
@@ -388,7 +388,7 @@ def test_qaror_eskirishi():
     _yozilgan.append(rid)
 
     # 1. Inson qaror beradi.
-    R.qaror(rid, cid, "olindi", "sinov", _BROKER)
+    R.qaror(rid, cid, "olindi", "sinov", ishonch="kompaniya_sessiyasi")
     row = db.query_one("SELECT ai_qaror, ai_ozgardi FROM tender_routing "
                        "WHERE id = %(i)s", {"i": rid})
     check("qarordan keyin bayroq TOZA", row["ai_ozgardi"] is False,
@@ -421,7 +421,7 @@ def test_qaror_eskirishi():
               f"{topildi[0]}-o'rinda — yolg'on ishonch eng shoshilinch")
 
     # 5. YANGI qaror bayroqni yopadi.
-    R.qaror(rid, cid, "rad", "qayta ko'rildi", _BROKER)
+    R.qaror(rid, cid, "rad", "qayta ko'rildi", ishonch="kompaniya_sessiyasi")
     row3 = db.query_one("SELECT ai_ozgardi, ai_qaror_eski "
                         "FROM tender_routing WHERE id = %(i)s", {"i": rid})
     check("yangi qaror bayroqni YOPADI", row3["ai_ozgardi"] is False,
@@ -456,7 +456,7 @@ def test_izolyatsiya():
         check("BOSHQA kompaniya yozuvni ocholmaydi",
               R.ochildi(rid, boshqa) is None)
         check("BOSHQA kompaniya qaror bera olmaydi",
-              R.qaror(rid, boshqa, "olindi") is None)
+              R.qaror(rid, boshqa, "olindi", ishonch="kompaniya_sessiyasi") is None)
 
     for nom in ("qualification.py", "routing.py"):
         src = io.open(os.path.join(ROOT, "api", nom), encoding="utf-8").read()

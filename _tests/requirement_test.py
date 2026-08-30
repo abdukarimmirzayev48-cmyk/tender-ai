@@ -686,14 +686,14 @@ def test_review():
     # `by=B` beriladi: `by` endi MAJBURIY (soxta tasdiqqa qarshi), va
     # bu sinov aynan IDOR ni tekshiradi — kim ekani NOMA'LUM emas,
     # boshqa kompaniya. SQL sharti uni baribir topa olmaydi.
-    natija = R.review_set(kafolat_id, B, "approved", by=B)
+    natija = R.review_set(kafolat_id, B, "approved", by=B, ishonch="kompaniya_sessiyasi")
     check("B kompaniya A ning talabini O'ZGARTIRA OLMAYDI",
           natija is None, str(natija))
     check("holat o'zgarmadi",
           top("Sinov kafolat")["review_status"] == "pending_review")
 
     # --- 4. TASDIQLASH ---
-    r1 = R.review_set(kafolat_id, A, "approved", by=A)
+    r1 = R.review_set(kafolat_id, A, "approved", by=A, ishonch="kompaniya_sessiyasi")
     check("tasdiqlash ishladi", r1 and r1["review_status"] == "approved",
           str(r1))
     navbat2 = {x["tender_id"]: x["kutayotgan"] for x in R.review_queue(A, 500)}
@@ -701,12 +701,12 @@ def test_review():
 
     # --- 5. TUZATISH — qiymatsiz RAD ETILADI ---
     try:
-        R.review_set(shablon_id, A, "corrected", corrected="  ", by=A)
+        R.review_set(shablon_id, A, "corrected", corrected="  ", by=A, ishonch="kompaniya_sessiyasi")
         check("qiymatsiz 'corrected' rad etiladi", False, "qabul qilindi")
     except ValueError:
         check("qiymatsiz 'corrected' rad etiladi", True)
 
-    r2 = R.review_set(shablon_id, A, "corrected", corrected="24 oy", by=A)
+    r2 = R.review_set(shablon_id, A, "corrected", corrected="24 oy", by=A, ishonch="kompaniya_sessiyasi")
     check("tuzatish ishladi", r2 and r2["review_status"] == "corrected",
           str(r2))
     tuzatilgan = [x for x in R.review_items(tid, A)
@@ -733,7 +733,7 @@ def test_review():
           "INSON TASDIQLAGAN" in blok, blok[:200])
 
     # --- 8. RAD ETILGAN talab HAMMA JOYDAN chiqadi ---
-    R.review_set(kafolat_id, A, "rejected", by=A)
+    R.review_set(kafolat_id, A, "rejected", by=A, ishonch="kompaniya_sessiyasi")
     blok2 = R.prompt_block(tid, A)
     check("rad etilgan talab promptga TUSHMAYDI",
           "Sinov kafolat" not in blok2, blok2[:200])
@@ -1065,13 +1065,13 @@ def test_pilot():
                  if x["name"] == "[SINOV] yopiq rejim"]
         if items:
             it = items[0]
-            R.review_set(it["id"], A, "approved", by=A, blind_value="12 oy")
+            R.review_set(it["id"], A, "approved", by=A, blind_value="12 oy", ishonch="kompaniya_sessiyasi")
             keyin = next(x for x in R.review_items(tid, A)
                          if x["id"] == it["id"])
             check("blind_value yozildi", keyin["blind_value"] == "12 oy",
                   str(keyin["blind_value"]))
             R.review_set(it["id"], A, "corrected", corrected="24 oy",
-                         by=A, blind_value="boshqa javob")
+                         by=A, blind_value="boshqa javob", ishonch="kompaniya_sessiyasi")
             keyin2 = next(x for x in R.review_items(tid, A)
                           if x["id"] == it["id"])
             check("blind_value QAYTA yozilmaydi",
@@ -1210,7 +1210,7 @@ def test_vaqt_olchovi():
     # --- Tugash ---
     for x in R.review_items(tid, A):
         if x["name"].startswith("Vaqt sinovi"):
-            R.review_set(x["id"], A, "approved", by=A)
+            R.review_set(x["id"], A, "approved", by=A, ishonch="kompaniya_sessiyasi")
     R.review_tugadi(tid, A, 2)
     tugadi = db.query_one("""SELECT finished_at, n_reviewed FROM
         requirement_review_open WHERE company_id=%(c)s AND tender_id=%(t)s""",
@@ -1361,20 +1361,20 @@ def test_yorliqlash():
           all(x["requirement_id"] != olish()["id"] for x in R.labeled(A)))
 
     kod = next(d["code"] for d in compliance.DOC_TYPES)
-    R.review_set(olish()["id"], A, "approved", by=A, doc_type=kod)
+    R.review_set(olish()["id"], A, "approved", by=A, doc_type=kod, ishonch="kompaniya_sessiyasi")
     x = olish()
     check("yorliq saqlandi", x["doc_type"] == kod, str(x["doc_type"]))
     check("yorliqlangan to'plamga TUSHDI",
           any(y["requirement_id"] == x["id"] for y in R.labeled(A)))
 
     # --- Yorliq TASODIFAN o'chib ketmasin ---
-    R.review_set(x["id"], A, "approved", by=A)          # doc_type BERILMADI
+    R.review_set(x["id"], A, "approved", by=A, ishonch="kompaniya_sessiyasi")          # doc_type BERILMADI
     check("doc_type berilmasa ESKISI qoladi",
           olish()["doc_type"] == kod, str(olish()["doc_type"]))
 
     # --- Noma'lum qiymat RAD ETILADI ---
     try:
-        R.review_set(x["id"], A, "approved", by=A, doc_type="sehrli_hujjat")
+        R.review_set(x["id"], A, "approved", by=A, doc_type="sehrli_hujjat", ishonch="kompaniya_sessiyasi")
         check("noma'lum hujjat turi rad etiladi", False, "qabul qilindi")
     except ValueError:
         check("noma'lum hujjat turi rad etiladi", True)
@@ -1383,7 +1383,7 @@ def test_yorliqlash():
     # NULL = "hali so'ralmagan", 'yoq' = "inson qaradi va tegishli emas
     # dedi". Bu farq §16.44 dagi "topilmadi va ajratilmagan" bilan
     # bir sinf.
-    R.review_set(x["id"], A, "approved", by=A, doc_type="yoq")
+    R.review_set(x["id"], A, "approved", by=A, doc_type="yoq", ishonch="kompaniya_sessiyasi")
     check("'yoq' saqlanadi", olish()["doc_type"] == "yoq")
     check("'yoq' ham YORLIQ — to'plamga tushadi",
           any(y["requirement_id"] == x["id"] and y["doc_type"] == "yoq"
@@ -1437,7 +1437,7 @@ def test_qayta_ajratish():
 
     # --- 1-TUYNUK: qiymat O'ZGARMASA tasdiq SAQLANADI ---
     yoz("12 oy")
-    R.review_set(olish()["id"], A, "approved", by=A)
+    R.review_set(olish()["id"], A, "approved", by=A, ishonch="kompaniya_sessiyasi")
     yoz("12 oy")                                   # aynan o'sha qiymat
     x = olish()
     check("qiymat o'zgarmasa TASDIQ saqlanadi",
@@ -1457,7 +1457,7 @@ def test_qayta_ajratish():
           tid in {q["tender_id"] for q in R.review_queue(A, 500)})
 
     # --- TUZATILGAN qiymat qayta ajratishda YO'QOLMAYDI ---
-    R.review_set(olish()["id"], A, "corrected", corrected="36 oy", by=A)
+    R.review_set(olish()["id"], A, "corrected", corrected="36 oy", by=A, ishonch="kompaniya_sessiyasi")
     yoz("48 oy")                                   # yana yangilandi
     x = olish()
     check("inson tuzatgan qiymat SAQLANADI",

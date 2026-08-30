@@ -330,7 +330,7 @@ def test_halqa(conn, cid) -> None:
         r2 = K.qaror_yoz(cid, KALIT, "ZZ atama", "kod", kim="sinovchi",
                          code="26.30", manba="qidiruv",
                          dalil={"takliflar": [{"code": "26.20"}]},
-                         taklif_code="26.20", taklif_skor=0.7)
+                         taklif_code="26.20", taklif_skor=0.7, ishonch="kompaniya_sessiyasi")
         check("qaror yozildi", bool(r2.get("id")))
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM v_kod_qaror_tafsil WHERE kalit=%s", (KALIT,))
@@ -373,7 +373,7 @@ def test_olchovsiz_nol_emas(conn, cid) -> None:
     K2 = PREFIKS + "_olchovsiz"
     try:
         # OCHISHSIZ to'g'ridan-to'g'ri qaror (zaxira yo'l).
-        K.qaror_yoz(cid, K2, "ZZ", "otkazildi", kim="sinovchi")
+        K.qaror_yoz(cid, K2, "ZZ", "otkazildi", kim="sinovchi", ishonch="kompaniya_sessiyasi")
         with conn.cursor() as cur:
             cur.execute("SELECT ochilgan_at, sek FROM v_kod_qaror_tafsil "
                         "WHERE kalit=%s", (K2,))
@@ -409,7 +409,7 @@ def test_harakatlar(conn, cid) -> None:
         K.qaror_ochish(cid, k1, "ZZ qabul")
         K.qaror_yoz(cid, k1, "ZZ qabul", "kod", kim="s", code="26.30",
                     manba="taklif", taklif_code="26.30", taklif_skor=0.9,
-                    dalil={"a": 1})
+                    dalil={"a": 1}, ishonch="kompaniya_sessiyasi")
 
         # 2) TAKLIFNI RAD ETIB BOSHQASINI TANLASH
         k2 = PREFIKS + "_almash"
@@ -417,7 +417,7 @@ def test_harakatlar(conn, cid) -> None:
         K.qaror_qidiruv(cid, k2, soz="turniket")
         K.qaror_yoz(cid, k2, "ZZ almash", "kod", kim="s", code="26.30",
                     manba="qidiruv", taklif_code="26.20",
-                    rad_takliflar=["26.20"], dalil={"a": 2})
+                    rad_takliflar=["26.20"], dalil={"a": 2}, ishonch="kompaniya_sessiyasi")
 
         # 3) TALABSIZ (xulosa)
         k3 = PREFIKS + "_talabsiz"
@@ -425,21 +425,21 @@ def test_harakatlar(conn, cid) -> None:
         K.qaror_qidiruv(cid, k3, soz="yoq")
         K.qaror_yoz(cid, k3, "ZZ talabsiz", "talabsiz", kim="s",
                     taklif_code="26.20", rad_takliflar=["26.20"],
-                    dalil={"a": 3})
+                    dalil={"a": 3}, ishonch="kompaniya_sessiyasi")
 
         # 4) DALILSIZ (xulosa yo'qligi)
         k4 = PREFIKS + "_dalilsiz"
         K.qaror_ochish(cid, k4, "ZZ dalilsiz")
         K.qaror_yoz(cid, k4, "ZZ dalilsiz", "dalilsiz", kim="s",
-                    dalil={"a": 4})
+                    dalil={"a": 4}, ishonch="kompaniya_sessiyasi")
 
         # 5) BIR ATAMAGA IKKI KOD — ATAYLAB
         k5 = PREFIKS + "_kopkod"
         K.qaror_ochish(cid, k5, "ZZ kabel")
         K.qaror_yoz(cid, k5, "ZZ kabel", "kod", kim="s", code="26.30",
-                    manba="qidiruv", dalil={"a": 5})
+                    manba="qidiruv", dalil={"a": 5}, ishonch="kompaniya_sessiyasi")
         K.qaror_yoz(cid, k5, "ZZ kabel", "kod", kim="s", code="26.20",
-                    manba="qidiruv", qoshimcha_kod=True, dalil={"a": 5})
+                    manba="qidiruv", qoshimcha_kod=True, dalil={"a": 5}, ishonch="kompaniya_sessiyasi")
 
         with conn.cursor() as cur:
             cur.execute("SELECT kalit, taklif_holati, rad_takliflar, "
@@ -514,25 +514,25 @@ def test_bosh_kod(conn, cid) -> None:
                 ("code=''", {"code": ""}),
                 ("code='   '", {"code": "   "})):
             try:
-                K.qaror_yoz(cid, k, "ZZ", "kod", kim="s", **kw)
+                K.qaror_yoz(cid, k, "ZZ", "kod", kim="s", **kw, ishonch="kompaniya_sessiyasi")
                 check(f"RAD: 'kod' + {nom}", False, "qabul qilindi!")
             except ValueError as e:
                 check(f"RAD: 'kod' + {nom}", True, str(e)[:60])
 
         try:
-            K.qaror_yoz(cid, k, "ZZ", "talabsiz", kim="s", code="26.30")
+            K.qaror_yoz(cid, k, "ZZ", "talabsiz", kim="s", code="26.30", ishonch="kompaniya_sessiyasi")
             check("RAD: 'talabsiz' + kod", False, "qabul qilindi!")
         except ValueError:
             check("RAD: 'talabsiz' + kod", True)
 
         try:
-            K.qaror_yoz(cid, k, "ZZ", "tasdiq", kim="s")
+            K.qaror_yoz(cid, k, "ZZ", "tasdiq", kim="s", ishonch="kompaniya_sessiyasi")
             check("RAD: notanish qaror turi", False, "qabul qilindi!")
         except ValueError:
             check("RAD: notanish qaror turi", True)
 
         try:
-            K.qaror_yoz(cid, k, "ZZ", "otkazildi", kim="  ")
+            K.qaror_yoz(cid, k, "ZZ", "otkazildi", kim="  ", ishonch="kompaniya_sessiyasi")
             check("RAD: kim bo'sh", False, "qabul qilindi!")
         except ValueError:
             check("RAD: kim bo'sh", True)
@@ -540,7 +540,7 @@ def test_bosh_kod(conn, cid) -> None:
         # DALIL chegarasi — cheksiz JSON jadvalni shishirmasin.
         try:
             K.qaror_yoz(cid, k, "ZZ", "otkazildi", kim="s",
-                        dalil={"x": "a" * (K.DALIL_MAX + 100)})
+                        dalil={"x": "a" * (K.DALIL_MAX + 100)}, ishonch="kompaniya_sessiyasi")
             check("RAD: dalil chegaradan katta", False, "qabul qilindi!")
         except ValueError as e:
             check("RAD: dalil chegaradan katta", True, str(e)[:60])
@@ -548,7 +548,7 @@ def test_bosh_kod(conn, cid) -> None:
         # Tanlangan kod "rad etilgan" ro'yxatida QOLMAYDI.
         K.qaror_ochish(cid, k, "ZZ")
         K.qaror_yoz(cid, k, "ZZ", "kod", kim="s", code="26.30",
-                    rad_takliflar=["26.30", "26.20"])
+                    rad_takliflar=["26.30", "26.20"], ishonch="kompaniya_sessiyasi")
         with conn.cursor() as cur:
             cur.execute("SELECT rad_takliflar FROM kod_qaror WHERE kalit=%s", (k,))
             rad = cur.fetchone()[0]
@@ -628,9 +628,9 @@ def test_pilot_korinishi(conn, cid) -> None:
         # BIR ATAMAGA IKKI KOD maqsadni SOXTA yaqinlashtirmasin.
         k = PREFIKS + "_pilot"
         K.qaror_ochish(cid, k, "ZZ")
-        K.qaror_yoz(cid, k, "ZZ", "kod", kim="s", code="26.30")
+        K.qaror_yoz(cid, k, "ZZ", "kod", kim="s", code="26.30", ishonch="kompaniya_sessiyasi")
         K.qaror_yoz(cid, k, "ZZ", "kod", kim="s", code="26.20",
-                    qoshimcha_kod=True)
+                    qoshimcha_kod=True, ishonch="kompaniya_sessiyasi")
         p1 = K.pilot_holati(cid)
         check("ikki kod -> atama_soni FAQAT 1 oshdi",
               (p1.get("atama_soni") or 0) == boshlangich + 1,

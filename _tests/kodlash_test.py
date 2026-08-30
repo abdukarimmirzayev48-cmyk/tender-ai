@@ -594,7 +594,7 @@ def test_qaror_navbatni_kamaytiradi(cid: int):
 
     try:
         kodlash.qaror_ochish(cid, k, atama)
-        kodlash.qaror_yoz(cid, k, atama, "otkazildi", kim=KIM)
+        kodlash.qaror_yoz(cid, k, atama, "otkazildi", kim=KIM, ishonch="kompaniya_sessiyasi")
 
         nav2 = kodlash.navbat(cid, limit=40, takliflar_bilan=False)
         kalitlar = [x["kalit"] for x in nav2["atamalar"]]
@@ -612,7 +612,7 @@ def test_qaror_navbatni_kamaytiradi(cid: int):
               f"jami={nav2['jami_mahsulot']} yig'indi={nav2['toifa_yigindi']}")
 
         # --- TAKROR bosish qaror sonini SHISHIRMASIN (ko'rinadi) ---
-        kodlash.qaror_yoz(cid, k, atama, "otkazildi", kim=KIM)
+        kodlash.qaror_yoz(cid, k, atama, "otkazildi", kim=KIM, ishonch="kompaniya_sessiyasi")
         o = kodlash.qaror_olchov(cid)
         check("takror bosish `atama_soni` ni oshirmaydi",
               (o.get("qaror_soni") or 0) > (o.get("atama_soni") or 0),
@@ -641,7 +641,7 @@ def test_olchanmagan_vaqt_nol_emas(cid: int):
     K = "zztest atama kaliti"
     try:
         # OCHILISHSIZ qaror -> o'lchov YO'Q.
-        kodlash.qaror_yoz(cid, K, "ZZTEST atama", "otkazildi", kim=KIM)
+        kodlash.qaror_yoz(cid, K, "ZZTEST atama", "otkazildi", kim=KIM, ishonch="kompaniya_sessiyasi")
         r = db.query_one(
             "SELECT ochilgan_at, qaror_at FROM kod_qaror "
             "WHERE company_id=%(c)s AND kalit=%(k)s", {"c": cid, "k": K})
@@ -669,7 +669,7 @@ def test_olchanmagan_vaqt_nol_emas(cid: int):
         n = kodlash.qaror_qidiruv(cid, K)
         check("qidiruv sanog'i ochiq qatorga yozildi", n == 1, str(n))
 
-        kodlash.qaror_yoz(cid, K, "ZZTEST atama", "talabsiz", kim=KIM)
+        kodlash.qaror_yoz(cid, K, "ZZTEST atama", "talabsiz", kim=KIM, ishonch="kompaniya_sessiyasi")
         o2 = kodlash.qaror_olchov(cid)
         check("ochilgan qaror O'LCHANDI", (o2.get("olchangan") or 0) >= 1,
               str(o2.get("olchangan")))

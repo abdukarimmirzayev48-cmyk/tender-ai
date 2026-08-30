@@ -343,7 +343,7 @@ def test_ilova_qatlami(conn, cid, tid) -> None:
         # `by=None` — 1 487 qatorni tug'dirgan chaqiruv shakli.
         for by in (None, 0, -1):
             try:
-                R.review_set(rid, cid, "approved", by=by)
+                R.review_set(rid, cid, "approved", by=by, ishonch="kompaniya_sessiyasi")
                 check(f"review_set(by={by}) RAD ETILDI", False, "qabul qilindi!")
             except ValueError as e:
                 check(f"review_set(by={by}) RAD ETILDI", True, str(e)[:70])
@@ -351,20 +351,20 @@ def test_ilova_qatlami(conn, cid, tid) -> None:
         # Mashina holatini API orqali qo'yib bo'lmaydi.
         for holat in ("extracted", "pending_review", "pending"):
             try:
-                R.review_set(rid, cid, holat, by=cid)
+                R.review_set(rid, cid, holat, by=cid, ishonch="kompaniya_sessiyasi")
                 check(f"review_set('{holat}') RAD ETILDI", False, "qabul qilindi!")
             except ValueError:
                 check(f"review_set('{holat}') RAD ETILDI", True)
 
         # `corrected` uchun qiymat SHART.
         try:
-            R.review_set(rid, cid, "corrected", by=cid)
+            R.review_set(rid, cid, "corrected", by=cid, ishonch="kompaniya_sessiyasi")
             check("review_set('corrected') qiymatsiz RAD ETILDI", False)
         except ValueError:
             check("review_set('corrected') qiymatsiz RAD ETILDI", True)
 
         # HAQIQIY inson qarori ISHLAYDI va audit maydonlarini to'ldiradi.
-        row = R.review_set(rid, cid, "approved", by=cid)
+        row = R.review_set(rid, cid, "approved", by=cid, ishonch="kompaniya_sessiyasi")
         check("HAQIQIY inson tasdig'i yozildi", bool(row), str(row)[:80])
         if row:
             check("review_action = 'approve'", row.get("review_action") == "approve",
@@ -374,7 +374,7 @@ def test_ilova_qatlami(conn, cid, tid) -> None:
             check("reviewed_at yozildi", row.get("reviewed_at") is not None)
 
         # TUZATISH: previous_value AVTOMATIK to'ladi.
-        row2 = R.review_set(rid, cid, "corrected", corrected="24 oy", by=cid)
+        row2 = R.review_set(rid, cid, "corrected", corrected="24 oy", by=cid, ishonch="kompaniya_sessiyasi")
         check("tuzatish: review_action='correct'",
               bool(row2) and row2.get("review_action") == "correct")
         check("tuzatish: previous_value AVTOMATIK to'ldi",
@@ -386,7 +386,7 @@ def test_ilova_qatlami(conn, cid, tid) -> None:
         # `review_bulk` ham `by` talab qiladi.
         for by in (None, 0):
             try:
-                R.review_bulk(tid, cid, "approved", by=by)
+                R.review_bulk(tid, cid, "approved", by=by, ishonch="kompaniya_sessiyasi")
                 check(f"review_bulk(by={by}) RAD ETILDI", False, "qabul qilindi!")
             except ValueError:
                 check(f"review_bulk(by={by}) RAD ETILDI", True)
@@ -424,7 +424,7 @@ def test_qayta_ajratish(conn, cid, tid) -> None:
     try:
         r = _db.execute_returning(R.SQL_UPSERT, baza)
         rid = r["id"]
-        R.review_set(rid, cid, "approved", by=cid)
+        R.review_set(rid, cid, "approved", by=cid, ishonch="kompaniya_sessiyasi")
 
         with conn.cursor() as cur:
             cur.execute("SELECT review_status, reviewed_by FROM tender_requirement "
