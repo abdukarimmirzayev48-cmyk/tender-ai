@@ -36,14 +36,23 @@ from dotenv import load_dotenv
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+# KONSOL KODLASHI — Windows kod sahifasidan MUSTAQIL UTF-8.
+#
+# Chiqish QUVUR yoki FAYLGA yo'naltirilganda (ya'ni CI da) Python
+# `locale.getpreferredencoding()` ni oladi — bu mashinada `cp1251`.
+# O'zbek kirill (`ҳ`, `қ`, `ў`) va to'liq kenglikdagi belgilar
+# (`）`) u yerda YO'Q va chop etish `UnicodeEncodeError` bilan
+# BUTUN TO'PLAMNI o'ldiradi. `import_test` aynan shu sababdan
+# 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import konsol  # noqa: E402
+
+konsol.sozla()
+
 load_dotenv(os.path.join(ROOT, ".env"))
 
 from api import db, notify, telegram  # noqa: E402
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except (AttributeError, OSError):
-    pass
 
 
 # ---------------------------------------------------------------------------

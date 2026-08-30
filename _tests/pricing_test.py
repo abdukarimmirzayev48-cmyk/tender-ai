@@ -23,6 +23,19 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# KONSOL KODLASHI — Windows kod sahifasidan MUSTAQIL UTF-8.
+#
+# Chiqish QUVUR yoki FAYLGA yo'naltirilganda (ya'ni CI da) Python
+# `locale.getpreferredencoding()` ni oladi — bu mashinada `cp1251`.
+# O'zbek kirill (`ҳ`, `қ`, `ў`) va to'liq kenglikdagi belgilar
+# (`）`) u yerda YO'Q va chop etish `UnicodeEncodeError` bilan
+# BUTUN TO'PLAMNI o'ldiradi. `import_test` aynan shu sababdan
+# 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import konsol  # noqa: E402
+
+konsol.sozla()
+
 from api import pricing  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

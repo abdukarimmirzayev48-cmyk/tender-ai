@@ -11,12 +11,39 @@ chaqiriladi. Sinov oxirida bazadagi BARCHA sinov yozuvlari o'chiriladi
 """
 import io
 import os
+import subprocess
 import sys
 from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# KONSOL KODLASHI — BU SINOV UMUMAN YURMAYDIGAN HOLATDA EDI.
+#
+# O'lchangan (2026-08-30): `cleanup()` bazadan kelgan mahsulot nomlarini
+# chop etayotganda yiqilardi:
+#
+#     UnicodeEncodeError: 'charmap' codec can't encode character
+#     '）' in position 17317: character maps to <undefined>
+#
+# To'plam BIRORTA tekshiruv natijasini bermasdan o'lardi — ya'ni
+# "yiqilgan" emas, "YURMAGAN". Bu yomonroq: 143 ta tekshiruv bor edi
+# va ularning hech biri bajarilmasdi, qizil chiroq ham yonmasdi.
+#
+# NOSOZLIK AYNAN CI SHAROITIDA CHIQADI. Windows'da Python HAQIQIY
+# konsolga `WriteConsoleW` bilan yozadi va yiqilmaydi; chiqish QUVUR
+# yoki FAYLGA yo'naltirilganda esa `locale.getpreferredencoding()`
+# (bu mashinada `cp1251`) ishlatiladi. Shuning uchun odam terminalda
+# yurgizganda muammo KO'RINMASDI.
+#
+# UNICODE CHIQISH OLIB TASHLANMAYDI — kodlash ANIQ belgilanadi:
+# mahsulot nomlari uch alifboda keladi va ular chiqishning MAZMUNI.
+# Tafsilot: `_tests/konsol.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import konsol                                       # noqa: E402
+
+konsol.sozla()
 
 from dotenv import load_dotenv                       # noqa: E402
 
@@ -565,17 +592,99 @@ def cleanup():
     print("\n[12] Bazani tozalash (sinov yozuvlari)")
     n, b = _silent_cleanup()
     print(f"     o‘chirildi: {n} mahsulot, {b} import partiyasi")
-    left = db.query("SELECT id, name, stock_qty FROM catalog_product ORDER BY id")
-    print(f"     bazada qolgan mahsulotlar ({len(left)}):",
-          [(r["id"], r["name"]) for r in left])
-    check("sinov mahsulotlari qolmadi",
-          not any(str(r["name"]).startswith(PREFIX) for r in left), "")
+
+    # FAQAT TEKSHIRUVGA TEGISHLI QATORLAR CHOP ETILADI.
+    #
+    # Ilgari bu yerda BUTUN katalog chop etilardi:
+    #     print(f"bazada qolgan mahsulotlar ({len(left)}):",
+    #           [(r["id"], r["name"]) for r in left])
+    # Bu 1 797 qator = har yurishda ~75 KB shovqin, va aynan shu
+    # qator `UnicodeEncodeError` bilan butun to'plamni o'ldirgan edi.
+    #
+    # Tekshiruv faqat SINOV prefiksli qatorlar qolganini so'raydi —
+    # butun katalogni ko'rsatish unga hech narsa qo'shmaydi, CI
+    # jurnalini esa o'qib bo'lmaydigan qiladi.
+    qolgan = db.query(
+        "SELECT id, name FROM catalog_product "
+        "WHERE name LIKE %(p)s ORDER BY id LIMIT 20",
+        {"p": PREFIX + "%"})
+    jami = db.scalar("SELECT count(*) FROM catalog_product") or 0
+    print(f"     katalogda jami: {jami} mahsulot")
+    if qolgan:
+        print(f"     TOZALANMAGAN sinov qatorlari ({len(qolgan)}):",
+              [(r["id"], r["name"]) for r in qolgan])
+    check("sinov mahsulotlari qolmadi", not qolgan,
+          str([r["name"] for r in qolgan[:5]]))
+
+
+#: Aynan shu belgilar `import_test` ni o'ldirgan edi (cp1251 da YO'Q):
+#:   ）  FULLWIDTH RIGHT PARENTHESIS — katalogdagi mahsulot nomlarida
+#:   ҳ  o'zbek kirill "ҳ"
+#:   ұ  o'zbek kirill "ұ"
+QOTIL_BELGILAR = "）ҳұқўғ№—"
+
+
+def test_konsol_kodlashi():
+    """KODLASH TUZATISHINI REGRESSIYADAN QULFLAYDI.
+
+    Bu sinov IMPORT MANTIQINI tekshirmaydi — u SINOV JABDUQINING
+    o'zi ishlashini tekshiradi. Alohida turishi shart: jabduq
+    yiqilsa qolgan 143 tekshiruv UMUMAN BAJARILMAYDI va natija
+    "yiqildi" emas, "yurmadi" bo'ladi.
+    """
+    print("\n[0] Konsol kodlashi — jabduq o'zi ishlaydimi")
+
+    check("oqimlar Unicode ni QABUL QILADI", konsol.tekshir(),
+          f"stdout.encoding={sys.stdout.encoding}")
+    check("stdout UTF-8", (sys.stdout.encoding or "").lower()
+          .replace("-", "") in ("utf8", "utf8sig"), str(sys.stdout.encoding))
+
+    # HAQIQIY YOZUV. `encoding` atributiga ishonish yetarli emas —
+    # u to'g'ri ko'rinib, yozuv baribir yiqilishi mumkin.
+    print(f"     qotil belgilar chop etilmoqda: {QOTIL_BELGILAR}")
+    check("qotil belgilar YIQILMASDAN chop etildi", True)
+
+    # ENG MUHIM TEKSHIRUV: BOLA JARAYON, chiqishi QUVURGA,
+    # `PYTHONIOENCODING` MAJBURAN cp1251 — ya'ni AYNAN nosozlik
+    # sharoiti qayta yaratiladi. `konsol.sozla()` uni yengishi shart.
+    kod = (
+        "import os, sys\n"
+        f"sys.path.insert(0, r{os.path.dirname(os.path.abspath(__file__))!r})\n"
+        "import konsol\n"
+        "konsol.sozla()\n"
+        f"print({QOTIL_BELGILAR!r})\n"
+    )
+    bola = subprocess.run(
+        [sys.executable, "-c", kod],
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "cp1251"},
+        timeout=60)
+    check("cp1251 majburlangan bola jarayon YIQILMADI",
+          bola.returncode == 0,
+          (bola.stderr or b"").decode("utf-8", "replace")[-200:])
+    check("Unicode chiqish YO'QOLMADI (`?` ga almashmadi)",
+          QOTIL_BELGILAR.encode("utf-8") in (bola.stdout or b""),
+          (bola.stdout or b"")[:80].decode("utf-8", "replace"))
+
+    # NAZORAT: tuzatishsiz o'sha bola HAQIQATAN yiqiladimi.
+    # Busiz sinov "hech qachon yiqilmaydigan" bo'lib qolardi va
+    # hech narsani isbotlamasdi.
+    xom = subprocess.run(
+        [sys.executable, "-c", f"print({QOTIL_BELGILAR!r})"],
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "cp1251"},
+        timeout=60)
+    check("tuzatishSIZ o'sha bola YIQILADI (nazorat)",
+          xom.returncode != 0
+          and b"UnicodeEncodeError" in (xom.stderr or b""),
+          f"kod={xom.returncode}")
 
 
 def main():
     global TEST_COMPANY_ID
     from api import auth
 
+    test_konsol_kodlashi()
     make_fixtures()
     db.init_pool()
     # Pool ko'tarilgandan KEYIN: kompaniya bazadan aniqlanadi.
