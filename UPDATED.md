@@ -594,7 +594,7 @@ ogohlantiradi — `_talab()` ning YUQORI CHEGARA ekani interfeysda ham ko'rinadi
 ## 17. Ishga tushirish
 
 ```powershell
-# 1) Baza migratsiyalari — 57 ta, KUZATILADIGAN va TARTIBLI
+# 1) Baza migratsiyalari — 58 ta, KUZATILADIGAN va TARTIBLI
 #    Alfavit tartibi 67 ta bog'liqlikni buzadi (o'lchandi) — shuning
 #    uchun `Get-ChildItem` BILAN QO'LLAMANG.
 .venv\Scripts\python.exe migratsiya.py --holat      # nima qo'llangan
@@ -733,6 +733,7 @@ raqam kiyimidagi shakli.
 | 2026-08-31 | (§22) | **Migratsiya versiyalash** — 55 ta patch kuzatuvga olindi; alfavit tartibi 67 bog'liqlikni buzardi |
 | 2026-08-31 | (§23) | **Aktor kimligi va audit** — qaror endi odamga bog'lanadi; ijarachi izolyatsiyasi kompozit FK bilan |
 | 2026-08-31 | (§24) | **Xavfsizlik qattiqlashtirish** — 1 Critical + 5 High tuzatildi; eng kam huquqli rol 24/24 bilan tasdiqlandi |
+| 2026-08-31 | (§25) | **Ma'lumot xaritasi** — 7 manba endpointi, kelib chiqish qamrovi 0 yetishmovchilik, 8 ta NOMA'LUM belgilandi |
 
 ---
 
@@ -750,6 +751,7 @@ raqam kiyimidagi shakli.
 | `docs/erp_bosqichlar.md` | ERP integratsiya bosqichlari |
 | `docs/erp_integratsiya.md`, `_2.md` | ERP integratsiya tafsilotlari |
 | `docs/erp_texnik.md` | ERP texnik shartnoma |
+| `docs/legal-data-map.md` | **Ma'lumot xaritasi — huquqiy tekshiruv uchun (faktlar)** |
 | `docs/xavfsizlik.md` | **Xavfsizlik: tahdid modeli, topilmalar, nazoratlar** |
 | `docs/erp_kimlik.md` | **Aktor kimligi va audit — arxitektura qarori (ADR)** |
 | `docs/integration/migratsiya.md` | **Migratsiya versiyalash — operator qo'llanmasi** |
@@ -1071,6 +1073,80 @@ Ya'ni almashtirish ilovani buzmaydi — tekshirilgan, taxmin emas.
 
 `_tests/xavfsizlik_test.py` — 95/95 (oflayn) / 105/105 (baza bilan).
 To'liq to'plam **24/24**. `npm audit` = **0 zaiflik**.
+
+
+---
+
+## 25. Ma'lumot xaritasi — huquqiy tekshiruv uchun texnik asos
+
+To'liq hujjat: `docs/legal-data-map.md`.
+
+**BU HUJJATDA HUQUQIY XULOSA YO'Q** — faqat o'lchangan faktlar.
+Aniqlanmagan narsa NOMA'LUM deb belgilangan (8 ta band).
+
+### Tashqi manbalar (7 ta endpoint, 2 ta domen)
+
+`api.xt-xarid.uz` (`/rpc`, `/urpc`, `/file/`) va
+`apietender.uzex.uz` (`/api/common/TradeList`, `GetTrade`,
+`DownloadFile`, `Libs/GetRegions`).
+
+Chastota **Windows Task Scheduler'dan o'qildi**, taxmin emas:
+`TenderAI-ETL-Hourly` va `TenderAI-RAG` — ikkalasi ham `PT1H`, faol.
+
+Manbalarga **kalit yoki hisob ishlatilmaydi** — so'rovlar anonim.
+
+### Qayta tarqatish
+
+Hujjat **fayli SAQLANMAYDI** — yuklab olish manbadan proksi
+qilinadi. Hujjat **MATNI** esa saqlanadi: 4 011 qator, **134 MB**,
+188 561 bo'lak.
+
+### Shaxsiy bo'lishi mumkin bo'lgan maydonlar — o'lchandi
+
+Qiymatlar hujjatga KO'CHIRILMAGAN, faqat naqsh sanog'i:
+
+| Maydon | To'ldirilgan | Xususiyat |
+|---|---|---|
+| `tender_detail.director` | 2 964 | 2 959 tasida ism ko'rinishidagi matn |
+| `raw_json->detail->contacts` | 2 683 | 78 tasida telefonga o'xshash raqam, 50 tasida email |
+| `tender_detail.company_details` | 2 960 | tuzilishi TAHLIL QILINMAGAN |
+| `tender_item.delivery_address` | 9 973 | — |
+| hujjat matni | 4 011 | 441 tasida email, 212 tasida telefon naqshi |
+
+### Kelib chiqish — bo'shliq topildi va to'ldirildi
+
+Metama'lumot to'liq edi, LEKIN ommaviy havolani qurish naqshi
+FAQAT FRONTENDDA edi — bazadan so'ralganda mashina o'qiy oladigan
+javob yo'q edi. `schema_patch_manba_url.sql` uni bazaga ko'chirdi:
+`manba_url()`, `v_tender_manba`, `v_hujjat_manba`, `v_manba_qamrov`
++ `GET /manba/tender/{id}`, `GET /manba/qamrov`.
+
+**Qamrov o'lchandi:** `tender` 3 605, `tender_document` 10 634,
+`doc_chunk` 188 561 — **har ustunda 0 ta yetishmovchilik**.
+
+### Tashqi AI — tasdiqlandi
+
+`paid_allowed()` = **False**, `get_client()` **BLOKLANADI**,
+`EMBED_PROVIDER` = **local**, `.env` da `AI_PAID_ENABLED` **umuman
+yo'q**. Qulf YAGONA NUQTADA: har Anthropic chaqiruvi
+`ai.get_client()` dan o'tadi va `paid_guard()` kesh tekshiruvidan
+ham OLDIN ishlaydi.
+
+### Saqlash va o'chirish — o'lchangan cheklov
+
+Avtomatik tozalash faqat 2 ta (sessiya, `login_attempt` 90 kun).
+Tender ma'lumoti, hujjat matni, bo'laklar, chat, audit — **muddat
+YO'Q**.
+
+**Ijarachini hozir o'chirib BO'LMAYDI** (tranzaksiyada tekshirildi,
+qaytarildi): `audit_jurnal` append-only trigger'i kaskadni to'sadi.
+Audit kafolati va o'chirish talabi bir-biriga QARSHI turadi — bu
+arxitekturaviy qaror talab qiladi, texnik "tuzatish" emas.
+
+### Sinov
+
+`_tests/manba_test.py` — 41/41. Kelib chiqish qamrovi nolga teng
+bo'lib qolishini qo'riqlaydi. To'liq to'plam **25/25**.
 
 
 ---
