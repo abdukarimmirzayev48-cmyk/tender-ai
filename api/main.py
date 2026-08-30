@@ -3399,6 +3399,50 @@ def kod_qaror_olchov(request: Request):
 
 
 # ===========================================================================
+# KELIB CHIQISH (provenance) — huquqiy tekshiruv uchun
+#
+# Har yozuv OMMAVIY manbaga qaytarib bog'lanadi. Naqsh BAZADA
+# (`manba_url()` funksiyasi) — ilgari u faqat frontendda edi va
+# bazadan so'ralganda mashina o'qiy oladigan javob yo'q edi.
+#
+# Batafsil: `docs/legal-data-map.md`.
+# ===========================================================================
+@app.get("/manba/qamrov")
+def manba_qamrov(request: Request):
+    """Kelib chiqish metama'lumoti QANCHA yozuvda yetishmaydi.
+
+    Nol bo'lmagan ustun — kelib chiqishi yo'q yozuvlar bor. Bu
+    O'LCHOV, da'vo emas: raqam o'zi gapiradi.
+    """
+    company_id_of(request)              # darvoza: kirmagan ko'ra olmaydi
+    if not db.scalar("SELECT to_regclass('public.v_manba_qamrov') IS NOT NULL"):
+        return {"tayyor": False,
+                "sabab": "schema_patch_manba_url.sql qo'llanmagan"}
+    return {"tayyor": True, "qamrov": db.query("SELECT * FROM v_manba_qamrov")}
+
+
+@app.get("/manba/tender/{tender_id}")
+def manba_tender(tender_id: int, request: Request):
+    """Bitta tenderning manbaga qaytish yo'li va uning hujjatlari.
+
+    `ommaviy_url` NULL bo'lsa — platforma naqshi NOMA'LUM va taxminiy
+    havola BERILMAYDI. "Noma'lum" va "havola yo'q" bir xil emas.
+    """
+    company_id_of(request)
+    if not db.scalar("SELECT to_regclass('public.v_tender_manba') IS NOT NULL"):
+        raise HTTPException(status_code=501,
+                            detail="schema_patch_manba_url.sql qo'llanmagan")
+    t = db.query_one("SELECT * FROM v_tender_manba WHERE ichki_id = %(id)s",
+                     {"id": tender_id})
+    if not t:
+        raise HTTPException(status_code=404, detail="Tender topilmadi.")
+    return {"tender": t,
+            "hujjatlar": db.query(
+                "SELECT * FROM v_hujjat_manba WHERE tender_id = %(id)s "
+                "ORDER BY file_ref", {"id": tender_id})}
+
+
+# ===========================================================================
 # AKTOR VA AUDIT (auth-6)
 #
 # Tender-AI ga KOMPANIYA kiradi, odam emas. Aktor — ERP hodimiga
