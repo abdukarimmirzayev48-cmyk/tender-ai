@@ -338,7 +338,8 @@ def extract(tender_id: int, company_id: int) -> Dict[str, Any]:
             "company_id": company_id, "tender_id": tender_id,
             "lot_id": None, "source": "document", "method": METHOD,
             # NAQSH — AI natijasi, inson TEKSHIRISHI kerak.
-            "review_status": "pending",
+            "review_status": "pending_review",
+            "mashina_holat": "ajratilgan",
             "position_no": i, "name": t["name"][:2000],
             "attrs": json.dumps({"tur": t["tur"], "qiymat": t["qiymat"],
                                  "manba": "naqsh"}, ensure_ascii=False),

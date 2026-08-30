@@ -79,10 +79,13 @@ GO_MIN_OK = 3
 
 SQL_TALABLAR = """
 SELECT id, name, attrs->>'tur' AS tur, attrs->>'qiymat' AS qiymat,
-       confidence, review_status, corrected_value, raw_snippet,
+       confidence, review_status, mashina_holat, reviewed_by,
+       corrected_value, raw_snippet,
        file_ref, char_start, delivery_days
 FROM tender_requirement
 WHERE tender_id = %(t)s AND company_id = %(c)s
+  -- FAQAT INSON rad etgani chiqib ketadi. `extracted` (reyestr)
+  -- qoladi: u rad etilgan emas, shunchaki inson ko'rmagan.
   AND review_status <> 'rejected'
 ORDER BY confidence DESC, id
 """
@@ -127,16 +130,37 @@ def kun(qiymat: Optional[str]) -> Optional[int]:
 
 
 def _hukm(r: Dict[str, Any], daraja: str) -> str:
-    """Tasdiqlanmagan talabga asoslangan `fail` -> `risk`.
+    """Ishonchsiz talabga asoslangan `fail` -> `risk`.
 
-    Inson tasdiqlagan bo'lsa yoki ishonch chegaradan yuqori bo'lsa
-    hukm to'liq kuchda qoladi.
+    IKKI SABABDAN BIRI yetarli: INSON tasdiqlagan, YOKI mashina
+    ishonchi chegaradan yuqori. Ular BOSHQA-BOSHQA asoslar va shu
+    sababli alohida funksiyalar bilan o'qiladi — ilgari ikkalasi
+    bitta `review_status` ustunidan chiqarilardi va reyestr
+    pozitsiyalari "inson tasdiqladi" bo'lib ko'rinardi (1 487 qator,
+    o'lchangan 2026-08-30).
     """
     if daraja != "fail":
         return daraja
-    tasdiq = (r.get("review_status") in ("approved", "corrected")
-              or float(r.get("confidence") or 0) >= ISHONCH_CHEGARA)
-    return "fail" if tasdiq else "risk"
+    return "fail" if (_inson_tasdiqladi(r) or _ishonchli(r)) else "risk"
+
+
+def _inson_tasdiqladi(r: Dict[str, Any]) -> bool:
+    """INSON haqiqatan tasdiqladimi (yoki tuzatdimi)?
+
+    Faqat holatga qarash YETARLI EMAS deb o'ylash mumkin, lekin endi
+    yetarli: `tender_requirement_inson_qarori_chk` cheklovi
+    `approved`/`corrected` ni `reviewed_by IS NOT NULL` bo'lmasdan
+    yozishga YO'L QO'YMAYDI. `reviewed_by` ham tekshiriladi —
+    cheklov kelajakda o'chirilsa ham bu funksiya yolg'on
+    gapirmasin.
+    """
+    return (r.get("review_status") in ("approved", "corrected")
+            and r.get("reviewed_by") is not None)
+
+
+def _ishonchli(r: Dict[str, Any]) -> bool:
+    """MASHINA ishonchi chegaradan yuqorimi? Bu INSON tasdig'i EMAS."""
+    return float(r.get("confidence") or 0) >= ISHONCH_CHEGARA
 
 
 def _qiymat(r: Dict[str, Any]) -> Optional[str]:
@@ -146,13 +170,24 @@ def _qiymat(r: Dict[str, Any]) -> Optional[str]:
 
 def _dalil(r: Dict[str, Any]) -> Dict[str, Any]:
     """Hukm QAYSI talabdan kelganini ko'rsatadi — manbaga sakrash uchun."""
+    inson = _inson_tasdiqladi(r)
+    ishonch = _ishonchli(r)
     return {"requirement_id": r["id"], "name": r["name"],
             "qiymat": _qiymat(r), "confidence": float(r["confidence"] or 0),
             "review_status": r["review_status"],
+            "mashina_holat": r.get("mashina_holat"),
             "file_ref": r.get("file_ref"), "char_start": r.get("char_start"),
-            "tasdiqlanmagan": not (
-                r.get("review_status") in ("approved", "corrected")
-                or float(r.get("confidence") or 0) >= ISHONCH_CHEGARA)}
+            # IKKI ALOHIDA BAYROQ — bittasi ikkinchisini bildirmaydi.
+            #   inson_tasdiqladi  odam ko'rdi va roziligini berdi
+            #   mashina_ishonchli mashina ishonchi chegaradan yuqori
+            # Ilgari bitta `tasdiqlanmagan` bayrog'i bor edi va u
+            # ikkalasini ARALASHTIRARDI: reyestr pozitsiyasi (inson
+            # ko'rmagan, ishonch 1.00) "tasdiqlangan" bo'lib chiqardi.
+            "inson_tasdiqladi": inson,
+            "mashina_ishonchli": ishonch,
+            # Eskisi MOSLIK uchun qoldirildi, lekin endi ANIQ ma'noli:
+            # "na inson tasdig'i, na yetarli mashina ishonchi".
+            "tasdiqlanmagan": not (inson or ishonch)}
 
 
 # =====================================================================

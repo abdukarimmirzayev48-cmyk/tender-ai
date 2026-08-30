@@ -10,11 +10,25 @@ Nima tekshiriladi:
   C. AMALIY  — idempotentlik, izolyatsiya, yurish jurnali
 """
 import io
+import json
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# KONSOL KODLASHI — Windows kod sahifasidan MUSTAQIL UTF-8.
+#
+# Chiqish QUVUR yoki FAYLGA yo'naltirilganda (ya'ni CI da) Python
+# `locale.getpreferredencoding()` ni oladi — bu mashinada `cp1251`.
+# O'zbek kirill (`ҳ`, `қ`, `ў`) va to'liq kenglikdagi belgilar
+# (`）`) u yerda YO'Q va chop etish `UnicodeEncodeError` bilan
+# BUTUN TO'PLAMNI o'ldiradi. `import_test` aynan shu sababdan
+# 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import konsol  # noqa: E402
+
+konsol.sozla()
 
 from dotenv import load_dotenv                              # noqa: E402
 load_dotenv(os.path.join(os.path.dirname(
@@ -25,6 +39,37 @@ from api import db, requirement as R                        # noqa: E402
 PASS = FAIL = 0
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _yozilgan = []          # (company_id, tender_id) — oxirida tozalanadi
+
+#: (company_id, tender_id) -> SINOVDAN OLDIN mavjud bo'lgan qator id lari.
+#:
+#: NEGA KERAK — O'LCHANGAN NUQSON (2026-08-30):
+#: `tozala()` `DELETE FROM tender_requirement WHERE company_id=.. AND
+#: tender_id=..` qilardi, ya'ni O'SHA JUFTLIKDAGI HAMMA NARSANI.
+#: Sinov esa kompaniyani `company_account ORDER BY id LIMIT 2` bilan
+#: oladi va u REAL ishlab turgan kompaniya (id=2) ga tushadi, tender
+#: ham REAL. Natijada har sinov yurishi PRODUCTION qatorlarini
+#: o'chirib yuborardi: 8785 -> 8736 (44 qator, o'lchangan).
+#:
+#: Nuqson JIMGINA edi — sinov yashil qolardi, chunki u o'chirilgan
+#: narsani tekshirmasdi. Endi tozalash FAQAT sinov YARATGAN qatorlarni
+#: oladi: oldindan mavjud id lar eslab qolinadi va tegilmaydi.
+_oldingi_idlar: dict = {}
+
+
+def belgila(cid: int, tid: int) -> None:
+    """(kompaniya, tender) juftligini tozalash ro'yxatiga qo'shadi.
+
+    Qo'shishdan OLDIN o'sha juftlikda ALLAQACHON turgan qatorlarni
+    eslab qoladi — ular sinovniki EMAS va tegilmasligi kerak.
+    """
+    kalit = (cid, tid)
+    if kalit not in _oldingi_idlar:
+        _oldingi_idlar[kalit] = {
+            r["id"] for r in db.query(
+                "SELECT id FROM tender_requirement "
+                "WHERE company_id=%(c)s AND tender_id=%(t)s",
+                {"c": cid, "t": tid})}
+    _yozilgan.append(kalit)
 
 
 def _cheklov_xatosimi(e: Exception) -> bool:
@@ -232,7 +277,7 @@ def test_amaliy():
         check("ikki kompaniya bor", False, "izolyatsiya sinovi uchun kerak")
         return
     A, B = kompaniyalar[0], kompaniyalar[1]
-    _yozilgan.extend([(A, tid), (B, tid)])
+    belgila(A, tid); belgila(B, tid)
 
     r1 = R.from_api(tid, A)
     check("from_api talab yozdi", r1["n"] > 0, str(r1))
@@ -261,7 +306,7 @@ def test_amaliy():
         WHERE NOT EXISTS (SELECT 1 FROM tender_good g WHERE g.tender_id=t.id)
         LIMIT 1""")
     if yoq_tender:
-        _yozilgan.append((A, yoq_tender))
+        belgila(A, yoq_tender)
         r = R.from_api(yoq_tender, A)
         check("pozitsiyasiz tender: 0 talab, lekin JURNAL bor",
               r["n"] == 0 and R.run_info(yoq_tender, A) is not None, str(r))
@@ -309,7 +354,7 @@ def test_hujjatdan():
     # --- Amaliy: soxta javobni saqlash ---
     tid = db.scalar("SELECT id FROM tender LIMIT 1")
     cid = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
-    _yozilgan.append((cid, tid))
+    belgila(cid, tid)
 
     natija = {"requirements": [
         {"name": "Kafolat muddati", "tur": "kafolat", "qiymat": "12 oy",
@@ -593,7 +638,7 @@ def test_review():
     if not tid:
         check("bo'sh tender topildi", False)
         return
-    _yozilgan.append((A, tid))
+    belgila(A, tid)
 
     # TURLARI HAR XIL: aks holda `qisqa()` ikkitasidan qaysinisini
     # tanlashi NOANIQ bo'ladi (ikkalasi ham tasdiqlangan, faqat ishonch
@@ -609,7 +654,8 @@ def test_review():
             "qty": None, "unit": None, "delivery_days": None,
             "is_mandatory": True, "confidence": conf, "raw_snippet": "matn",
             "file_ref": "a.pdf", "char_start": 100, "char_end": 400,
-            "model": "sinov", "review_status": "pending"})
+            "model": "sinov", "review_status": "pending_review",
+            "mashina_holat": "ajratilgan"})
 
     # --- 1. Navbatga TUSHDIMI ---
     navbat = {x["tender_id"] for x in R.review_queue(A, 500)}
@@ -617,7 +663,7 @@ def test_review():
 
     items = R.review_items(tid, A)
     check("ikkala talab ham 'pending'",
-          all(x["review_status"] == "pending" for x in items), str(items[:1]))
+          all(x["review_status"] == "pending_review" for x in items), str(items[:1]))
 
     # NOM bo'yicha olamiz, INDEKS bo'yicha EMAS.
     # `review_items()` ishonch bo'yicha O'SISH tartibida qaytaradi
@@ -637,11 +683,14 @@ def test_review():
           len(R.review_items(tid, B)) == 0)
 
     # --- 3. IDOR: B kompaniya A ning talabini o'zgartira olmaydi ---
-    natija = R.review_set(kafolat_id, B, "approved")
+    # `by=B` beriladi: `by` endi MAJBURIY (soxta tasdiqqa qarshi), va
+    # bu sinov aynan IDOR ni tekshiradi — kim ekani NOMA'LUM emas,
+    # boshqa kompaniya. SQL sharti uni baribir topa olmaydi.
+    natija = R.review_set(kafolat_id, B, "approved", by=B)
     check("B kompaniya A ning talabini O'ZGARTIRA OLMAYDI",
           natija is None, str(natija))
     check("holat o'zgarmadi",
-          top("Sinov kafolat")["review_status"] == "pending")
+          top("Sinov kafolat")["review_status"] == "pending_review")
 
     # --- 4. TASDIQLASH ---
     r1 = R.review_set(kafolat_id, A, "approved", by=A)
@@ -652,7 +701,7 @@ def test_review():
 
     # --- 5. TUZATISH — qiymatsiz RAD ETILADI ---
     try:
-        R.review_set(shablon_id, A, "corrected", corrected="  ")
+        R.review_set(shablon_id, A, "corrected", corrected="  ", by=A)
         check("qiymatsiz 'corrected' rad etiladi", False, "qabul qilindi")
     except ValueError:
         check("qiymatsiz 'corrected' rad etiladi", True)
@@ -797,7 +846,8 @@ def test_inson_mehnati_olchovi():
 
     # 1. HOLAT: avto-tasdiq HAQIQATAN bor.
     n_avto = db.scalar("""SELECT count(*) FROM tender_requirement
-        WHERE review_status <> 'pending' AND reviewed_by IS NULL""") or 0
+        WHERE review_status <> 'pending_review'
+          AND reviewed_by IS NULL""") or 0
     n_inson = db.scalar("""SELECT count(*) FROM tender_requirement
         WHERE reviewed_by IS NOT NULL""") or 0
     check("avto-tasdiqlangan qatorlar bor (sinov ma'noli)",
@@ -848,9 +898,21 @@ def test_inson_mehnati_olchovi():
     rsrc = io.open(os.path.join(ROOT, "api", "requirement.py"),
                    encoding="utf-8").read()
     j = rsrc.find("def review_bulk")
+    # Bo'shliqlar NORMALLASHTIRILADI va oyna funksiya OXIRIGACHA
+    # cho'ziladi: sinov FORMATLASHGA emas, QOIDAGA bog'liq bo'lsin.
+    # (Bu tekshiruv 2026-08-30 da aynan shu sababdan yolg'on yiqildi:
+    # kod `reviewed_by   = %(by)s` deb tekislangan edi.)
+    oyna = rsrc[j:rsrc.find("\ndef ", j + 10)] if j > 0 else ""
+    tekis = " ".join(oyna.split())
     check("`review_bulk` `reviewed_by` yozadi",
-          j > 0 and "reviewed_by = %(by)s" in rsrc[j:j + 900],
+          "reviewed_by = %(by)s" in tekis,
           "ommaviy tasdiqlash HAM inson harakati")
+    check("`review_bulk` `review_action` ham yozadi",
+          "review_action = %(amal)s" in tekis,
+          "amal holatga MOS bo'lishini baza CHECK bilan talab qiladi")
+    check("`review_bulk` `by` siz ISHLAMAYDI",
+          "by is None or int(by) <= 0" in tekis,
+          "ommaviy amal soxta tasdiq uchun eng qulay yo'l edi")
 
     # 5. SKANERNI SINAYMIZ.
     yomon = "korilgan = count WHERE review_status <> 'pending'"
@@ -971,11 +1033,38 @@ def test_pilot():
         LIMIT 1""", {"c": A})
     if tashqari:
         tid = tashqari
+        # O'Z QATORIMIZNI YARATAMIZ, mavjudini O'ZGARTIRMAYMIZ.
+        #
+        # O'LCHANGAN NUQSON (2026-08-30): ilgari bu blok
+        # `R.review_items(tid, A)` dan MAVJUD qatorni olib, unga
+        # `approved` keyin `corrected="24 oy"` yozardi. Qator
+        # sinovniki emas edi va `tozala()` uni tiklamasdi (u faqat
+        # YANGI qatorlarni o'chiradi), ya'ni o'zgarish ABADIY qolardi.
+        #
+        # Natijada bazada "Litsenziya" talabi `corrected_value='24 oy'`
+        # bo'lib turardi — inson tuzatgan deb ko'rinadigan, lekin
+        # hech kim yozmagan qiymat. Ya'ni sinovning o'zi aynan shu
+        # fayl tekshirayotgan nuqson sinfini ISHLAB CHIQARARDI.
+        #
+        # Qaysi kompaniyaga tegishi TARTIBGA bog'liq edi: `A` =
+        # `company_account ORDER BY id LIMIT 1`, va `import_test.py`
+        # o'zining ZZTEST kompaniyasini o'chirgan paytda `A` REAL
+        # kompaniyaga tushardi.
+        belgila(A, tid)
+        db.execute_returning(R.SQL_UPSERT, {
+            "company_id": A, "tender_id": tid, "lot_id": None,
+            "source": "document", "method": "naqsh", "position_no": 9101,
+            "name": "[SINOV] yopiq rejim",
+            "attrs": json.dumps({"tur": "kafolat", "qiymat": "12 oy"}),
+            "qty": None, "unit": None, "delivery_days": None,
+            "is_mandatory": False, "confidence": 0.75, "raw_snippet": None,
+            "file_ref": None, "char_start": None, "char_end": None,
+            "model": None, "review_status": "pending_review",
+            "mashina_holat": "ajratilgan"})
         items = [x for x in R.review_items(tid, A)
-                 if x["review_status"] == "pending"]
+                 if x["name"] == "[SINOV] yopiq rejim"]
         if items:
             it = items[0]
-            _yozilgan.append((A, tid))
             R.review_set(it["id"], A, "approved", by=A, blind_value="12 oy")
             keyin = next(x for x in R.review_items(tid, A)
                          if x["id"] == it["id"])
@@ -1014,7 +1103,7 @@ def test_pilot():
         JOIN review_pilot p ON p.tender_id = r.tender_id
                            AND p.company_id = r.company_id
         WHERE p.rejim = 'blind' AND r.reviewed_by IS NULL
-          AND r.review_status <> 'pending'""") or 0
+          AND r.review_status <> 'pending_review'""") or 0
     n_inson = db.scalar("""
         SELECT count(*) FROM tender_requirement r
         JOIN review_pilot p ON p.tender_id = r.tender_id
@@ -1082,7 +1171,7 @@ def test_vaqt_olchovi():
     if not tid:
         check("bo'sh tender topildi", False)
         return
-    _yozilgan.append((A, tid))
+    belgila(A, tid)
     db.execute_returning("""DELETE FROM requirement_review_open
         WHERE company_id=%(c)s AND tender_id=%(t)s RETURNING tender_id""",
         {"c": A, "t": tid})
@@ -1096,7 +1185,8 @@ def test_vaqt_olchovi():
             "qty": None, "unit": None, "delivery_days": None,
             "is_mandatory": False, "confidence": 0.90, "raw_snippet": "m",
             "file_ref": "a.pdf", "char_start": 1, "char_end": 2,
-            "model": "sinov", "review_status": "pending"})
+            "model": "sinov", "review_status": "pending_review",
+            "mashina_holat": "ajratilgan"})
 
     # --- OCHILISH yoziladi ---
     R.review_ochildi(tid, A)
@@ -1193,7 +1283,7 @@ def test_eskirish():
         check("bo'lagi bor OCHIQ tender topildi", False,
               "sinov ma'lumoti yo'q — eskirish tekshirilmadi")
         return
-    _yozilgan.append((A, tid))
+    belgila(A, tid)
 
     # 1. 'no_text' holatini QO'YAMIZ (matn yo'q edi degan holat)
     R._run_yoz(A, tid, "naqsh", "no_text", 0, None, None,
@@ -1249,7 +1339,7 @@ def test_yorliqlash():
     if not tid:
         check("bo'sh tender topildi", False)
         return
-    _yozilgan.append((A, tid))
+    belgila(A, tid)
 
     db.execute_returning(R.SQL_UPSERT, {
         "company_id": A, "tender_id": tid, "lot_id": None,
@@ -1259,7 +1349,8 @@ def test_yorliqlash():
         "qty": None, "unit": None, "delivery_days": None,
         "is_mandatory": True, "confidence": 0.90, "raw_snippet": "matn",
         "file_ref": "a.pdf", "char_start": 1, "char_end": 2,
-        "model": "sinov", "review_status": "pending"})
+        "model": "sinov", "review_status": "pending_review",
+            "mashina_holat": "ajratilgan"})
 
     def olish():
         return next(x for x in R.review_items(tid, A)
@@ -1325,7 +1416,7 @@ def test_qayta_ajratish():
     if not tid:
         check("bo'sh tender topildi", False)
         return
-    _yozilgan.append((A, tid))
+    belgila(A, tid)
 
     def yoz(qiymat: str):
         db.execute_returning(R.SQL_UPSERT, {
@@ -1337,7 +1428,8 @@ def test_qayta_ajratish():
             "is_mandatory": True, "confidence": 0.90,
             "raw_snippet": "matn", "file_ref": "a.pdf",
             "char_start": 1, "char_end": 2, "model": "sinov",
-            "review_status": "pending"})
+            "review_status": "pending_review",
+            "mashina_holat": "ajratilgan"})
 
     def olish():
         return next(x for x in R.review_items(tid, A)
@@ -1355,7 +1447,7 @@ def test_qayta_ajratish():
     yoz("24 oy")                                   # hujjat yangilandi
     x = olish()
     check("qiymat o'zgarsa tasdiq BEKOR bo'ladi",
-          x["review_status"] == "pending", str(x["review_status"]))
+          x["review_status"] == "pending_review", str(x["review_status"]))
     check("jurnalga 'qiymat_ozgardi' yozildi",
           "qiymat_ozgardi" in (x["review_note"] or ""), str(x["review_note"]))
     check("izohda ESKI va YANGI qiymat bor",
@@ -1371,7 +1463,7 @@ def test_qayta_ajratish():
     check("inson tuzatgan qiymat SAQLANADI",
           x["corrected_value"] == "36 oy", str(x["corrected_value"]))
     check("lekin qayta ko'rib chiqishga QAYTADI",
-          x["review_status"] == "pending", str(x["review_status"]))
+          x["review_status"] == "pending_review", str(x["review_status"]))
 
 
 # =====================================================================
@@ -1429,17 +1521,44 @@ def test_indeks_taqiqi():
 
 # =====================================================================
 def tozala():
-    n = 0
+    """FAQAT sinov YARATGAN qatorlarni o'chiradi.
+
+    O'LCHANGAN NUQSON (2026-08-30): ilgari butun (kompaniya, tender)
+    juftligi o'chirilardi — `DELETE ... WHERE company_id=.. AND
+    tender_id=..`. Sinov kompaniyani `company_account ORDER BY id
+    LIMIT 2` bilan oladi va u REAL ishlab turgan kompaniyaga
+    (id=2) tushadi, tender ham real. Ya'ni sinov o'z ma'lumotini
+    emas, MIJOZNIKINI o'chirardi: 8785 -> 8736 (44 qator).
+
+    Nuqson JIMGINA edi — sinov yashil qolardi, chunki u o'chirilgan
+    narsani tekshirmasdi. Endi sinovdan OLDIN mavjud bo'lgan id lar
+    eslab qolinadi va ularga TEGILMAYDI.
+    """
+    n = ochirildi = tegilmadi = 0
     for cid, tid in set(_yozilgan):
-        db.execute_returning(
-            "DELETE FROM tender_requirement WHERE company_id=%(c)s "
-            "AND tender_id=%(t)s RETURNING id", {"c": cid, "t": tid})
-        db.execute_returning(
-            "DELETE FROM tender_requirement_run WHERE company_id=%(c)s "
-            "AND tender_id=%(t)s RETURNING company_id", {"c": cid, "t": tid})
+        oldin = _oldingi_idlar.get((cid, tid), set())
+        hozir = {r["id"] for r in db.query(
+            "SELECT id FROM tender_requirement "
+            "WHERE company_id=%(c)s AND tender_id=%(t)s",
+            {"c": cid, "t": tid})}
+        yangi = hozir - oldin
+        tegilmadi += len(hozir & oldin)
+        if yangi:
+            db.execute_returning(
+                "DELETE FROM tender_requirement WHERE id = ANY(%(ids)s) "
+                "RETURNING id", {"ids": list(yangi)})
+            ochirildi += len(yangi)
+        # Yurish jurnali: juftlikda oldin HECH NARSA bo'lmagan
+        # bo'lsagina o'chiramiz — aks holda real yurish tarixi
+        # yo'qolardi.
+        if not oldin:
+            db.execute_returning(
+                "DELETE FROM tender_requirement_run WHERE company_id=%(c)s "
+                "AND tender_id=%(t)s RETURNING company_id", {"c": cid, "t": tid})
         n += 1
     qoldiq = db.scalar("SELECT count(*) FROM tender_requirement")
-    print(f"\nTozalandi: {n} ta (kompaniya, tender) juftligi. "
+    print(f"\nTozalandi: {n} ta juftlik, {ochirildi} ta SINOV qatori "
+          f"o'chirildi, {tegilmadi} ta mavjud qator TEGILMADI. "
           f"Jadvalda qolgan: {qoldiq}")
 
 

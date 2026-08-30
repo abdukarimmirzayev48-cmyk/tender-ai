@@ -61,12 +61,13 @@ SQL_UPSERT = """
 INSERT INTO tender_requirement
     (company_id, tender_id, lot_id, source, method, position_no, name, attrs,
      qty, unit, delivery_days, is_mandatory, confidence, raw_snippet,
-     file_ref, char_start, char_end, model, review_status)
+     file_ref, char_start, char_end, model, review_status, mashina_holat)
 VALUES
     (%(company_id)s, %(tender_id)s, %(lot_id)s, %(source)s, %(method)s,
      %(position_no)s, %(name)s, %(attrs)s::jsonb, %(qty)s, %(unit)s,
      %(delivery_days)s, %(is_mandatory)s, %(confidence)s, %(raw_snippet)s,
-     %(file_ref)s, %(char_start)s, %(char_end)s, %(model)s, %(review_status)s)
+     %(file_ref)s, %(char_start)s, %(char_end)s, %(model)s,
+     %(review_status)s, %(mashina_holat)s)
 ON CONFLICT (company_id, tender_id, source, method, position_no, name)
 DO UPDATE SET
     lot_id        = EXCLUDED.lot_id,
@@ -101,22 +102,59 @@ DO UPDATE SET
     -- yo'qolmaydi), lekin asl qiymat o'zgargani qayta ko'rib
     -- chiqishga sabab bo'ladi.
     review_status = CASE
-        WHEN tender_requirement.review_status = 'pending'
+        WHEN tender_requirement.review_status IN ('extracted', 'pending_review')
             THEN EXCLUDED.review_status
         WHEN tender_requirement.attrs->>'qiymat'
              IS DISTINCT FROM EXCLUDED.attrs->>'qiymat'
-            THEN 'pending'
+            THEN 'pending_review'
         ELSE tender_requirement.review_status END,
+    -- INSON IZLARI TOZALANADI. Bu YANGI va MAJBURIY: qiymat o'zgargani
+    -- uchun holat `pending_review` ga qaytsa, `reviewed_by` va
+    -- `reviewed_at` joyida qolsa `tender_requirement_mashina_toza_chk`
+    -- cheklovi UPSERT ni RAD ETADI.
+    --
+    -- Bu ATAYLAB shunday: aks holda "navbatda turibdi, lekin inson
+    -- ko'rgan" degan yarim holat qolardi va navbat bilan hisoblagich
+    -- BIR XIL bazadan IKKI xil javob berardi. Aynan shu chalkashlik
+    -- 1 487 ta soxta "approved" ni tug'dirgan edi.
+    --
+    -- Inson mehnati YO'QOLMAYDI: `corrected_value`, `previous_value`
+    -- va `review_note` saqlanadi, ya'ni "u nima degandi" bilinadi.
+    reviewed_by = CASE
+        WHEN tender_requirement.review_status
+             NOT IN ('extracted', 'pending_review')
+         AND tender_requirement.attrs->>'qiymat'
+             IS DISTINCT FROM EXCLUDED.attrs->>'qiymat'
+            THEN NULL
+        ELSE tender_requirement.reviewed_by END,
+    reviewed_at = CASE
+        WHEN tender_requirement.review_status
+             NOT IN ('extracted', 'pending_review')
+         AND tender_requirement.attrs->>'qiymat'
+             IS DISTINCT FROM EXCLUDED.attrs->>'qiymat'
+            THEN NULL
+        ELSE tender_requirement.reviewed_at END,
+    review_action = CASE
+        WHEN tender_requirement.review_status
+             NOT IN ('extracted', 'pending_review')
+         AND tender_requirement.attrs->>'qiymat'
+             IS DISTINCT FROM EXCLUDED.attrs->>'qiymat'
+            THEN NULL
+        ELSE tender_requirement.review_action END,
     -- JURNALGA YOZAMIZ. Aks holda broker "men buni tasdiqlagandim-ku"
     -- deb hayron bo'ladi va tizimga ishonchi tushadi.
     review_note = CASE
-        WHEN tender_requirement.review_status <> 'pending'
+        WHEN tender_requirement.review_status
+             NOT IN ('extracted', 'pending_review')
          AND tender_requirement.attrs->>'qiymat'
              IS DISTINCT FROM EXCLUDED.attrs->>'qiymat'
             THEN 'qiymat_ozgardi: '
                  || COALESCE(tender_requirement.attrs->>'qiymat', '-')
                  || ' -> ' || COALESCE(EXCLUDED.attrs->>'qiymat', '-')
+                 || ' (tasdiq bekor qilindi, qayta ko''rish kerak)'
         ELSE tender_requirement.review_note END,
+    -- Mashina o'qi ajratishdan keladi va INSON qaroriga bog'liq emas.
+    mashina_holat = EXCLUDED.mashina_holat,
     extracted_at  = now()
 RETURNING id
 """
@@ -251,8 +289,22 @@ def from_api(tender_id: int, company_id: int) -> Dict[str, Any]:
             "lot_id": g.get("lot_id"),
             "source": "api",
             "method": "reyestr",
-            # REYESTR — rasmiy yozuv, inson tasdig'i TALAB QILINMAYDI.
-            "review_status": "approved",
+            # REYESTR — manba platformasining RASMIY yozuvi, model
+            # taxmini emas. Shuning uchun u navbatga TUSHMAYDI.
+            #
+            # LEKIN "approved" DEB YOZILMAYDI. Ilgari aynan shunday
+            # edi va 1 487 qator "inson tasdiqlagan" bo'lib ko'rindi
+            # (o'lchangan 2026-08-30, `reviewed_by` = 0). Ikki boshqa
+            # gap bitta ustunga yuklangan edi:
+            #     "bu ma'lumotga ishonsa bo'ladi"  -> mashina_holat
+            #     "buni inson tasdiqladi"          -> review_status
+            #
+            # Endi ular AJRATILGAN. `review_status='extracted'` —
+            # halol: mashina chiqardi, inson ko'rmadi, navbatda ham
+            # emas. Ishonchlilik `mashina_holat='manba'` va
+            # `confidence=1.00` dan o'qiladi.
+            "review_status": "extracted",
+            "mashina_holat": "manba",
             "position_no": i,
             "name": (g.get("name") or "").strip()[:2000] or f"pozitsiya {i}",
             "attrs": json.dumps(attrs, ensure_ascii=False),
@@ -347,7 +399,14 @@ def prompt_block(tender_id: int, company_id: int,
     rows = db.query("""
         SELECT name, method, attrs->>'qiymat' AS qiymat,
                attrs->>'tur' AS tur, is_mandatory, confidence,
-               file_ref, char_start, review_status, corrected_value
+               file_ref, char_start, review_status, corrected_value,
+               -- MODELGA AYTILADIGAN GAP DALILGA TAYANSIN.
+               -- Ilgari faqat holatga qaralardi va "INSON TASDIQLAGAN"
+               -- degan yorliq reyestr pozitsiyalariga ham tushardi.
+               -- Endi holat CHECK bilan kafolatlangan, lekin dalilni
+               -- ham olib kelamiz: model uchun yozilgan matn eng
+               -- kuchli da'vo va u ikki qavat tekshirilsin.
+               reviewed_by, mashina_holat
         FROM tender_requirement
         WHERE company_id = %(c)s AND tender_id = %(t)s
           AND source = 'document'
@@ -369,7 +428,7 @@ def prompt_block(tender_id: int, company_id: int,
         holat = r["review_status"]
         # INSON TASDIQLAGAN talab — eng ishonchli ma'lumot. Uni
         # model ishonchi bilan bir xil ko'rsatish XATO bo'lardi.
-        if holat in ("approved", "corrected"):
+        if holat in ("approved", "corrected") and r.get("reviewed_by"):
             tasdiqlangan += 1
             manba = "INSON TASDIQLAGAN"
         else:
@@ -410,7 +469,14 @@ def qisqa(tender_id: int, company_id: int) -> Dict[str, Any]:
         SELECT count(*) FILTER (WHERE source = 'document') AS hujjatdan,
                count(*) FILTER (WHERE is_mandatory) AS majburiy,
                count(*) FILTER (WHERE confidence < 0.60) AS past,
-               count(*) FILTER (WHERE review_status = 'pending') AS kutayotgan,
+               count(*) FILTER (WHERE review_status = 'pending_review')
+                   AS kutayotgan,
+               -- MASHINA chiqargani (reyestr) ALOHIDA sanaladi.
+               -- Ilgari u "tasdiqlangan" ga qo'shilardi va interfeys
+               -- "1487 tasdiqlangan" deb ko'rsatardi — hech kim
+               -- ko'rmagan bo'lsa ham.
+               count(*) FILTER (WHERE review_status = 'extracted')
+                   AS mashina_chiqargan,
                count(*) FILTER (WHERE review_status IN ('approved','corrected'))
                    AS tasdiqlangan
         FROM tender_requirement
@@ -439,6 +505,10 @@ def qisqa(tender_id: int, company_id: int) -> Dict[str, Any]:
         "majburiy": int(hisob.get("majburiy") or 0),
         "past_ishonchli": int(hisob.get("past") or 0),
         "kutayotgan": int(hisob.get("kutayotgan") or 0),
+        # MASHINA chiqargani ALOHIDA. Ilgari u "tasdiqlangan" ga
+        # qo'shilardi va interfeys inson ko'rmagan talablarni
+        # tasdiqlangan deb ko'rsatardi.
+        "mashina_chiqargan": int(hisob.get("mashina_chiqargan") or 0),
         "tasdiqlangan": int(hisob.get("tasdiqlangan") or 0),
         "kafolat": eng.get("kafolat"),
         "tolov": eng.get("tolov"),
@@ -462,6 +532,44 @@ def qisqa(tender_id: int, company_id: int) -> Dict[str, Any]:
 #: Tasdiqlanmagan talab shu chegaradan past bo'lsa — cheklistda emas,
 #: "tekshirish kerak" bo'limida ko'rinadi.
 ISHONCH_CHEGARA = 0.85
+
+
+# =====================================================================
+# HOLAT LUG'ATI — IKKI O'Q, BIR-BIRIGA ARALASHMAYDI
+# =====================================================================
+#
+# O'LCHANGAN SABAB (2026-08-30): bitta `review_status` ustuni ikki
+# boshqa savolga javob berardi va ular bir-biriga aylanib ketgan edi:
+#
+#     "bu ma'lumotga ishonsa bo'ladimi?"   -> MASHINA savoli
+#     "buni inson tasdiqladimi?"           -> INSON savoli
+#
+# Reyestr pozitsiyalari birinchisiga "ha" bergani uchun ikkinchisiga
+# ham "ha" deb yozilgan edi: 1 487 qator `approved`, `reviewed_by`
+# esa 0. Endi ular AJRATILGAN va baza ularni CHECK bilan ajratib
+# turadi (`schema_patch_requirement_8.sql`).
+
+#: MASHINA qo'yadigan holatlar. Ko'rib chiqish API si bularni
+#: QO'YA OLMAYDI — faqat ajratish qatlami yozadi.
+MASHINA_HOLATLARI = frozenset({
+    "extracted",        # mashina chiqardi, navbatda EMAS (reyestr)
+    "pending_review",   # navbatda, INSONNI kutmoqda
+})
+
+#: INSON qo'yadigan holatlar. Har biri `reviewed_by` + `reviewed_at`
+#: + `review_action` ni TALAB qiladi (baza cheklovi).
+INSON_QARORLARI = frozenset({"approved", "rejected", "corrected"})
+
+#: Holat -> inson amali. Baza `tender_requirement_amal_chk` bilan
+#: shu moslikni majburlaydi, bu yerda esa yagona manba.
+AMAL = {"approved": "approve", "rejected": "reject", "corrected": "correct"}
+
+#: `mashina_holat` lug'ati.
+#:   manba       — platformaning RASMIY reyestr yozuvi (xulosa emas)
+#:   ajratilgan  — matndan naqsh yoki model chiqargan
+MASHINA_MANBA = "manba"
+MASHINA_AJRATILGAN = "ajratilgan"
+
 
 SQL_REVIEW_QUEUE = """
 SELECT tender_id, tender_name, close_at, kutayotgan, modeldan, naqshdan,
@@ -493,7 +601,7 @@ SELECT id, name, method, source, attrs, confidence, is_mandatory,
        blind_value
 FROM tender_requirement
 WHERE company_id = %(company_id)s AND tender_id = %(tender_id)s
-ORDER BY (review_status = 'pending') DESC,
+ORDER BY (review_status = 'pending_review') DESC,
          CASE WHEN confidence >= 0.90 AND (id %% 5) = 0 THEN 0 ELSE 1 END,
          is_mandatory DESC, confidence, name
 """
@@ -514,10 +622,26 @@ UPDATE tender_requirement
        -- o'zgartirsa ham, ASL mustaqil javob qolishi kerak — aks
        -- holda kelishmovchilik darajasi yolg'on chiqadi.
        blind_value     = COALESCE(blind_value, %(blind)s),
+       -- TUZATISHDAN OLDINGI qiymat. Ilgari faqat "nimaga" saqlanardi,
+       -- "nimadan" esa yo'q edi va uni keyin `attrs` dan qayta
+       -- hisoblashga to'g'ri kelardi.
+       previous_value  = CASE
+           WHEN %(status)s = 'corrected'
+               THEN COALESCE(previous_value, corrected_value,
+                             attrs->>'qiymat', '(bo''sh)')
+           ELSE previous_value END,
        reviewed_by     = %(by)s,
-       reviewed_at     = now()
+       reviewed_at     = now(),
+       -- INSON AYNAN NIMA QILDI. `review_status` dan kelib chiqadi,
+       -- lekin ALOHIDA yoziladi va CHECK ikkalasining mosligini
+       -- majburlaydi — ya'ni holatni yozib amalni unutib bo'lmaydi.
+       review_action   = CASE %(status)s
+                             WHEN 'approved'  THEN 'approve'
+                             WHEN 'rejected'  THEN 'reject'
+                             WHEN 'corrected' THEN 'correct' END
  WHERE id = %(id)s AND company_id = %(company_id)s
-RETURNING id, tender_id, review_status, doc_type
+RETURNING id, tender_id, review_status, review_action, doc_type,
+          reviewed_by, reviewed_at, previous_value, corrected_value
 """
 
 
@@ -539,13 +663,33 @@ def review_set(req_id: int, company_id: int, status: str,
                by: Optional[int] = None,
                doc_type: Optional[str] = None,
                blind_value: Optional[str] = None) -> Optional[dict]:
-    """Bitta talabning holatini o'zgartiradi.
+    """INSON qarorini yozadi. FAQAT inson qarori.
+
+    BU FUNKSIYA MASHINA HOLATINI QO'YA OLMAYDI. `extracted` va
+    `pending_review` ro'yxatda ATAYLAB YO'Q: ular ajratish qatlamining
+    ishi. Aks holda API orqali "bu talab endi ko'rilmagan" deb
+    yozish mumkin bo'lardi va inson qarori jimgina yo'qolardi.
+
+    `by` (kim) MAJBURIY. Ilgari u `Optional` edi va `None` bilan
+    chaqirilsa baza `approved, reviewed_by IS NULL` qatorini QABUL
+    QILARDI — aynan shu 1 487 ta soxta tasdiqni tug'dirgan sinf.
+    Endi ikki qavat himoya bor: bu tekshiruv va
+    `tender_requirement_inson_qarori_chk` cheklovi.
 
     `corrected` FAQAT `status='corrected'` uchun. Sxema buni CHECK
     bilan ham himoya qiladi — bu yerda ANIQ xato beramiz.
     """
-    if status not in ("pending", "approved", "rejected", "corrected"):
-        raise ValueError(f"noma'lum holat: {status}")
+    if status not in INSON_QARORLARI:
+        raise ValueError(
+            f"noma'lum yoki ruxsat etilmagan holat: {status}. "
+            f"Ruxsat etilgan: {', '.join(sorted(INSON_QARORLARI))}. "
+            f"Mashina holatlarini ({', '.join(sorted(MASHINA_HOLATLARI))}) "
+            f"ko'rib chiqish API si QO'YA OLMAYDI.")
+    if by is None or int(by) <= 0:
+        raise ValueError(
+            "inson qarori uchun `by` (kim) SHART va musbat bo'lishi kerak — "
+            "aks holda 'tasdiqlangan, lekin kim tasdiqlagani noma'lum' "
+            "qatori paydo bo'lardi (2026-08-30 da o'lchangan: 1487 ta)")
     if status == "corrected" and not (corrected or "").strip():
         raise ValueError("'corrected' uchun `corrected_value` SHART — "
                          "aks holda 'tuzatdim, lekin nimaga?' holati qoladi")
@@ -801,7 +945,7 @@ def review_speed(company_id: int) -> dict:
     # ishlamaydi, va buni raqam bilan ko'rish kerak.
     osish = db.scalar("""
         SELECT count(DISTINCT tender_id) FROM tender_requirement
-        WHERE company_id = %(c)s AND review_status = 'pending'
+        WHERE company_id = %(c)s AND review_status = 'pending_review'
           AND extracted_at > now() - interval '24 hours'""",
         {"c": company_id}) or 0
 
@@ -862,21 +1006,37 @@ def labeled(company_id: int, limit: int = 1000) -> List[dict]:
 
 def review_bulk(tender_id: int, company_id: int, status: str,
                 by: Optional[int] = None) -> int:
-    """Tenderning BARCHA kutayotgan talablarini bir holatga o'tkazadi.
+    """Tenderning BARCHA navbatdagi talablarini bir holatga o'tkazadi.
 
     Faqat `approved`/`rejected`: ommaviy TUZATISH ma'nosiz, har
     qiymat alohida yoziladi.
+
+    `by` MAJBURIY — bu ham INSON qarori, faqat ko'p qatorga. Ommaviy
+    amal soxta tasdiq uchun eng qulay yo'l edi: bitta chaqiruv bilan
+    yuzlab qatorga `approved` yozib, `reviewed_by` ni `None` qoldirish
+    mumkin edi.
+
+    FAQAT `pending_review` ga tegadi. `extracted` (reyestr) qatorlari
+    ATAYLAB tashqarida: ular navbatda emas va ularni "hammasini
+    tasdiqla" tugmasi bilan ko'rmasdan tasdiqlash aynan shu patch
+    tuzatayotgan muammoni qaytarardi.
     """
     if status not in ("approved", "rejected"):
         raise ValueError("ommaviy amal faqat approved/rejected bo'ladi")
+    if by is None or int(by) <= 0:
+        raise ValueError(
+            "ommaviy tasdiq uchun `by` (kim) SHART va musbat bo'lishi kerak")
     rows = db.query("""
         UPDATE tender_requirement
-           SET review_status = %(status)s, reviewed_by = %(by)s,
-               reviewed_at = now()
+           SET review_status = %(status)s,
+               reviewed_by   = %(by)s,
+               reviewed_at   = now(),
+               review_action = %(amal)s
          WHERE company_id = %(c)s AND tender_id = %(t)s
-           AND review_status = 'pending'
+           AND review_status = 'pending_review'
         RETURNING id""",
-        {"c": company_id, "t": tender_id, "status": status, "by": by})
+        {"c": company_id, "t": tender_id, "status": status, "by": by,
+         "amal": AMAL[status]})
     return len(rows)
 
 
@@ -891,25 +1051,38 @@ def ishonchli(tender_id: int, company_id: int) -> List[dict]:
     dan yuqori. Qolgani cheklistga TUSHMAYDI — arvoh blocker
     chiqmasin.
 
-    DIQQAT — IZOH AVVAL YOLG'ON EDI. U "INSON TASDIQLAGAN" derdi,
-    lekin `review_status = 'approved'` INSON ROZILIGINI
-    BILDIRMAYDI: reyestr pozitsiyalari AVTO-tasdiqlanadi
-    (`approved`, `confidence = 1.00`, `reviewed_by IS NULL`) va
-    ikkala shartga ham tushadi.
+    IKKI ASOS, IKKI USTUN (2026-08-30 da tuzatildi):
 
-    Reyestr uchun bu TO'G'RI — u manba platformasining ma'lumoti,
-    model taxmini emas. Lekin "inson tasdiqladi" deb o'qish xato
-    bo'lardi: shu chalkashlik `v_review_disagreement` da soxta
+        INSON asosi     review_status IN ('approved','corrected')
+                        -> endi CHECK bilan kafolatlangan: bu holat
+                           `reviewed_by IS NOT NULL` bo'lmasdan
+                           yozilmaydi.
+        MASHINA asosi   confidence >= ISHONCH_CHEGARA
+                        -> reyestr pozitsiyalari shu yo'l bilan
+                           kiradi (`confidence = 1.00`), inson
+                           tasdig'i sifatida EMAS.
+
+    ILGARI IZOH YOLG'ON EDI: u "inson tasdiqlagan" derdi, holbuki
+    reyestr pozitsiyalari `approved` deb YOZIB QO'YILGAN edi
+    (`reviewed_by IS NULL`, 1 487 qator) va birinchi shartga
+    tushardi. Shu chalkashlik `v_review_disagreement` da soxta
     "0% kelishmovchilik", vaqt o'lchovida esa shishgan `n_reviewed`
     bergan (§16.67).
 
-    INSON HAQIQATAN ko'rganini bilish kerak bo'lsa —
-    `reviewed_by IS NOT NULL` ni ishlating.
+    Endi ular ustun darajasida ajratilgan va IZOHGA emas, CHEKLOVGA
+    tayanadi. Natija AYNAN o'sha qatorlar (reyestr `confidence=1.00`
+    orqali kiradi), lekin SABABI endi halol.
+
+    Har qator `inson_tasdiqladi` bayrog'ini olib keladi — chaqiruvchi
+    "nima uchun bu yerda" degan savolga javob topsin.
     """
     return db.query("""
         SELECT id, name, attrs, is_mandatory, confidence, review_status,
+               mashina_holat, reviewed_by, reviewed_at,
                COALESCE(corrected_value, attrs->>'qiymat') AS qiymat,
-               file_ref, char_start
+               previous_value, file_ref, char_start,
+               (review_status IN ('approved', 'corrected')) AS inson_tasdiqladi,
+               (confidence >= %(ch)s)                       AS mashina_ishonchli
         FROM tender_requirement
         WHERE company_id = %(c)s AND tender_id = %(t)s
           AND review_status <> 'rejected'
@@ -928,6 +1101,16 @@ def summary(tender_id: int, company_id: int) -> Dict[str, Any]:
     r = db.query_one("""
         SELECT count(*) AS jami,
                count(*) FILTER (WHERE is_mandatory) AS majburiy,
+               -- IKKI O'Q ALOHIDA SANALADI. `ai_gonogo` va
+               -- `compare_tenders` shu ko'rinishni o'qiydi va ular
+               -- "tasdiqlangan" ni inson roziligi deb tushunishi
+               -- kerak — mashina chiqargani BOSHQA raqam.
+               count(*) FILTER (WHERE review_status = 'pending_review')
+                   AS navbatda,
+               count(*) FILTER (WHERE review_status = 'extracted')
+                   AS mashina_chiqargan,
+               count(*) FILTER (WHERE reviewed_by IS NOT NULL)
+                   AS inson_kordi,
                count(*) FILTER (WHERE source = 'document') AS hujjatdan,
                count(*) FILTER (WHERE method = 'naqsh') AS naqshdan,
                count(*) FILTER (WHERE method = 'llm') AS modeldan,
@@ -952,6 +1135,9 @@ def summary(tender_id: int, company_id: int) -> Dict[str, Any]:
         "naqshdan": int(r.get("naqshdan") or 0),
         "modeldan": int(r.get("modeldan") or 0),
         "past_ishonchli": int(r.get("past") or 0),
+        "navbatda": int(r.get("navbatda") or 0),
+        "mashina_chiqargan": int(r.get("mashina_chiqargan") or 0),
+        "inson_kordi": int(r.get("inson_kordi") or 0),
         "eng_past_ishonch": (float(r["eng_past"])
                              if r.get("eng_past") is not None else None),
         "usullar": [x["method"] for x in yurishlar],

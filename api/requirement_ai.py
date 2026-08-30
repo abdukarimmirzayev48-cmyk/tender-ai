@@ -380,7 +380,11 @@ def save(tender_id: int, company_id: int, natija: Dict[str, Any],
             "company_id": company_id, "tender_id": tender_id,
             "lot_id": None, "source": "document", "method": "llm",
             # MODEL natijasi — inson TEKSHIRISHI kerak (§16.44).
-            "review_status": "pending",
+            # `pending_review` NAVBATGA qo'yadi; `mashina_holat`
+            # esa ma'lumot QAYERDAN kelganini aytadi. Ikkalasi
+            # ALOHIDA — bittasini ikkinchisidan chiqarib bo'lmaydi.
+            "review_status": "pending_review",
+            "mashina_holat": "ajratilgan",
             "position_no": i,
             "name": (t.get("name") or "").strip()[:2000] or f"talab {i}",
             "attrs": json.dumps(attrs, ensure_ascii=False),
