@@ -1,0 +1,28 @@
+# =============================================================================
+# Tender AI — TIKLASH MASHQI (haftalik)
+# =============================================================================
+# Zaxirani VAQTINCHALIK bazaga tiklaydi, tekshiradi va tashlaydi.
+# ISHLAB CHIQARISH BAZASIGA TEGMAYDI.
+#
+# NEGA KERAK: sinalmagan zaxira faqat "fayl bor" degani. U ochiladimi,
+# ichida nima bor, tiklash qancha vaqt oladi — bularning hech biri
+# ma'lum emas, va ular AYNAN falokat paytida kerak bo'ladi.
+# =============================================================================
+[Unit]
+Description=Tender AI tiklash mashqi (%i)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=tenderai
+Group=tenderai
+WorkingDirectory=/opt/tenderai/%i/current
+EnvironmentFile=/etc/tenderai/%i.env
+ExecStart=/opt/tenderai/%i/current/deploy/bin/restore-test.sh %i
+TimeoutStartSec=10800
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tenderai-restore-test-%i
+NoNewPrivileges=true
+PrivateTmp=true

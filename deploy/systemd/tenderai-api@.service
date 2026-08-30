@@ -1,0 +1,86 @@
+# =============================================================================
+# Tender AI — FastAPI xizmati (SHABLON birlik)
+# =============================================================================
+# BITTA FAYL, IKKI MUHIT. `@` shablon: `%i` — nusxa nomi.
+#     systemctl enable --now tenderai-api@staging
+#     systemctl enable --now tenderai-api@production
+#
+# NEGA SHABLON: staging va production uchun ikkita deyarli bir xil
+# fayl saqlash — ular ajralib ketishining eng qisqa yo'li. Bitta
+# faylni o'zgartirsang ikkalasi ham oladi.
+#
+# O'RNATISH:
+#     sudo cp tenderai-api@.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+# =============================================================================
+[Unit]
+Description=Tender AI API (%i)
+Documentation=file:///opt/tenderai/%i/current/docs/deploy.md
+# TARMOQ va BAZA tayyor bo'lgach. `postgresql.service` shu mashinada
+# bo'lmasa (boshqariladigan baza) bu qator zararsiz — `Wants` yumshoq.
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=tenderai
+Group=tenderai
+
+# `current` — RELIZGA SIMVOLIK HAVOLA. Orqaga qaytarish shu havolani
+# almashtirish bilan bajariladi (`deploy/bin/rollback.sh`).
+WorkingDirectory=/opt/tenderai/%i/current
+
+# SIRLAR FAYLDAN, birlik faylidan EMAS. Bu fayl git da, sirlar esa
+# YO'Q: `/etc/tenderai/%i.env` faqat root va tenderai o'qiy oladi
+# (chmod 0640).
+EnvironmentFile=/etc/tenderai/%i.env
+
+ExecStart=/opt/tenderai/%i/current/.venv/bin/uvicorn api.main:app \
+    --host 127.0.0.1 \
+    --port ${API_PORT} \
+    --workers ${API_WORKERS} \
+    --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1 \
+    --no-access-log
+
+# `--no-access-log`: kirish jurnalini ILOVA o'zi yozadi (tuzilmali,
+# `api/jurnal.py`). Ikkalasi yoqilsa har so'rov ikki marta yozilardi.
+
+# QAYTA ISHGA TUSHIRISH SIYOSATI
+Restart=always
+RestartSec=5
+# 5 daqiqada 5 martadan ko'p yiqilsa TO'XTAYDI. Cheksiz sikl
+# jurnalni to'ldirib, haqiqiy sababni ko'mib tashlardi.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# To'xtatishda ishlab turgan so'rov tugasin.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Jurnal `journald` ga (tuzilmali JSON qatorlar).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tenderai-api-%i
+
+# --- QATTIQLASHTIRISH ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Model keshi va vaqtinchalik fayllar uchun YOZISH kerak bo'lgan
+# yagona joylar.
+ReadWritePaths=/opt/tenderai/%i/var
+Environment=HF_HOME=/opt/tenderai/%i/var/hf
+Environment=XDG_CACHE_HOME=/opt/tenderai/%i/var/cache
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

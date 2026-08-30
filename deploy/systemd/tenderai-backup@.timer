@@ -1,0 +1,17 @@
+# =============================================================================
+# Tender AI — zaxira jadvali (har kuni) + HAFTALIK TIKLASH MASHQI
+# =============================================================================
+# SINALMAGAN ZAXIRA — ZAXIRA EMAS. Tiklash mashqi alohida timer bilan
+# yuriladi: `tenderai-restore-test@.timer`.
+# =============================================================================
+[Unit]
+Description=Tender AI zaxira jadvali (%i)
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=tenderai-backup@%i.service
+
+[Install]
+WantedBy=timers.target

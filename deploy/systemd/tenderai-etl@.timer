@@ -1,0 +1,24 @@
+# =============================================================================
+# Tender AI — ETL jadvali (soatiga bir marta)
+# =============================================================================
+#     systemctl enable --now tenderai-etl@staging.timer
+#     systemctl list-timers 'tenderai-*'
+# =============================================================================
+[Unit]
+Description=Tender AI ETL jadvali (%i)
+
+[Timer]
+# Soat boshidan 7 daqiqa keyin — aniq "00" da hamma tizim manbaga
+# urilishini oldini oladi.
+OnCalendar=*-*-* *:07:00
+# TASODIFIY KECHIKISH: staging va production BIR VAQTDA manbaga
+# urilmasin.
+RandomizedDelaySec=180
+# MASHINA O'CHGAN BO'LSA — yoqilganda o'tkazib yuborilgan yurish
+# bajariladi. Windows'da bu yo'q edi va noutbuk yopilgan 13.8 soat
+# davomida BITTA ham yurish bo'lmagan (o'lchangan).
+Persistent=true
+Unit=tenderai-etl@%i.service
+
+[Install]
+WantedBy=timers.target

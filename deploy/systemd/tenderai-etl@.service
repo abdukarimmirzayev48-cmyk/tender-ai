@@ -1,0 +1,47 @@
+# =============================================================================
+# Tender AI — ETL yurishi (timer chaqiradi, `oneshot`)
+# =============================================================================
+# NEGA CRON EMAS, SYSTEMD TIMER:
+#   - ODAM KIRMAGAN BO'LSA HAM ishlaydi. Windows Task Scheduler'da
+#     bu aynan muammo edi: `LogonType=Interactive` sabab seans
+#     yopilganda yurish o'lardi (o'lchangan: 0xC000013A, 14 kunda
+#     154 ta yetim yurish).
+#   - Jurnal `journald` da — `journalctl -u tenderai-etl@staging`.
+#   - `Persistent=true` — mashina o'chgan bo'lsa, yoqilganda
+#     O'TKAZIB YUBORILGAN yurish bajariladi.
+# =============================================================================
+[Unit]
+Description=Tender AI ETL (%i)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tenderai
+Group=tenderai
+WorkingDirectory=/opt/tenderai/%i/current
+EnvironmentFile=/etc/tenderai/%i.env
+
+# VAQT BYUDJETI ILOVAGA BERILADI. `--max-seconds` bilan ETL o'zi
+# TOZA to'xtaydi va holatni `partial` deb yozadi. `TimeoutStartSec`
+# esa faqat OXIRGI to'siq: u ishga tushsa yurish YARIM qoladi va
+# sababi jurnalda ko'rinmasdi.
+ExecStart=/opt/tenderai/%i/current/.venv/bin/python run_etl.py \
+    --max-seconds ${ETL_MAX_SECONDS}
+TimeoutStartSec=3600
+
+# ETL yiqilsa TIMER keyingi safar qayta uradi — `Restart` KERAK EMAS
+# va u zararli bo'lardi: manba band bo'lsa qayta-qayta urilardi.
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tenderai-etl-%i
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tenderai/%i/var
+Environment=HF_HOME=/opt/tenderai/%i/var/hf
+Environment=XDG_CACHE_HOME=/opt/tenderai/%i/var/cache

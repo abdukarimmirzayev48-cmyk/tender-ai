@@ -1,0 +1,107 @@
+# =============================================================================
+# Tender AI — teskari proksi (Caddy)
+# =============================================================================
+# NEGA CADDY, nginx emas: HTTPS sertifikati AVTOMATIK olinadi va
+# yangilanadi. nginx + certbot bir xil natijani beradi, lekin ikkita
+# harakatlanuvchi qism va bitta cron ish qo'shadi. "Eng kichik
+# saqlab turiladigan" talab uchun bitta fayl afzal.
+#
+# O'RNATISH:
+#     sudo cp Caddyfile /etc/caddy/Caddyfile
+#     sudo caddy validate --config /etc/caddy/Caddyfile
+#     sudo systemctl reload caddy
+#
+# DOMENLARNI SHU YERDA ALMASHTIRING. Ular sir EMAS — repozitoriyda
+# turishi mumkin.
+# =============================================================================
+
+{
+	# Sertifikat muammosi haqida xabar keladigan manzil.
+	# ALMASHTIRING: email admin@example.uz
+	admin off
+}
+
+(umumiy) {
+	encode zstd gzip
+
+	# ILOVA O'Z SARLAVHALARINI QO'YADI (`api/main.py`). Bu yerda ular
+	# TAKRORLANMAYDI — ikki joyda turgan sozlama ajralib ketadi va
+	# qaysi biri amal qilayotgani noaniq bo'lardi.
+	#
+	# ISTISNO — HSTS: u TLS TERMINATORINING ishi, chunki faqat shu
+	# yer HTTPS ni haqiqatan tugatadi.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# Jurnal — JSON, ilova formati bilan bir xil.
+	log {
+		output file /var/log/caddy/{args[0]}.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+		format json
+	}
+}
+
+# -----------------------------------------------------------------------------
+# STAGING
+# -----------------------------------------------------------------------------
+# ALMASHTIRING: staging.example.uz
+staging.example.uz {
+	import umumiy staging
+
+	# STAGING YOPIQ. Bu ishlab chiqarish nusxasi emas, sinov maydoni:
+	# ochiq qolsa qidiruv tizimlariga tushadi va sinov ma'lumoti
+	# ommaviy bo'lib qoladi.
+	basic_auth {
+		# `caddy hash-password` bilan yasang va SHU YERGA qo'ying.
+		# Bu PAROL EMAS, bcrypt xeshi — repozitoriyda turishi
+		# mumkin, lekin baribir o'zingiznikini qo'ying.
+		staging $2a$14$REPLACE_WITH_YOUR_OWN_BCRYPT_HASH
+	}
+
+	# API — port muhitdan emas, bu yerda ANIQ: proksi qaysi portga
+	# urishini bilishi kerak va u `/etc/tenderai/staging.env` dagi
+	# `API_PORT` bilan MOS bo'lishi shart.
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy 127.0.0.1:8001 {
+			health_uri /ready
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+
+	# Frontend — QURILGAN statik fayllar. Dev-server ISHLATILMAYDI:
+	# u 0.0.0.0 ga bog'lanadi va zaifliklari bor (`docs/xavfsizlik.md` M-9).
+	handle {
+		root * /opt/tenderai/staging/current/frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# -----------------------------------------------------------------------------
+# PRODUCTION
+# -----------------------------------------------------------------------------
+# ALMASHTIRING: tender.example.uz
+tender.example.uz {
+	import umumiy production
+
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy 127.0.0.1:8000 {
+			health_uri /ready
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+
+	handle {
+		root * /opt/tenderai/production/current/frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}

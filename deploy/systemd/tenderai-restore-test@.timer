@@ -1,0 +1,12 @@
+[Unit]
+Description=Tender AI tiklash mashqi jadvali (%i)
+
+[Timer]
+# Yakshanba 04:00 — zaxiradan keyin, ish vaqtidan oldin.
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=900
+Persistent=true
+Unit=tenderai-restore-test@%i.service
+
+[Install]
+WantedBy=timers.target

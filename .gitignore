@@ -38,6 +38,11 @@ etl_cron.log
 .tmp/
 .runtime/
 
+# Joylashtirish muhit fayllari — SIR SAQLAYDI (DSN paroli, SMTP,
+# Telegram tokeni). Faqat `*.example` namunalari kuzatiladi.
+deploy/env/*.env
+!deploy/env/*.env.example
+
 # ===== OS / muharrir =====
 .DS_Store
 .idea/
