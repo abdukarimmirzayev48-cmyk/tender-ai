@@ -75,3 +75,5 @@
 560	0056_aktor	schema_patch_aktor.sql
 570	0057_huquq	schema_patch_huquq.sql
 580	0058_manba_url	schema_patch_manba_url.sql
+590	0059_kod_tahlil	schema_patch_kod_tahlil.sql
+600	0060_kod_tahlil_2	schema_patch_kod_tahlil_2.sql

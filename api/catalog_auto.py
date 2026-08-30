@@ -19,6 +19,47 @@ MIN_EVIDENCE = 2
 MIN_SHARE = 0.75
 MAX_TOKENS = 4
 
+#: KUCHSIZ DALIL BANDI — avtomatik QO'LLANMAYDI, navbatga boradi.
+#:
+#: O'LCHANGAN SABAB (2026-08-31, 1 797 mahsulot). Avtomatik takliflar
+#: inson bergan keng kod bilan solishtirildi (383 ta juftlik):
+#:
+#:     umumiy moslik            382/383  (99.7%)
+#:     0.75-0.79 + dalil<=4       3/4    (75.0%)
+#:
+#: Ya'ni ishonch chegaraga tegib turgan VA dalil kam bo'lgan band
+#: sezilarli darajada kuchsiz. Bu bandda 34 ta taklif bor (501 dan
+#: 6.8%) va ular YO'QOLMAYDI — navbatga tushadi.
+#:
+#: NEGA CHEGARA O'ZGARTIRILMAYDI: `MIN_SHARE` ni ko'tarish 297 ta
+#: kuchli taklifni (0.80-0.89, o'rtacha dalil 18.0) ham to'sardi.
+#: Bitta bandni ajratish aniqroq javob.
+#:
+#: HALOL CHEKLOV: 3/4 — namuna KICHIK (n=4) va u yolg'iz o'zi
+#: yetarli dalil emas. Lekin mexanizm izchil (kam dalil + chegara
+#: cheti) va bandni navbatga yo'naltirish narxi kichik.
+KUCHSIZ_ISHONCH = 0.80
+KUCHSIZ_DALIL = 4
+
+#: KODSIZLIK SABABLARI. Ilgari `suggest_exact_code()` BESH XIL holatda
+#: bir xil `None` qaytarardi va "kod yo'q" degan yagona chelak qolardi.
+#: Chelak ichida esa butunlay boshqa ishlar yashiringan edi: birida
+#: nom normallashmagan, boshqasida DALIL ikkiga yetmagan, uchinchisida
+#: ikki kod oilasi teng kelgan. Ular BIR XIL emas va bir xil harakat
+#: talab qilmaydi.
+#:
+#: "Noma'lum noma'lumligicha qoladi" tamoyili bu yerda ham amal
+#: qiladi: sabab NOMA'LUM bo'lsa ham u ANIQ aytiladi.
+SABABLAR = (
+    "kod",              # ishonchli kod topildi
+    "tokensiz",         # ma'noli so'z chiqmadi (normallashtirish/nom muammosi)
+    "nomzodsiz",        # tarixiy lotlarda umuman mos nom yo'q
+    "sozlar_mos_emas",  # nomzod bor, lekin HAMMA so'z mos kelmadi
+    "dalil_kam",        # mos keldi, lekin dalil MIN_EVIDENCE dan kam
+    "noaniq",           # dalil yetarli, lekin ulush MIN_SHARE dan past
+                        # (bir nechta kod oilasi teng — TAXMIN QILINMAYDI)
+)
+
 _STOP = {
     "uchun", "bilan", "hamda", "yoki", "va", "the", "for", "with",
     "dlya", "and", "product", "mahsulot", "tovar", "xizmat", "usluga",
@@ -48,16 +89,14 @@ def _tokens(product: Dict[str, Any]) -> List[str]:
     return sorted(out, key=len, reverse=True)[:MAX_TOKENS]
 
 
-def suggest_exact_code(product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Dominant 8-belgili lot kodini topadi; dalil yetmasa ``None``.
+def _token_clauses(tokens: List[str]) -> tuple:
+    """Tokenlardan SQL shartlari va parametrlarini quradi.
 
-    Foiz modelning o'ziga bergan bahosi emas: shu mahsulot kontekstiga mos
-    tarixiy lotlarning necha qismi aynan bitta kodda ekanining ulushi.
+    BITTA JOYDA: `tahlil()` va `biznes_qiymati()` ikkalasi ham shu
+    yerdan oladi. Ilgari shart qurish `suggest_exact_code()` ichida
+    edi; ikkinchi chaqiruvchi paydo bo'lganda uni nusxalash kerak
+    bo'lardi va ikki nusxa vaqt o'tib ajralib ketardi.
     """
-    tokens = _tokens(product)
-    if not tokens:
-        return None
-
     params: Dict[str, Any] = {}
     clauses: List[str] = []
     folded = translit.sql_fold("g.name")
@@ -79,8 +118,89 @@ def suggest_exact_code(product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         key = f"p{i}"
         params[key] = pats
         clauses.append(f"{folded} LIKE ANY(%({key})s)")
+    return clauses, params
+
+
+def biznes_qiymati(product: Dict[str, Any]) -> Dict[str, int]:
+    """Mahsulot QANCHA muhim: ochiq tender va tarixiy lot soni.
+
+    NAVBAT USTUVORLIGI uchun. Kam uchraydigan mahsulotni kodlash
+    arzon, lekin foydasi ham kam — navbat shuni hisobga olishi kerak.
+
+    `ochiq_tender` KUCHLIROQ signal (bugungi imkoniyat), `tarixiy_lot`
+    esa barqarorlik belgisi. Ikkalasi ALOHIDA qaytadi — ularni bitta
+    songa qo'shish qaysi biri gapirayotganini yashirardi.
+    """
+    tokens = _tokens(product)
+    if not tokens:
+        return {"ochiq_tender": 0, "tarixiy_lot": 0}
+    clauses, params = _token_clauses(tokens)
     if not clauses:
+        return {"ochiq_tender": 0, "tarixiy_lot": 0}
+    shart = " OR ".join(clauses)
+    row = db.query_one(f"""
+        SELECT count(DISTINCT g.tender_id) FILTER (
+                   -- "OCHIQ" ta'rifi loyihadagi yagona manbadan
+                   -- (`queries.build_tender_filters`): status 'open'
+                   -- VA muddat o'tmagan. Faqat statusga qarash
+                   -- yetarli emas — tender yopilgach manba
+                   -- ro'yxatidan chiqib ketadi va bizdagi 'open'
+                   -- abadiy qotib qoladi.
+                   WHERE t.status = 'open'
+                     AND (t.close_at IS NULL OR t.close_at > now())
+               ) AS ochiq,
+               count(*) AS lot
+          FROM tender_good g
+          JOIN tender t ON t.id = g.tender_id
+         WHERE g.name IS NOT NULL AND ({shart})
+    """, params) or {}
+    return {"ochiq_tender": int(row.get("ochiq") or 0),
+            "tarixiy_lot": int(row.get("lot") or 0)}
+
+
+def suggest_exact_code(product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Dominant 8-belgili lot kodini topadi; dalil yetmasa ``None``.
+
+    YUPQA O'RAM: butun mantiq `tahlil()` da. Ikki joyda takrorlanmasin —
+    aks holda chegara bir joyda o'zgarib, ikkinchisi eskirib qolardi.
+    """
+    natija = tahlil(product)
+    if natija["sabab"] != "kod":
         return None
+    return {k: natija[k] for k in
+            ("code", "confidence", "evidence", "total", "examples", "source")}
+
+
+def tahlil(product: Dict[str, Any]) -> Dict[str, Any]:
+    """Kod topish urinishini SABABI bilan qaytaradi.
+
+    HAR DOIM lug'at qaytaradi. `sabab` maydoni `SABABLAR` dan biri:
+    kod topilgan bo'lsa `"kod"`, aks holda QAYSI BOSQICHDA to'xtaganini
+    aytadi.
+
+    Chegaralar (`MIN_EVIDENCE`, `MIN_SHARE`) BU YERDA O'ZGARMAYDI —
+    bu funksiya faqat qaror sababini KO'RINADIGAN qiladi. Qamrovni
+    chegarani pasaytirib oshirish precisionni yeydi va bu ataylab
+    qilinmagan.
+
+    Foiz modelning o'ziga bergan bahosi emas: shu mahsulot kontekstiga
+    mos tarixiy lotlarning necha qismi aynan bitta kodda ekanining
+    ulushi.
+    """
+    bosh: Dict[str, Any] = {
+        "sabab": "tokensiz", "code": None, "confidence": None,
+        "evidence": 0, "total": 0, "examples": [], "source": "historical_lots",
+        "tokens": [], "nomzod": 0, "mos": 0, "kodlar": {},
+        "kuchsiz_dalil": False,
+    }
+    tokens = _tokens(product)
+    bosh["tokens"] = tokens
+    if not tokens:
+        return bosh
+
+    clauses, params = _token_clauses(tokens)
+    if not clauses:
+        return bosh
 
     divisions = kodlash.divisions_for_category(product.get("category_code"))
     family = ""
@@ -88,6 +208,7 @@ def suggest_exact_code(product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         params["divisions"] = divisions
         family = "AND substring(g.good_code from 1 for 2) = ANY(%(divisions)s)"
 
+    bosh["sabab"] = "nomzodsiz"
     candidates = db.query(f"""
         SELECT g.good_code, g.name
         FROM tender_good g
@@ -99,6 +220,7 @@ def suggest_exact_code(product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """, params)
     # SQL faqat arzon nomzod olish uchun. Yakuniy tekshiruv kanonik SO'Z
     # bo'yicha: `monitor` `monitoring` ichidan topilmaydi.
+    bosh["nomzod"] = len(candidates)
     counts: Dict[str, int] = {}
     examples: Dict[str, List[str]] = {}
     for row in candidates:
@@ -126,24 +248,41 @@ def suggest_exact_code(product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         bucket = examples.setdefault(code, [])
         if row["name"] not in bucket and len(bucket) < 4:
             bucket.append(row["name"])
+    if candidates and not counts:
+        bosh["sabab"] = "sozlar_mos_emas"
+        return bosh
     if not counts:
-        return None
+        return bosh
 
     ranked = sorted(counts, key=lambda code: (-counts[code], code))
     code = ranked[0]
     total = sum(counts.values())
     evidence = counts[code]
     share = evidence / total if total else 0.0
-    if evidence < MIN_EVIDENCE or share < MIN_SHARE:
-        return None
-    return {
-        "code": code,
-        "confidence": round(share, 3),
-        "evidence": evidence,
-        "total": total,
+    bosh.update({
+        "code": code, "confidence": round(share, 3), "evidence": evidence,
+        "total": total, "mos": total,
         "examples": examples.get(code) or [],
-        "source": "historical_lots",
-    }
+        # Eng kuchli uchta nomzod — "noaniq" holatida QAYSI oilalar
+        # to'qnashganini odam ko'rishi kerak.
+        "kodlar": {k: counts[k] for k in ranked[:3]},
+    })
+    # IKKI SABAB ALOHIDA: dalil kamligi (korpusda uchramagan) va
+    # noaniqlik (ko'p oila teng) — butunlay boshqa ishlar.
+    if evidence < MIN_EVIDENCE:
+        bosh["sabab"] = "dalil_kam"
+        return bosh
+    if share < MIN_SHARE:
+        bosh["sabab"] = "noaniq"
+        return bosh
+    bosh["sabab"] = "kod"
+    # KUCHSIZ DALIL BANDI. Bu `sabab` ni O'ZGARTIRMAYDI — algoritm
+    # qarori o'sha-o'sha. U faqat "avtomatik qo'llash mumkinmi"
+    # savoliga javob beradi va IKKALA yo'l ham (CRUD va ommaviy)
+    # shu yagona bayroqni o'qiydi.
+    bosh["kuchsiz_dalil"] = bool(share < KUCHSIZ_ISHONCH
+                                 and evidence <= KUCHSIZ_DALIL)
+    return bosh
 
 
 def classify_product(company_id: int, product_id: int, *, force: bool = False
@@ -173,6 +312,15 @@ def classify_product(company_id: int, product_id: int, *, force: bool = False
     if human_exact:
         return {"status": "ready", "code": human_exact[0]["code"]}
 
+    natija = tahlil(product)
+    # KUCHSIZ DALIL: kod bor, lekin avtomatik QO'LLANMAYDI — u
+    # ko'rib chiqish navbatiga boradi. Ikkala yo'l (CRUD va ommaviy)
+    # shu yerdan o'tadi, ya'ni qoida BITTA joyda.
+    if natija["sabab"] == "kod" and natija.get("kuchsiz_dalil"):
+        return {"status": "review", "code": natija["code"],
+                "confidence": natija["confidence"],
+                "evidence": natija["evidence"], "total": natija["total"],
+                "sabab": "kuchsiz_dalil"}
     suggestion = suggest_exact_code(product)
     if not suggestion:
         # Nomi o'zgargan mahsulotda eski avtomatik kod qolib ketmasin.
