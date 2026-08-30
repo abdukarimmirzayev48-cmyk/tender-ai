@@ -594,7 +594,7 @@ ogohlantiradi — `_talab()` ning YUQORI CHEGARA ekani interfeysda ham ko'rinadi
 ## 17. Ishga tushirish
 
 ```powershell
-# 1) Baza migratsiyalari — 56 ta, KUZATILADIGAN va TARTIBLI
+# 1) Baza migratsiyalari — 57 ta, KUZATILADIGAN va TARTIBLI
 #    Alfavit tartibi 67 ta bog'liqlikni buzadi (o'lchandi) — shuning
 #    uchun `Get-ChildItem` BILAN QO'LLAMANG.
 .venv\Scripts\python.exe migratsiya.py --holat      # nima qo'llangan
@@ -732,6 +732,7 @@ raqam kiyimidagi shakli.
 | 2026-08-31 | `7825fd3` | **Ishchi daraxt tozalandi** — 64 ta o'zgarish 13 ta commit'ga ajratildi (§21) |
 | 2026-08-31 | (§22) | **Migratsiya versiyalash** — 55 ta patch kuzatuvga olindi; alfavit tartibi 67 bog'liqlikni buzardi |
 | 2026-08-31 | (§23) | **Aktor kimligi va audit** — qaror endi odamga bog'lanadi; ijarachi izolyatsiyasi kompozit FK bilan |
+| 2026-08-31 | (§24) | **Xavfsizlik qattiqlashtirish** — 1 Critical + 5 High tuzatildi; eng kam huquqli rol 24/24 bilan tasdiqlandi |
 
 ---
 
@@ -749,6 +750,7 @@ raqam kiyimidagi shakli.
 | `docs/erp_bosqichlar.md` | ERP integratsiya bosqichlari |
 | `docs/erp_integratsiya.md`, `_2.md` | ERP integratsiya tafsilotlari |
 | `docs/erp_texnik.md` | ERP texnik shartnoma |
+| `docs/xavfsizlik.md` | **Xavfsizlik: tahdid modeli, topilmalar, nazoratlar** |
 | `docs/erp_kimlik.md` | **Aktor kimligi va audit — arxitektura qarori (ADR)** |
 | `docs/integration/migratsiya.md` | **Migratsiya versiyalash — operator qo'llanmasi** |
 | `docs/integration/etl.md` | ETL integratsiya qadamlari |
@@ -1005,6 +1007,70 @@ tuzatildi va sinov ichida izohlandi.
 3. 30 ta eski qaror `kuzatuvdan_oldin` — aktor **tayinlanmaydi**.
 4. `aktor_majburiy` hech qayerda yoqilmagan (standart `false`,
    hozirgi xulq saqlanadi).
+
+
+---
+
+## 24. Ishlab chiqarish xavfsizligi — 2026-08-31
+
+To'liq hisobot: `docs/xavfsizlik.md` (tahdid modeli, topilmalar,
+tekshirilgan nazoratlar va TAVSIYALAR ALOHIDA).
+
+### Topilmalar
+
+| # | Daraja | Topilma | Holat |
+|---|---|---|---|
+| C-1 | **Critical** | Ilova bazaga `postgres` SUPERUSER (`bypassrls=true`) sifatida ulanadi | Repozitoriyda hal qilindi; DSN almashtirish operatorda |
+| H-2 | High | Javoblarda BIRORTA xavfsizlik sarlavhasi yo'q | Tuzatildi |
+| H-3 | High | Yuklangan fayl butunlay xotiraga, chegara KEYIN | Tuzatildi |
+| H-4 | High | `.xlsx` zip bombasidan himoya yo'q | Tuzatildi |
+| H-5 | High | `/docs`, `/openapi.json` ochiq — butun API yuzasi | Tuzatildi |
+| H-6 | High | `erp_stock.py` `erp.stock_move` JADVALINI o'qiydi | Tuzatildi |
+| M-6..M-9 | Medium | PBKDF2 240k; DB xatosi sizishi; npm 4 zaiflik; dev-server 0.0.0.0 | Tuzatildi / yumshatildi |
+
+### C-1 nega Critical edi
+
+O'lchandi: `rolsuper=true, rolbypassrls=true`. Uchta oqibat:
+SQL inyeksiyasi TO'LIQ egallash bo'lardi; audit append-only qulfini
+ILOVANING O'ZI yecha olardi; ERP chegarasi FAQAT sinov bilan
+himoyalangan edi (sinov KEYIN aytadi, huquq OLDIN to'sadi).
+
+`schema_patch_huquq.sql` — `tai_app` roli. `public` da CRUD lekin
+`CREATE` yo'q; `audit_jurnal` da `UPDATE`/`DELETE` yo'q; `erp.*` dan
+FAQAT uchta shartnoma-view. Parol repozitoriyaga tushmasin uchun rol
+LOGIN'SIZ — operator o'z LOGIN rolini yaratadi.
+
+**13/13 huquq chegarasi empirik tekshirildi** (haqiqiy ulanish bilan):
+`erp.app_user` o'qish/yozish, `erp.opportunity`, audit `UPDATE`/
+`DELETE`, triggerni tashlash, `CREATE`/`DROP TABLE` — hammasi RAD
+ETILDI. **To'liq sinov to'plami shu rol bilan yurgizildi: 24/24.**
+Ya'ni almashtirish ilovani buzmaydi — tekshirilgan, taxmin emas.
+
+### Yo'l-yo'lakay topilgan ikki narsa
+
+1. **`npm run build` bu seansdan OLDIN buzuq edi** (`a1c13de` dan
+   beri, `KodOlchov` turi). Mening avvalgi `tsc --noEmit`
+   tekshiruvim KUCHSIZROQ konfiguratsiyani o'lchagan va buni
+   ko'rsatmagan. `tsc -b` bilan aniqlandi va tuzatildi.
+2. **Eng kam huquq HAQIQIY chegara buzilishini ochdi:**
+   `erp_stock.py` `erp.stock_move` JADVALINI o'qirdi — o'sha faylning
+   o'z izohi "jadvalga emas, view ga bog'lanamiz" deb yozganiga
+   qaramay. Superuser bilan buni hech narsa ko'rsatmasdi.
+
+### Halol cheklovlar
+
+- **`pip-audit` o'rnatilmagan va PyPI maslahat bazasiga so'rov
+  yuborilmadi.** Python paketlari VERSIYA bo'yicha yangi deb
+  tasdiqlandi, CVE bo'yicha TEKSHIRILMADI.
+- HSTS standart O'CHIQ — yoqish domenni HTTPS ga qulflaydi va TLS'siz
+  muhitda saytni yo'q qiladi. Bu infratuzilma qarori.
+- `XT_DB_DSN` hali `postgres` — rol tayyor, almashtirish operatorda.
+  `xavfsizlik_test` buni OGOHLANTIRISH bilan ko'rsatadi.
+
+### Tekshirilgan holat
+
+`_tests/xavfsizlik_test.py` — 95/95 (oflayn) / 105/105 (baza bilan).
+To'liq to'plam **24/24**. `npm audit` = **0 zaiflik**.
 
 
 ---
