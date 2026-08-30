@@ -19,12 +19,13 @@ Endpointlar:
     GET /health            — sog'liq tekshiruvi
 """
 import json
+import logging
 import os
 import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import quote
 
 import requests
@@ -38,9 +39,11 @@ from pydantic import BaseModel, field_validator
 load_dotenv()  # .env ni import paytida yuklaymiz (pool DSN'ni ko'rishi uchun)
 
 from api import (ai, ai_chat, ai_docs, ai_gonogo, ai_match, auth,  # noqa: E402
-                 compliance, db, erp_status, erp_stock, i18n, importer,
+                 catalog_auto, compliance, db, erp_status, erp_stock, i18n, importer,
                  kodlash, matching, notify, pricing, queries, stock, telegram,
                  translit)
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +100,17 @@ class CatalogItemIn(BaseModel):
 
 
 class CatalogMatchIn(BaseModel):
+    # Katalogdagi "N ta mos" bosilganda aynan shu mahsulot tekshiriladi.
+    # None = butun katalog bo'yicha umumiy ko'rinish.
+    product_id: Optional[int] = None
     region: Optional[str] = None
     currency: Optional[str] = None
     # Mahsulot/xizmat filtri — foydalanuvchi katalogiga qo'shimcha toraytirish
     products: List[str] = []
     services: List[str] = []
+    # Standart ro'yxat aniq kod mosligi. Eski matn qidiruvi faqat maxsus
+    # taxminiy ko'rinish so'ralsa ishlaydi.
+    include_probable: bool = False
     limit: int = 20
     offset: int = 0
 
@@ -1264,8 +1273,85 @@ def freshness():
             # QUVIB YETDI — "tugadi" emas.
             "caught_up": vektorsiz == 0,
         }
+        # VEKTORLASH QAMROVI — har bo'lak AYNAN BITTA holatda.
+        #
+        # Ilgari faqat `unvectorized` bor edi va u UCH XIL narsani
+        # birlashtirar edi: "navbatda", "yiqildi", "yaroqsiz".
+        # "Nega vektorlanmagan" degan savolga javob YO'Q edi.
+        e = db.query_one("SELECT * FROM v_embedding_coverage") or {}
+        if e:
+            corpus["embedding"] = {
+                "model": e.get("faol_model"),
+                "dimension": e.get("faol_olcham"),
+                "total": int(e.get("jami") or 0),
+                "embedded": int(e.get("vektorlangan") or 0),
+                "pending": int(e.get("navbatda") or 0),
+                "stale": int(e.get("eskirgan") or 0),
+                "failed": int(e.get("yiqildi") or 0),
+                "permanently_failed": int(e.get("butunlay_yiqildi") or 0),
+                "invalid": int(e.get("yaroqsiz") or 0),
+                "skipped": int(e.get("otkazildi") or 0),
+                "model_mismatch": int(e.get("model_mos_emas") or 0),
+                "text_changed": int(e.get("matn_ozgargan") or 0),
+                # MAXRAJ = yaroqli bo'laklar. `yaroqsiz` kirmaydi:
+                # ularni vektorlash ma'nosiz va foizni pasaytirish
+                # "ishlamayapti" degan yolg'on berardi.
+                "eligible": int(e.get("yaroqli") or 0),
+                "coverage_pct": (float(e["qamrov_foiz"])
+                                 if e.get("qamrov_foiz") is not None else None),
+                "from_model": int(e.get("modeldan") or 0),
+                "from_hash": int(e.get("xeshdan") or 0),
+                # NAZORAT — javobda ATAYLAB ko'rinadi.
+                "unaccounted": int(e.get("hisobga_olinmagan") or 0),
+                "reconciles": int(e.get("hisobga_olinmagan") or 0) == 0,
+            }
     except Exception:                                       # noqa: BLE001
         corpus = None       # ko'rsatkich asosiy javobni buzmasin
+
+    # HUJJAT QAMROVI — har metadata qatorining holati.
+    #
+    # NEGA KERAK: ilgari faqat `tender_document_text` statuslari
+    # ko'rinardi (ok/unreadable/unsupported/too_large) va ular
+    # metadata ning ATIGI 32% ini qoplardi. Qolgan 68% hech qanday
+    # holatda ko'rinmasdi — "yo'qoldi" bo'lib o'qilardi, aslida esa
+    # qamrovdan tashqarida yoki navbatda edi.
+    #
+    # `hisobga_olinmagan` HAR DOIM 0 bo'lishi shart. Noldan farqli
+    # qiymat jim bo'shliq QAYTGANINI bildiradi va u javobda
+    # KO'RINADI — jimgina o'tib ketmasin.
+    documents = None
+    try:
+        d = db.query_one("SELECT * FROM v_document_processing_coverage") or {}
+        if d:
+            documents = {
+                "metadata_rows": int(d.get("metadata_qatori") or 0),
+                "total": int(d.get("jami") or 0),
+                # QAMROVDAN TASHQARI — nosozlik EMAS. Alohida turadi,
+                # aks holda "68% ishlamadi" degan yolg'on chiqardi.
+                "not_scheduled": int(d.get("rejalashtirilmagan") or 0),
+                "pending": int(d.get("navbatda") or 0),
+                "downloading": int(d.get("yuklanmoqda") or 0),
+                "downloaded": int(d.get("yuklab_olindi") or 0),
+                "extracting": int(d.get("matn_ajratilmoqda") or 0),
+                "ok": int(d.get("ok") or 0),
+                "unreadable": int(d.get("unreadable") or 0),
+                "unsupported": int(d.get("unsupported") or 0),
+                "too_large": int(d.get("too_large") or 0),
+                "download_failed": int(d.get("yuklab_olinmadi") or 0),
+                "permanently_failed": int(d.get("butunlay_yiqildi") or 0),
+                "gone_from_source": int(d.get("manbadan_yoqoldi") or 0),
+                "metadata_missing": int(d.get("metadata_yoqolgan") or 0),
+                "in_scope": int(d.get("qamrovda") or 0),
+                "ok_pct_in_scope": (float(d["ok_foiz_qamrovda"])
+                                    if d.get("ok_foiz_qamrovda") is not None else None),
+                "settled_pct": (float(d["yakunlangan_foiz"])
+                                if d.get("yakunlangan_foiz") is not None else None),
+                # NAZORAT USTUNI — javobda ATAYLAB ko'rinadi.
+                "unaccounted": int(d.get("hisobga_olinmagan") or 0),
+                "reconciles": int(d.get("hisobga_olinmagan") or 0) == 0,
+            }
+    except Exception:                                       # noqa: BLE001
+        documents = None
 
     return {
         "overall_age_sec": overall_age,
@@ -1273,6 +1359,7 @@ def freshness():
         "platforms": platforms,
         "detection": detection,
         "corpus": corpus,
+        "documents": documents,
     }
 
 
@@ -1837,7 +1924,7 @@ def tender_requirements(tender_id: int, request: Request):
     # VAQT O'LCHOVI: tender ochilgan payt shu yerda yoziladi.
     # Faqat KUTAYOTGAN talab bo'lsa — ko'rilgan tenderni qayta ochish
     # yangi o'lchov boshlamasin.
-    if any(x["review_status"] == "pending" for x in items):
+    if any(x["review_status"] == "pending_review" for x in items):
         requirement.review_ochildi(tender_id, cid)
     return {
         "tender_id": tender_id,
@@ -1871,8 +1958,17 @@ def requirements_labeled(request: Request, limit: int = 1000):
 
 
 class ReviewIn(BaseModel):
-    """Bitta talabning ko'rib chiqish natijasi."""
-    status: str                                  # approved|rejected|corrected
+    """Bitta talabning ko'rib chiqish natijasi — INSON qarori.
+
+    `status` FAQAT inson qarori bo'lishi mumkin. `extracted` va
+    `pending_review` ATAYLAB QABUL QILINMAYDI: ular ajratish
+    qatlamining holatlari, va ularni API orqali yozish "inson
+    qarorini mashina bekor qildi" degan yo'lni ochardi.
+
+    `Literal` bilan qulflangan — noto'g'ri qiymat FastAPI darajasida
+    422 beradi va `requirement.review_set()` gacha yetib bormaydi.
+    """
+    status: Literal["approved", "rejected", "corrected"]
     corrected_value: Optional[str] = None
     note: Optional[str] = None
     #: `compliance.DOC_TYPES` kodi yoki 'yoq' / 'boshqa'.
@@ -1906,7 +2002,7 @@ def requirement_review(req_id: int, body: ReviewIn, request: Request):
     qolgan = db.scalar(
         "SELECT count(*) FROM tender_requirement "
         "WHERE company_id=%(c)s AND tender_id=%(t)s "
-        "AND review_status='pending'",
+        "AND review_status='pending_review'",
         {"c": cid, "t": row["tender_id"]})
     if not qolgan:
         # OXIRGI talab belgilandi — vaqtni yopamiz.
@@ -2035,7 +2131,8 @@ def routing_decision(routing_id: int, body: RoutingDecisionIn,
 
 
 class ReviewBulkIn(BaseModel):
-    status: str                                  # approved|rejected
+    """Ommaviy INSON qarori. Tuzatish yo'q — har qiymat alohida."""
+    status: Literal["approved", "rejected"]
 
 
 @app.post("/tenders/{tender_id}/requirements/review-all")
@@ -2481,6 +2578,15 @@ def delete_search(search_id: int, request: Request):
 # ---------------------------------------------------------------------------
 # MAHSULOT KATALOGI (REJA.md P0-4/5) — mijoz sotadigan mahsulot/xizmatlar
 # ---------------------------------------------------------------------------
+def _auto_classify_catalog(company_id: int, product_id: int, *,
+                           force: bool = False) -> None:
+    """Klassifikatsiya xatosi mahsulotning o'zini saqlashga xalaqit bermasin."""
+    try:
+        catalog_auto.classify_product(company_id, product_id, force=force)
+    except Exception:  # noqa: BLE001 - ixtiyoriy boyitish, CRUD ishlashi shart
+        _log.exception("catalog auto-classification failed: product=%s", product_id)
+
+
 def _shape_product(r: dict) -> dict:
     return {
         "id": r["id"], "name": r["name"],
@@ -2580,7 +2686,7 @@ def list_catalog(request: Request):
     out = []
     for p in prods:
         cnt = None if deferred else sum(
-            1 for c in cand if _product_matches(c, p))
+            1 for c in cand if _product_matches(c, p, allow_text=False))
         # Raqam qayerdan kelgani har qatorда ko'rinadi: interfeys "ombor
         # jurnalidan" yoki "importdan" deb ochiq aytadi.
         out.append({**_shape_product(p), "match_count": cnt,
@@ -2591,9 +2697,12 @@ def list_catalog(request: Request):
 
 @app.post("/catalog", status_code=201)
 def create_product(p: CatalogItemIn, request: Request):
+    cid = company_id_of(request)
     row = db.execute_returning(queries.CATALOG_INSERT_SQL,
-                               {**p.model_dump(),
-                                "company_id": company_id_of(request)})
+                               {**p.model_dump(), "company_id": cid})
+    # Klassifikatsiya foydalanuvchiga ko'rinmaydi. Dalil yetarli bo'lmasa
+    # mahsulot saqlanadi, lekin taxminiy kod bilan ro'yxat ifloslanmaydi.
+    _auto_classify_catalog(cid, row["id"])
     return _shape_product(row)
 
 
@@ -2601,11 +2710,13 @@ def create_product(p: CatalogItemIn, request: Request):
 def update_product(product_id: int, p: CatalogItemIn, request: Request):
     # `company_id` WHERE bandida ham bor: begona id ni taxmin qilib
     # tahrirlash mumkin emas — javob 404 bo'ladi (IDOR himoyasi).
+    cid = company_id_of(request)
     row = db.execute_returning(queries.CATALOG_UPDATE_SQL,
                                {**p.model_dump(), "id": product_id,
-                                "company_id": company_id_of(request)})
+                                "company_id": cid})
     if not row:
         raise HTTPException(status_code=404, detail="Mahsulot topilmadi.")
+    _auto_classify_catalog(cid, product_id, force=True)
     return _shape_product(row)
 
 
@@ -2621,10 +2732,31 @@ def delete_product(product_id: int, request: Request):
 
 @app.post("/catalog/match")
 def catalog_match(body: CatalogMatchIn, request: Request):
-    """Katalogga mos ochiq tenderlar. Kategoriya = asosiy relevantlik,
-    nom = qo'shimcha. Har tenderда qaysi mahsulot(lar) mos kelgani ko'rsatiladi."""
+    """Katalogga kod bo'yicha mos ochiq tenderlar, lot dalili bilan.
+
+    Matn mosligi standartda o'chiq; u faqat `include_probable=true` bo'lsa
+    alohida taxminiy signal sifatida qo'shiladi.
+    """
     cid = company_id_of(request)
-    prods = db.query(queries.CATALOG_LIST_SQL, {"company_id": cid})
+    if body.product_id is not None:
+        # ID har doim kompaniya bilan birga tekshiriladi (IDOR himoyasi).
+        p = db.query_one(queries.CATALOG_GET_SQL,
+                         {"company_id": cid, "product_id": body.product_id})
+        if not p:
+            raise HTTPException(status_code=404, detail="Mahsulot topilmadi.")
+        # Eski keng kod bo'lsa, lotlar tarixidagi kuchli dalil asosida aniq
+        # 8-belgili sinfga fon jarayonisiz, shu so'rovning o'zida toraytiramiz.
+        _auto_classify_catalog(cid, body.product_id)
+        p = db.query_one(queries.CATALOG_GET_SQL,
+                         {"company_id": cid, "product_id": body.product_id})
+        prods = [p]
+    else:
+        prods = db.query(queries.CATALOG_LIST_SQL, {"company_id": cid})
+    if not prods:
+        return {"total": 0, "limit": body.limit, "offset": body.offset,
+                "items": [], "holat": kodlash.holat(cid),
+                "atama_kesildi": 0}
+    product_ids = [p["id"] for p in prods]
 
     # ------------------------------------------------------------------
     # SOLISHTIRISH SQL DA BAJARILADI, Python siklida EMAS.
@@ -2637,13 +2769,16 @@ def catalog_match(body: CatalogMatchIn, request: Request):
     # ------------------------------------------------------------------
 
     # --- 1. KOD yo'li (tasdiqlangan tasniflagich) ---
-    kod_rows = kodlash.moslik(cid, only_open=True, limit=1000)
-    poz = kodlash.pozitsiya_moslik(cid, [r["tender_id"] for r in kod_rows])
+    kod_rows = kodlash.moslik(cid, only_open=True, limit=1000,
+                              product_ids=product_ids)
+    poz = kodlash.pozitsiya_moslik(
+        cid, [r["tender_id"] for r in kod_rows], product_ids=product_ids)
     kod_ids = {r["tender_id"] for r in kod_rows}
 
     # --- 2. MATN yo'li — FAQAT kodsiz mahsulotlar uchun ---
     # `catalog_terms` kodi BOR mahsulotni o'zi tashlaydi — yagona qoida.
-    juft, kesilgan = queries.catalog_terms(prods)
+    juft, kesilgan = (queries.catalog_terms(prods)
+                      if body.include_probable else ([], 0))
     terms = [t for t, _nom in juft]
     matn_poz: Dict[int, List[str]] = {}
     tsql, tpar = queries.build_catalog_text_match(terms)
@@ -2705,7 +2840,8 @@ def catalog_match(body: CatalogMatchIn, request: Request):
         p_list = poz.get(c["id"], []) if kod_bor else []
         if kod_bor:
             positions = [{"pozitsiya": x["pozitsiya"], "mahsulot": x["mahsulot"],
-                          "aniq": x["aniq"], "kod": x["good_code"]}
+                          "aniq": x["aniq"] and len(x["kod"] or "") >= 8,
+                          "kod": x["good_code"]}
                          for x in p_list[:6]]
             n_poz = len(p_list)
         else:
@@ -2722,7 +2858,8 @@ def catalog_match(body: CatalogMatchIn, request: Request):
             # ichida ham uchraydi va buni matn darajasida ajratib
             # bo'lmaydi (o'lchandi: qo'shimcha uzunligi to'g'ri va xato
             # holatlarni ajratmaydi).
-            "score": 100 if kod_bor else 60,
+            "score": (100 if any(len(x["kod"] or "") >= 8 for x in p_list)
+                      else 80) if kod_bor else 60,
             "by": "kod" if kod_bor else "nom",
             # DALIL — tenderning QAYSI pozitsiyasi mos kelgani.
             # Mahsulot nomi emas: bir kodni bir necha mahsulot baham
@@ -2762,7 +2899,7 @@ def catalog_new_count(request: Request):
     cand = _catalog_candidates()
     total = new = 0
     for c in cand:
-        if not any(_product_matches(c, p) for p in prods):
+        if not any(_product_matches(c, p, allow_text=False) for p in prods):
             continue
         total += 1
         pub = c.get("publicated_at")
@@ -2912,7 +3049,11 @@ def kod_qidir(request: Request, soz: str = "", limit: int = 10,
     # qidiruvsiz "talabsiz" avtomatik o'lchovga ishonish demak va u
     # xato bo'lishi o'lchangan (`turniket`).
     if kalit.strip():
-        natija["qidiruv_soni"] = kodlash.qaror_qidiruv(cid, kalit.strip())
+        # QIDIRUV SO'ZI HAM SAQLANADI: "nechta marta qidirdi" va
+        # "NIMANI qidirdi" boshqa-boshqa savollar. Ikkinchisisiz
+        # qaror sababini keyin tiklab bo'lmaydi.
+        natija["qidiruv_soni"] = kodlash.qaror_qidiruv(cid, kalit.strip(),
+                                                       soz=soz)
     return natija
 
 
@@ -2925,25 +3066,65 @@ def kod_navbat(request: Request, limit: int = 40,
     (o'lchandi: 10 atamadan 1-2 tasida ishonchli nomzod), asosiy yo'l
     `/kod/qidir`. Taklif kerak bo'lsa `takliflar=true`.
 
-    Uch toifa qaytadi va ULARNING YIG'INDISI JAMIGA TENG:
-      `atamalar`      — ko'rib chiqiladi
-      `talabsiz`      — korpusda uchramaydi, ko'rish SHART EMAS
-      `turi_aniqmas`  — kalit so'zi spetsifikatsiya yoki bo'sh
+    TO'RT toifa qaytadi va ULARNING YIG'INDISI JAMIGA TENG:
+      `atamalar`        — ko'rib chiqiladi
+      `talabsiz`        — korpusda uchramaydi, ko'rish SHART EMAS
+      `turi_aniqmas`    — kalit so'zi spetsifikatsiya yoki bo'sh
+      `qaror_qilingan`  — inson allaqachon qaror qilgan
+
+    Oxirgisi keyin qo'shildi: `talabsiz`/`otkazildi` kod BERMAYDI,
+    ya'ni mahsulot kodsiz qoladi va filtrsiz atama navbatga QAYTARDI
+    (o'lchandi) — navbat hech qachon tugamasdi.
     """
     return kodlash.navbat(company_id_of(request), limit=limit,
                           takliflar_bilan=takliflar)
 
 
-class KodQarorIn(BaseModel):
+#: NOM TAKRORLANMASIN. Yuqorida allaqachon `KodQarorIn` bor
+#: (`code: str`, kod-tasdiq/kod-rad uchun). Ikkinchi marta shu nom
+#: ishlatilganda ijro buzilmaydi (annotatsiya `def` paytida
+#: bog'lanadi), lekin OpenAPI sxemasi ikkalasini POZITSIYA bo'yicha
+#: `KodQarorIn__1` / `KodQarorIn__2` deb nomlaydi. Endpointlar tartibi
+#: o'zgarsa nomlar JIMGINA almashadi va generatsiya qilingan mijoz
+#: tiplari bir-birining o'rniga tushadi. Shuning uchun alohida nom.
+class AtamaQarorIn(BaseModel):
+    """INSON qarori — kodlash navbatidan.
+
+    `qaror` `Literal` bilan QULFLANGAN: noto'g'ri qiymat FastAPI
+    darajasida 422 beradi va `kodlash.qaror_yoz()` gacha yetib
+    bormaydi. Baza CHECK i (`kod_qaror_turi`) uchinchi qavat.
+    """
     kalit: str
     atama: str
-    qaror: str                       # 'kod' | 'talabsiz' | 'otkazildi'
+    qaror: Literal["kod", "talabsiz", "dalilsiz", "otkazildi"]
     code: Optional[str] = None
-    manba: Optional[str] = None      # 'taklif' | 'qidiruv' | 'qolda'
+    manba: Optional[Literal["taklif", "qidiruv", "qolda"]] = None
+    #: Inson EKRANDA KO'RGAN dalil. ML uchun yorliqning o'zi yetarli
+    #: emas — kirish ham kerak.
+    dalil: Optional[Dict[str, Any]] = None
+    #: Qaror paytida birinchi turgan AVTOMATIK taklif (kelishuv
+    #: foizini shundan hisoblaymiz).
+    taklif_code: Optional[str] = None
+    taklif_skor: Optional[float] = None
+    #: Inson ANIQ rad etgan kodlar — MANFIY misollar.
+    rad_takliflar: Optional[List[str]] = None
+    #: true = bu kod avvalgisiga QO'SHIMCHA (atama haqiqatan ko'p kodli).
+    qoshimcha_kod: bool = False
+    izoh: Optional[str] = None
+
+
+class AtamaOchishIn(BaseModel):
+    """Atama ko'rib chiqishga ochildi — VAQT hisobi shundan.
+
+    Qaror maydonlari ATAYLAB YO'Q: ochish qaror EMAS va uni qaror
+    modelida yuborish ikkisini aralashtirardi.
+    """
+    kalit: str
+    atama: str
 
 
 @app.post("/kod/qaror/ochish")
-def kod_qaror_ochish(body: KodQarorIn, request: Request):
+def kod_qaror_ochish(body: AtamaOchishIn, request: Request):
     """Atama ko'rib chiqishga ochildi — VAQT hisobi shu yerdan.
 
     Ekran atamani ochganda chaqiradi. Qo'lda vaqt yozilmasin degan
@@ -2954,7 +3135,7 @@ def kod_qaror_ochish(body: KodQarorIn, request: Request):
 
 
 @app.post("/kod/qaror")
-def kod_qaror(body: KodQarorIn, request: Request):
+def kod_qaror(body: AtamaQarorIn, request: Request):
     """Qaror yoziladi. Vaqt, manba va qidiruv soni AVTOMATIK saqlanadi.
 
     `kim` — sessiyadan. SERVICE kaliti (ERP) odam emas, qaror qo'ya
@@ -2970,23 +3151,51 @@ def kod_qaror(body: KodQarorIn, request: Request):
         raise HTTPException(403, "Qarorni faqat kirgan foydalanuvchi qo'ya oladi.")
     cid = company_id_of(request)
 
-    row = kodlash.qaror_yoz(cid, body.kalit, body.atama, body.qaror,
-                            kim=kim, code=body.code, manba=body.manba)
+    try:
+        row = kodlash.qaror_yoz(
+            cid, body.kalit, body.atama, body.qaror, kim=kim,
+            code=body.code, manba=body.manba, dalil=body.dalil,
+            taklif_code=body.taklif_code, taklif_skor=body.taklif_skor,
+            rad_takliflar=body.rad_takliflar,
+            qoshimcha_kod=body.qoshimcha_kod, izoh=body.izoh)
+    except ValueError as e:
+        # BO'SH yoki yaroqsiz kod shu yerda to'xtaydi va broker
+        # TUSHUNARLI xabar oladi (baza xabari emas).
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # Kod berilgan bo'lsa — shu atamaga tegishli MAHSULOTLARGA biriktiramiz.
+    # Kod berilgan bo'lsa — shu atamaga tegishli MAHSULOTLARGA
+    # biriktiramiz va biriktirmani QARORGA bog'laymiz (audit izi).
     n_mahsulot = 0
     if body.qaror == "kod" and body.code:
-        n_mahsulot = kodlash.atamaga_kod_biriktir(cid, body.kalit,
-                                                  body.code, kim)
+        n_mahsulot = kodlash.atamaga_kod_biriktir(
+            cid, body.kalit, (body.code or "").strip(), kim,
+            qaror_id=row.get("id"))
     return {**row, "biriktirildi": n_mahsulot}
 
 
 @app.get("/kod/qaror/olchov")
 def kod_qaror_olchov(request: Request):
-    """Uch savolning javobi — 40 qarordan keyin o'qiladi."""
+    """Pilot o'lchovi — FAQAT haqiqiy inson harakatidan.
+
+    `pilot` — "40 taga qancha qoldi" ekranda ko'rinsin. Qo'lda
+    hisoblangan raqam xotiradan tiklanib TAXMINGA aylanadi.
+    """
     cid = company_id_of(request)
     return {"olchov": kodlash.qaror_olchov(cid),
+            "pilot": kodlash.pilot_holati(cid),
             "qarorlar": kodlash.qarorlar(cid)}
+
+
+@app.get("/kod/qaror/tafsil")
+def kod_qaror_tafsil(request: Request, limit: int = 500):
+    """Har qaror DALILI bilan — ML to'plamining xom manbai.
+
+    Hech qanday qoida qo'llanmaydi. Birinchi 40 qarorning maqsadi
+    o'lchash va sxemani sinash; qoida jadvalining shakli SHUNDAN
+    KEYIN ma'lum bo'ladi.
+    """
+    cid = company_id_of(request)
+    return {"tafsil": kodlash.qaror_tafsil(cid, limit=max(1, min(limit, 2000)))}
 
 
 @app.get("/catalog/kodlash-holati")
