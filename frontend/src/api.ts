@@ -5,6 +5,7 @@ import type {
   DocumentTextResult, DocumentType, Freshness, GoNoGoResult, Paged, PricingInputs,
   PricingSaved, Product, ProductSuggestion, Region, SavedSearch, Stats, Status,
   StockCheckResult, TelegramBot, TelegramLink, TelegramLinkStatus,
+  Aktor, AktorHolat, AktorRol, AuditYozuv, Kimlik,
   HujjatTuri, InsonQarori, ReviewRejim, ReviewTezlik, Talab, TalabHolat,
   TalabNavbat,
   AiQaror, InsonQaror, MalakaNatija, RoutingHolat, RoutingItem,
@@ -32,6 +33,33 @@ const BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 // cross-site bo'lib qoladi.
 const CSRF_COOKIE = 'tai_csrf'
 const SEEN_KEY = 'tender-ai:seen'
+
+// --- AKTOR (auth-6) ----------------------------------------------------------
+// Tender-AI ga KOMPANIYA kiradi, odam emas. Qaror KIM tomonidan qo'yilganini
+// ajratish uchun sahifa `X-Actor` sarlavhasida ro'yxatdagi aktorni KO'RSATADI.
+//
+// BU ISBOT EMAS VA SHUNDAY YOZILADI. Server uni `aktor_elon` darajasi bilan
+// saqlaydi — "e'lon qilingan", "isbotlangan" emas. Sessiya egasi sarlavhani
+// o'zgartira oladi; foydasi shundaki, u ijarachi ICHIDAGI mas'uliyatni
+// ajratadi va tasodifan chalkashish yo'qoladi.
+//
+// Isbotlangan daraja (`erp_sessiya`) ERP `erp.v_tai_actor` shartnoma-view ini
+// chop etganda paydo bo'ladi — `docs/erp_kimlik.md` §4.
+const AKTOR_KEY = 'tender-ai:aktor'
+
+export function getAktorId(): number | null {
+  try {
+    const v = localStorage.getItem(AKTOR_KEY)
+    return v ? Number(v) || null : null
+  } catch { return null }
+}
+
+export function setAktorId(id: number | null): void {
+  try {
+    if (id) localStorage.setItem(AKTOR_KEY, String(id))
+    else localStorage.removeItem(AKTOR_KEY)
+  } catch { /* localStorage yo'q — sarlavha yuborilmaydi, xato emas */ }
+}
 
 /** Cookie o'qilmasa ishlatiladigan nusxa (login yoki `/auth/me` dan). */
 let csrfFallback: string | null = null
@@ -150,6 +178,10 @@ async function request<T>(
   const headers: Record<string, string> = {}
   // CSRF faqat O'ZGARTIRUVCHI so'rovlarda: GET da server ham tekshirmaydi.
   if (method !== 'GET' && method !== 'HEAD') Object.assign(headers, authHeaders())
+  // AKTOR HAR SO'ROVGA qo'yiladi (GET ga ham): `/aktor/holat` va `/audit`
+  // ham "men kimman" degan savolga javob berishi kerak.
+  const aktorId = getAktorId()
+  if (aktorId) headers['X-Actor'] = String(aktorId)
   const opts: RequestInit = { method, headers, credentials: 'include' }
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json'
@@ -324,12 +356,33 @@ export const api = {
     request<{ id: number; holat: RoutingHolat }>(
       'POST', `/routing/${routingId}/open`
               + (broker ? `?broker=${encodeURIComponent(broker)}` : '')),
+  // `broker` MAYDONI OLIB TASHLANDI: qarorni KIM qo'yganini mijoz
+  // yozardi va uni hech narsa tekshirmasdi. Endi aktor SERVERDA
+  // `X-Actor` sarlavhasidan aniqlanadi va ro'yxatdan tekshiriladi.
   brokerQaror: (routingId: number, body: {
-    qaror: InsonQaror; izoh?: string; broker?: string
+    qaror: InsonQaror; izoh?: string
   }) => request<{ id: number; tender_id: number; ai_qaror: AiQaror
                   inson_qaror: InsonQaror; holat: RoutingHolat
                   ai_ozgardi: boolean }>(
     'POST', `/routing/${routingId}/decision`, { body }),
+
+  // --- auth-6: aktor va audit ---
+  aktorlar: (faqatFaol = false) =>
+    request<{ tayyor: boolean; aktorlar: Aktor[]; meniki?: Kimlik
+              sabab?: string }>(
+      'GET', '/aktor', { params: { faqat_faol: faqatFaol } }),
+  aktorQosh: (body: { login: string; ism: string; rol: AktorRol
+                      manba?: 'erp' | 'mahalliy'; erp_user_id?: number
+                      izoh?: string }) =>
+    request<Aktor>('POST', '/aktor', { body }),
+  aktorYangila: (id: number, body: { rol?: AktorRol; ism?: string
+                                     active?: boolean; izoh?: string }) =>
+    request<Aktor>('PATCH', `/aktor/${id}`, { body }),
+  aktorHolat: () => request<AktorHolat>('GET', '/aktor/holat'),
+  audit: (p: { entity?: string; entity_id?: number; actor_id?: number
+               limit?: number } = {}) =>
+    request<{ tayyor: boolean; yozuvlar: AuditYozuv[] }>(
+      'GET', '/audit', { params: p as Record<string, unknown> }),
 
   // --- P0-8: hujjatlar to'liqligi cheklisti ---
   compliance: (id: number) => request<ComplianceResult>('GET', `/tenders/${id}/compliance`),

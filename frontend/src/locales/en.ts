@@ -8,6 +8,18 @@ import type { Dict } from './uz'
 // English has two plural forms; where a count is prominent the `_one` /
 // `_other` keys below are picked by `Intl.PluralRules`.
 export const en: Dict = {
+  'aktor.label': 'Who is deciding',
+  'aktor.none': 'Not specified (on behalf of the company)',
+  'aktor.required': 'This company REQUIRES an actor — pick one.',
+  'aktor.role.kuzatuvchi': 'observer',
+  'aktor.role.koruvchi': 'reviewer',
+  'aktor.role.tasdiqlovchi': 'approver',
+  'aktor.role.admin': 'admin',
+  'aktor.trust.proven': 'Identity PROVEN by an ERP session.',
+  'aktor.trust.declared': 'Identity DECLARED — not proven.',
+  'aktor.trust.companyOnly': 'Only the company is known — no person recorded.',
+  'aktor.trust.service': 'Service key — no human.',
+  'aktor.trust.unknown': 'Recorded before actor tracking existed.',
   'app.catalogProductMatch': 'Tenders for this product:',
   'app.allCatalog': 'Entire catalogue',
   'app.matchedBy.code': 'Exact product line match: {items}',

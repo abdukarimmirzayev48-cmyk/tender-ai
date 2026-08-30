@@ -6,6 +6,7 @@ import type { TKey } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import type { CompanyProfileData, SavedSearch } from '@/types'
+import AktorTanlash from './AktorTanlash'
 
 // Chap navigatsiya paneli.
 const NAV: { key: string; icon: string; label: TKey; section?: TKey }[] = [
@@ -116,6 +117,7 @@ function Nav({
         </div>
       </div>
 
+      <AktorTanlash />
       <nav className="min-h-0 flex-1 overflow-y-auto" aria-label={t('nav.section.main')}>
         {NAV.map((nav) => (
           <div key={nav.key}>

@@ -9,6 +9,18 @@
 // bitta, shuning uchun bu yerda ular kamdan-kam uchraydi — asosan rus
 // tilidagi variantlar uchun kerak.
 export const uz = {
+  'aktor.label': "Qarorni kim qo'yadi",
+  'aktor.none': "Ko'rsatilmagan (kompaniya nomidan)",
+  'aktor.required': 'Bu kompaniyada aktor MAJBURIY — birini tanlang.',
+  'aktor.role.kuzatuvchi': 'kuzatuvchi',
+  'aktor.role.koruvchi': "ko'ruvchi",
+  'aktor.role.tasdiqlovchi': 'tasdiqlovchi',
+  'aktor.role.admin': 'admin',
+  'aktor.trust.proven': 'Kimlik ERP sessiyasi bilan ISBOTLANGAN.',
+  'aktor.trust.declared': "Kimlik E'LON QILINGAN — isbotlanmagan.",
+  'aktor.trust.companyOnly': "Faqat kompaniya ma'lum — odam yozilmaydi.",
+  'aktor.trust.service': "Servis kaliti — odam yo'q.",
+  'aktor.trust.unknown': 'Aktor kuzatuvidan oldin yozilgan.',
   'app.catalogProductMatch': 'Aynan shu mahsulot uchun:',
   'app.allCatalog': 'Barcha katalog',
   'app.matchedBy.code': 'Mahsulot lotiga aniq mos: {items}',

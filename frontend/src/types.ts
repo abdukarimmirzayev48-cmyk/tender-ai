@@ -829,6 +829,78 @@ export interface KodPozitsiya {
 export type KodQaror = 'kod' | 'talabsiz' | 'dalilsiz' | 'otkazildi'
 
 /** Qaror QAYERDAN keldi. */
+/** Aktor — ERP hodimiga XARITA. Kimlik ombori EMAS: parol yo'q,
+ *  kirish bermaydi. Faqat "qarorni kim qo'ydi" savoliga javob beradi. */
+export type AktorRol = 'kuzatuvchi' | 'koruvchi' | 'tasdiqlovchi' | 'admin'
+
+export interface Aktor {
+  id: number
+  company_id: number
+  manba: 'erp' | 'mahalliy'
+  erp_user_id: number | null
+  login: string
+  ism: string
+  rol: AktorRol
+  active: boolean
+  izoh: string | null
+}
+
+/** Atribut QANCHALIK ishonchli. `erp_sessiya` — isbotlangan;
+ *  `aktor_elon` — e'lon qilingan, isbotlanmagan; `kompaniya_sessiyasi`
+ *  — faqat kompaniya ma'lum; `servis` — odam yo'q;
+ *  `kuzatuvdan_oldin` — aktor kuzatuvi joriy etilishidan oldin. */
+export type Ishonch = 'erp_sessiya' | 'aktor_elon' | 'kompaniya_sessiyasi'
+  | 'servis' | 'kuzatuvdan_oldin'
+
+export interface Kimlik {
+  company_id: number
+  actor_id: number | null
+  ishonch: Ishonch
+  rol: AktorRol | null
+  login: string | null
+  ism: string | null
+}
+
+export interface AtributSifati {
+  jadval: string
+  inson_qarori: number
+  isbotlangan: number
+  elon_qilingan: number
+  faqat_kompaniya: number
+  nomalum: number
+  aktorli: number
+}
+
+export interface AktorHolat {
+  tayyor: boolean
+  sabab?: string
+  meniki?: Kimlik
+  aktor_majburiy?: boolean
+  erp_kontekst?: boolean
+  erp_moslik?: { tekshirildi: boolean; sabab?: string; erp_aktorlari: number
+                 yetim: { actor_id: number; login: string; erp_user_id: number }[] }
+  atribut_sifati?: AtributSifati[]
+  rollar?: AktorRol[]
+  ruxsat_matritsasi?: Record<string, AktorRol[]>
+}
+
+export interface AuditYozuv {
+  id: number
+  at: string
+  amal: string
+  entity: string
+  entity_id: number
+  ishonch: Ishonch
+  actor_id: number | null
+  actor_login: string | null
+  actor_ism: string | null
+  actor_rol: AktorRol | null
+  oldin: Record<string, unknown> | null
+  keyin: Record<string, unknown> | null
+  izoh: string | null
+  ip: string | null
+}
+
 export type Manba = 'taklif' | 'qidiruv' | 'qolda'
 
 export interface KodTaklif {

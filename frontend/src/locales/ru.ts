@@ -13,6 +13,18 @@ import type { Dict } from './uz'
 // ради экономии: длинная форма в узкой ячейке таблицы всё равно
 // обрезалась бы.
 export const ru: Dict = {
+  'aktor.label': 'Кто принимает решение',
+  'aktor.none': 'Не указан (от имени компании)',
+  'aktor.required': 'В этой компании актор ОБЯЗАТЕЛЕН — выберите.',
+  'aktor.role.kuzatuvchi': 'наблюдатель',
+  'aktor.role.koruvchi': 'рецензент',
+  'aktor.role.tasdiqlovchi': 'утверждающий',
+  'aktor.role.admin': 'администратор',
+  'aktor.trust.proven': 'Личность ПОДТВЕРЖДЕНА сессией ERP.',
+  'aktor.trust.declared': 'Личность ЗАЯВЛЕНА — не подтверждена.',
+  'aktor.trust.companyOnly': 'Известна только компания — человек не записывается.',
+  'aktor.trust.service': 'Сервисный ключ — человека нет.',
+  'aktor.trust.unknown': 'Записано до внедрения учёта акторов.',
   'app.catalogProductMatch': 'Тендеры именно для товара:',
   'app.allCatalog': 'Весь каталог',
   'app.matchedBy.code': 'Точное совпадение с позицией лота: {items}',
