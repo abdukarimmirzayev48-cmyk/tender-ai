@@ -594,7 +594,7 @@ ogohlantiradi — `_talab()` ning YUQORI CHEGARA ekani interfeysda ham ko'rinadi
 ## 17. Ishga tushirish
 
 ```powershell
-# 1) Baza migratsiyalari — 55 ta, KUZATILADIGAN va TARTIBLI
+# 1) Baza migratsiyalari — 56 ta, KUZATILADIGAN va TARTIBLI
 #    Alfavit tartibi 67 ta bog'liqlikni buzadi (o'lchandi) — shuning
 #    uchun `Get-ChildItem` BILAN QO'LLAMANG.
 .venv\Scripts\python.exe migratsiya.py --holat      # nima qo'llangan
@@ -731,6 +731,7 @@ raqam kiyimidagi shakli.
 | 2026-08-31 | `24ed971` | RAG bazaviy o'lchovi: gibrid Recall@8 = 0.705, MRR = 0.699 |
 | 2026-08-31 | `7825fd3` | **Ishchi daraxt tozalandi** — 64 ta o'zgarish 13 ta commit'ga ajratildi (§21) |
 | 2026-08-31 | (§22) | **Migratsiya versiyalash** — 55 ta patch kuzatuvga olindi; alfavit tartibi 67 bog'liqlikni buzardi |
+| 2026-08-31 | (§23) | **Aktor kimligi va audit** — qaror endi odamga bog'lanadi; ijarachi izolyatsiyasi kompozit FK bilan |
 
 ---
 
@@ -748,6 +749,7 @@ raqam kiyimidagi shakli.
 | `docs/erp_bosqichlar.md` | ERP integratsiya bosqichlari |
 | `docs/erp_integratsiya.md`, `_2.md` | ERP integratsiya tafsilotlari |
 | `docs/erp_texnik.md` | ERP texnik shartnoma |
+| `docs/erp_kimlik.md` | **Aktor kimligi va audit — arxitektura qarori (ADR)** |
 | `docs/integration/migratsiya.md` | **Migratsiya versiyalash — operator qo'llanmasi** |
 | `docs/integration/etl.md` | ETL integratsiya qadamlari |
 | `docs/integration/import.md` | Katalog importi |
@@ -919,6 +921,90 @@ checksum farqi 0.
    ni faqat `erp.app_user` to'la bo'lsa tashlaydi. Toza qurilgan bazada
    `app_user` **qoladi** — bu patchning himoya xulqi. Migratsiya kuzatuvi
    bu old shartni majburlay olmaydi.
+
+
+---
+
+## 23. Aktor kimligi, ruxsat va audit — 2026-08-31 (auth-6)
+
+Arxitektura qarori: `docs/erp_kimlik.md`.
+
+### Nima o'lchandi
+
+Tender-AI ga KOMPANIYA kiradi, odam emas (ataylab — hodimlar ERP da).
+Lekin inson qarorlari uch xil, mos kelmaydigan usulda yozilardi:
+
+| Qayerda | Aktor | Manba | Ishonchlimi |
+|---|---|---|---|
+| `tender_requirement.reviewed_by` | `INT` -> `company_account` | sessiya | Ha, lekin bu **kompaniya** |
+| `kod_qaror.kim` | `TEXT` (sessiya login'i) | sessiya | O'sha muammo |
+| `tender_routing.broker_nomi` | `TEXT` | **`body.broker` — mijozdan** | **Yo'q** |
+
+O'lchandi: 310 ta yo'naltirish qatoridan **30 tasida** inson qarori
+bor, `broker_nomi` esa **0 tasida** yozilgan — ya'ni yolg'on yozuv
+hali yo'q edi, lekin yo'l ochiq edi.
+
+### Qaror — cheklangan integratsiya xaritasi
+
+`erp.app_user` aynan shu bazada va unda haqiqiy hodimlar bor, LEKIN
+chegara shartnomasi VIEW orqali ishlashni talab qiladi, va
+`erp.own_company` BITTA qator — ya'ni ERP hodimida ijarachi
+tushunchasi YO'Q. Mahalliy sub-foydalanuvchi tizimi esa
+`erp.app_user` ni takrorlardi (aynan `auth_2` olib tashlagan narsa).
+
+Tanlandi: `actor` — **xarita**, kimlik ombori emas. Parol yo'q,
+token yo'q, sessiya yo'q, **kirish bermaydi**. Autentifikatsiya
+o'zgarmadi.
+
+### Yorliq dalildan oshmaydi
+
+Har atribut yoniga uning QANCHALIK ishonchli ekani yoziladi:
+`erp_sessiya` (isbotlangan) · `aktor_elon` (e'lon qilingan) ·
+`kompaniya_sessiyasi` (faqat kompaniya) · `servis` (odam yo'q) ·
+`kuzatuvdan_oldin`.
+
+Birinchi ikkisi ATAYLAB ajratilgan — biri tekshirilgan, ikkinchisi
+aytilgan.
+
+### Ijarachi izolyatsiyasi — kompozit FK
+
+    FOREIGN KEY (company_id, reviewed_actor_id)
+        REFERENCES actor (company_id, id)
+
+Boshqa ijarachining aktorini yozish **jismonan mumkin emas**.
+O'qish alohida: FK yozishni to'sadi, o'qishni emas — shuning uchun
+`aktor.bitta()`/`royxat()` `company_id` ni har doim shartda saqlaydi.
+
+### Audit — faqat qo'shiladi
+
+`audit_jurnal`: company_id, actor_id, ishonch, amal, entity,
+entity_id, oldin, keyin, izoh, ip, user_agent, at. `UPDATE`/`DELETE`
+bazada trigger bilan to'silgan, **kaskad yo'l ham**.
+
+Halol cheklov: superuser triggerni o'chira oladi — to'siq
+"imkonsiz" degani emas, "tasodifan bo'lmaydi va izsiz ketmaydi".
+
+### Tekshirilgan holat
+
+`_tests/aktor_test.py` **63/63**; to'liq to'plam **23/23**.
+Ijarachilararo soxtalashtirish bazada ham, API da ham rad etiladi;
+API javobi id mavjudligini SIZDIRMAYDI.
+
+Sinovlar HAQIQIY qatorlarda o'lchaydi. Birinchi urinishda ular bo'sh
+to'plamda "rad etildi" degan **yolg'on PASS** bergan edi — bu
+tuzatildi va sinov ichida izohlandi.
+
+### Ochiq qolgan qarz
+
+1. `erp.v_tai_actor` shartnoma-view i ERP da **chop etilmagan** —
+   ungacha eng yuqori daraja `aktor_elon`.
+2. **Ishlab chiqarishda aktor ro'yxatga olinmagan:**
+   `erp.own_company` = "ZZFIX Kompaniya", ijarachi 2 esa "BARAKA
+   PROFIT MChJ" — mos kelmaydi, shuning uchun ERP hodimlari
+   avtomatik xaritalanmadi. Xaritalash operatorning ANIQ qarori.
+3. 30 ta eski qaror `kuzatuvdan_oldin` — aktor **tayinlanmaydi**.
+4. `aktor_majburiy` hech qayerda yoqilmagan (standart `false`,
+   hozirgi xulq saqlanadi).
 
 
 ---
