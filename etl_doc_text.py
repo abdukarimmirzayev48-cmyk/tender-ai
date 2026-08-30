@@ -706,7 +706,23 @@ def fetch_targets(conn, args) -> List[dict]:
         where.append("lower(d.file_type) = %(ft)s")
         params["ft"] = args.file_type.strip().lower().lstrip(".")
     if not args.force:
-        where.append("t.file_ref IS NULL")
+        # QAYTA URINISHNI HISOBGA OLADI.
+        #
+        # Ilgari shart faqat `t.file_ref IS NULL` edi: `download_failed`
+        # ham qator qoldirardi, ya'ni bir marta yiqilgan hujjat
+        # BOSHQA HECH QACHON olinmasdi. O'tkinchi tarmoq xatosi
+        # doimiy nosozlikka aylanardi.
+        #
+        # Endi: matn qatori yo'q BO'LSA, YOKI yuklab olish yiqilgan
+        # va kutish oynasi tugagan bo'lsa olinadi. `butunlay_yiqildi`
+        # OLINMAYDI — urinishlar tugagan.
+        where.append(
+            "(t.file_ref IS NULL "
+            " OR (d.holat = 'yuklab_olinmadi' "
+            "     AND (d.keyingi_urinish_at IS NULL "
+            "          OR d.keyingi_urinish_at <= now())))")
+        # Manbada yo'q hujjatni yuklab olishga urinish MA'NOSIZ.
+        where.append("d.holat <> 'manbadan_yoqoldi'")
 
     # --- QAMROV (reja_ai_chat.md §15) --------------------------------------
     # Muddati o'tgan tenderning hujjati qaror uchun kerak emas: bazadagi
@@ -735,7 +751,8 @@ def fetch_targets(conn, args) -> List[dict]:
 
     sql = f"""
         SELECT d.tender_id, d.file_ref, d.file_id, d.file_path, d.name,
-               d.size_bytes, d.content_type, d.file_type, d.source_platform
+               d.size_bytes, d.content_type, d.file_type, d.source_platform,
+               d.holat, d.urinish
         FROM tender_document d
         LEFT JOIN tender_document_text t
                ON t.tender_id = d.tender_id AND t.file_ref = d.file_ref
@@ -750,9 +767,57 @@ def fetch_targets(conn, args) -> List[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+#: `tender_document_text.status` -> `tender_document.holat`.
+#: Ikki lug'at ATAYLAB alohida: birinchisi AJRATISH natijasi,
+#: ikkinchisi QAYTA ISHLASH BOSQICHI (unda "navbatda",
+#: "rejalashtirilmagan" kabi holatlar ham bor).
+HOLAT_XARITA = {
+    "ok": "ok",
+    "unreadable": "unreadable",
+    "unsupported": "unsupported",
+    "too_large": "too_large",
+    "download_failed": "yuklab_olinmadi",
+}
+
+#: Yuklab olish necha marta qayta urinilsin. Chegaradan oshgach holat
+#: `butunlay_yiqildi` bo'ladi va hujjat navbatdan CHIQADI.
+#:
+#: ILGARI QAYTA URINISH UMUMAN YO'Q EDI: `fetch_targets()` "matn
+#: qatori bor" degan shartga qarardi, `download_failed` ham qator
+#: qoldirardi — ya'ni bir marta yiqilgan hujjat BOSHQA HECH QACHON
+#: olinmasdi (`--force` siz). O'tkinchi tarmoq xatosi doimiy
+#: nosozlikka aylanardi.
+MAX_URINISH = 4
+
+
+def belgila_boshlandi(conn, row: dict) -> None:
+    """Hujjat ustida ISH BOSHLANDI — vaqt belgilari yoziladi.
+
+    Bu qator `process()` DAN OLDIN chaqiriladi. Jarayon o'rtada
+    o'ldirilsa holat `yuklanmoqda` bo'lib qoladi va bu HALOL:
+    "boshlandi, tugamadi" — "hech qachon urinilmagan" dan boshqa gap.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE tender_document "
+            "SET holat = 'yuklanmoqda', download_started_at = now(), "
+            "    extraction_started_at = NULL, extraction_finished_at = NULL "
+            "WHERE tender_id = %s AND file_ref = %s",
+            (row["tender_id"], row["file_ref"]))
+    conn.commit()
+
+
 def save(conn, rec: dict) -> None:
     """Bitta yozuv (idempotent). Har hujjatdan keyin commit — uzun yurish
-    yarmida uzilsa ham ishlangan qism saqlanib qoladi."""
+    yarmida uzilsa ham ishlangan qism saqlanib qoladi.
+
+    METADATA QATORINING HOLATI HAM YANGILANADI. Ilgari holat FAQAT
+    `tender_document_text` da yashardi va "hali urinilmagan" holatining
+    bazada KO'RINISHI YO'Q edi — aynan shu 7 603 hujjatni ko'rinmas
+    qilgan (`schema_patch_doc_qamrov.sql`).
+    """
+    holat = HOLAT_XARITA.get(rec["status"], "unreadable")
+    xato = rec.get("error")
     with conn.cursor() as cur:
         cur.execute(
             f"""INSERT INTO tender_document_text ({','.join(COLS)})
@@ -761,6 +826,29 @@ def save(conn, rec: dict) -> None:
                 {','.join(f'{c}=EXCLUDED.{c}' for c in COLS if c not in ('tender_id', 'file_ref'))},
                 extracted_at = now()""",
             [rec[c] for c in COLS])
+        # Yuklab olish yiqilgan bo'lsa urinish sanaladi va chegaradan
+        # oshgach hujjat navbatdan CHIQADI (`butunlay_yiqildi`).
+        # Muvaffaqiyatda sanoq NOLGA qaytadi.
+        cur.execute(
+            "UPDATE tender_document SET "
+            "  urinish = CASE WHEN %(h)s = 'yuklab_olinmadi' "
+            "                 THEN urinish + 1 ELSE 0 END, "
+            "  holat = CASE WHEN %(h)s = 'yuklab_olinmadi' "
+            "                    AND urinish + 1 >= %(max)s "
+            "               THEN 'butunlay_yiqildi' ELSE %(h)s END, "
+            "  keyingi_urinish_at = CASE WHEN %(h)s = 'yuklab_olinmadi' "
+            "                                 AND urinish + 1 < %(max)s "
+            "                            THEN now() + (power(2, urinish + 1)"
+            "                                          * interval '1 minute') END, "
+            "  downloaded_at = CASE WHEN %(h)s IN ('ok','unreadable') "
+            "                       THEN now() ELSE downloaded_at END, "
+            "  extraction_started_at = COALESCE(extraction_started_at, now()), "
+            "  extraction_finished_at = now(), "
+            "  last_error = %(e)s, "
+            "  last_error_at = CASE WHEN %(e)s IS NULL THEN NULL ELSE now() END "
+            "WHERE tender_id = %(t)s AND file_ref = %(f)s",
+            {"h": holat, "e": xato, "max": MAX_URINISH,
+             "t": rec["tender_id"], "f": rec["file_ref"]})
     conn.commit()
 
 
@@ -860,6 +948,15 @@ def main() -> None:
     downloaded = 0
 
     for i, row in enumerate(rows, 1):
+        # ISH BOSHLANGANINI DARHOL BELGILAYMIZ. Jarayon o'rtada
+        # o'ldirilsa holat `yuklanmoqda` bo'lib qoladi — bu HALOL
+        # ("boshlandi, tugamadi") va keyingi yurish uni qayta oladi.
+        if not args.dry_run:
+            try:
+                belgila_boshlandi(conn, row)
+            except Exception as e:                          # noqa: BLE001
+                conn.rollback()
+                print(f"    ! holat belgilanmadi: {str(e)[:90]}", file=sys.stderr)
         rec = process(session, row)
         counts[rec["status"]] = counts.get(rec["status"], 0) + 1
         total_chars += rec["char_count"] or 0
