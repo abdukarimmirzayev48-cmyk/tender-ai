@@ -73,3 +73,4 @@
 540	0054_kod_qaror_3	schema_patch_kod_qaror_3.sql
 550	0055_requirement_8	schema_patch_requirement_8.sql
 560	0056_aktor	schema_patch_aktor.sql
+570	0057_huquq	schema_patch_huquq.sql

@@ -37,9 +37,26 @@ SELECT product_id, qty, reserved, available, unit, updated_at
 FROM erp.v_stock_balance
 """
 
-#: Omborda umuman harakat bormi. Bo'sh jurnal "hamma qoldiq nol" degani
-#: EMAS — "ombor hali ishga tushmagan" degani.
-ANY_MOVE_SQL = "SELECT 1 AS x FROM erp.stock_move LIMIT 1"
+#: Ombor ISHGA TUSHGANMI. Bo'sh ombor "hamma qoldiq nol" degani EMAS —
+#: "ombor hali ishga tushmagan" degani va bu ikkisi har xil qaror beradi.
+#:
+#: ILGARI BU `erp.stock_move` JADVALINI o'qirdi — shu faylning O'Z
+#: izohi "jadvalga emas, view ga bog'lanamiz" deb yozganiga qaramay.
+#: Nomuvofiqlik ENG KAM HUQUQLI rol joriy etilganda ochildi:
+#: `tai_app` da `erp.stock_move` ga ruxsat yo'q va `import_test`
+#: yiqildi. Superuser bilan ishlaganda buni HECH NARSA ko'rsatmasdi.
+#:
+#: MA'NO FARQI OCHIQ AYTILADI: `v_stock_balance` `stock_move` dan
+#: guruhlab olinadi, ya'ni harakat bo'lsa view ham bo'sh emas
+#: (o'lchandi 2026-08-31: 10 ta harakat -> 2 ta qoldiq qatori).
+#: Teskarisi qat'iy emas — rezerv bor, harakat yo'q holati nazariy
+#: mumkin; lekin u ham "ombor ishlayapti" degani, ya'ni QAROR
+#: o'zgarmaydi.
+#:
+#: TO'G'RI YECHIM — ERP shu belgini VIEW da chop etsin
+#: (`erp.v_stock_balance.ombor_faol` yoki alohida view).
+#: `docs/xavfsizlik.md` §4.
+ANY_MOVE_SQL = "SELECT 1 AS x FROM erp.v_stock_balance LIMIT 1"
 
 _READY: bool = False
 
