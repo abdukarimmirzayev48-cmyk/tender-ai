@@ -211,20 +211,127 @@ VECTOR_READY_SQL = ("SELECT count(*) = 1 AS ok FROM pg_extension "
 #: Uzilishga chidamlilik saqlanadi: shart `embedding IS NULL`, har
 #: partiyadan keyin commit — qayta yurgizilsa QOLGANIDAN davom etadi.
 PENDING_SQL = """
-SELECT c.id, c.text
+SELECT c.id, c.text, c.content_hash
 FROM doc_chunk c
 LEFT JOIN tender t ON t.id = c.tender_id
 WHERE c.embedding IS NULL
+  -- YAROQSIZ va BUTUNLAY YIQILGAN bo'laklar navbatga TUSHMAYDI.
+  -- Ilgari shart faqat `embedding IS NULL` edi va yiqilgan bo'lak
+  -- har yurishda qayta urinilardi — navbat boshida turib qolib,
+  -- yangi bo'laklarni to'sardi.
+  AND embed_holat_aniqla(c.embed_holat, false, c.text)
+      IN ('navbatda', 'eskirgan', 'yiqildi')
 ORDER BY (t.close_at IS NOT NULL AND t.close_at > now()) DESC,
          t.close_at ASC NULLS LAST,
          c.id DESC
 LIMIT %(batch)s
 """
 
-SET_VECTOR_SQL = """
-UPDATE doc_chunk SET embedding = %(vec)s::vector, embed_model = %(model)s
-WHERE id = %(id)s
+#: XESHDAN NUSXALASH — bir xil matn IKKI MARTA hisoblanmaydi.
+#:
+#: O'LCHANGAN (2026-08-30): 61 392 vektorsiz bo'lakdan 31 138 tasining
+#: (51%) matni ALLAQACHON vektorlangan. `content_hash` ustuni bor edi
+#: va `NOT NULL`, lekin vektorlash undan foydalanmasdi — ya'ni model
+#: bir xil matn uchun qayta chaqirilardi.
+#:
+#: `embed_model` SHARTDA: boshqa model bilan hisoblangan vektorni
+#: nusxalash MODELLARNI ARALASHTIRARDI va o'xshashlik masofasi
+#: ma'nosiz bo'lardi.
+#:
+#: `DISTINCT ON` — bir xeshda bir necha manba bo'lishi mumkin, biri
+#: yetarli.
+NUSXALA_SQL = """
+WITH manba AS (
+    SELECT DISTINCT ON (content_hash)
+           content_hash, embedding, embed_model, embed_dims
+    FROM doc_chunk
+    WHERE embedding IS NOT NULL AND embed_model = %(model)s
+      AND content_hash = ANY(%(hashes)s)
+    ORDER BY content_hash, id
+)
+UPDATE doc_chunk c
+   SET embedding          = m.embedding,
+       embed_model        = m.embed_model,
+       embed_dims         = COALESCE(m.embed_dims, %(dims)s),
+       embed_holat        = 'ok',
+       embedded_at        = now(),
+       embed_content_hash = c.content_hash,
+       embed_manba        = 'xesh',
+       embed_xato         = NULL,
+       embed_xato_at      = NULL,
+       embed_urinish      = 0
+  FROM manba m
+ WHERE c.content_hash = m.content_hash
+   AND c.id = ANY(%(ids)s)
+   AND c.embedding IS NULL
+RETURNING c.id
 """
+
+#: Bitta bo'lak YIQILGANDA. Butun partiya emas — BITTA bo'lak.
+#:
+#: Ilgari `embed_documents()` istisnosi butun yurishni to'xtatardi
+#: va bo'lak `embedding IS NULL` bo'lib qolardi, ya'ni "navbatda"
+#: dan farq qilmasdi. Endi u ALOHIDA holatda va sababi yozilgan.
+YIQILDI_SQL = """
+UPDATE doc_chunk
+   SET embed_urinish = embed_urinish + 1,
+       embed_holat   = CASE WHEN embed_urinish + 1 >= %(max)s
+                            THEN 'butunlay_yiqildi' ELSE 'yiqildi' END,
+       embed_xato    = %(xato)s,
+       embed_xato_at = now()
+ WHERE id = %(id)s
+"""
+
+#: Matni juda qisqa bo'lak — vektorlash MA'NOSIZ.
+YAROQSIZ_SQL = """
+UPDATE doc_chunk
+   SET embed_holat = 'yaroqsiz',
+       embed_xato  = %(xato)s, embed_xato_at = now()
+ WHERE id = %(id)s
+"""
+
+#: Model o'zgarganda QAYTA VEKTORLASHNI belgilash. AVTOMATIK EMAS —
+#: bu BOSHQARILADIGAN qaror: 95 874 vektorni qayta hisoblash soatlar
+#: oladi va uni ETL o'zi boshlab yubormasligi kerak.
+MODEL_OZGARDI_SQL = """
+UPDATE doc_chunk
+   SET embed_holat = 'eskirgan'
+ WHERE embedding IS NOT NULL
+   AND embed_model IS DISTINCT FROM %(model)s
+RETURNING id
+"""
+
+#: Matni o'zgargan bo'laklar (vektor eskirgan).
+MATN_OZGARDI_SQL = """
+UPDATE doc_chunk
+   SET embed_holat = 'eskirgan'
+ WHERE embedding IS NOT NULL
+   AND embed_content_hash IS NOT NULL
+   AND embed_content_hash <> content_hash
+RETURNING id
+"""
+
+SET_VECTOR_SQL = """
+UPDATE doc_chunk
+   SET embedding          = %(vec)s::vector,
+       embed_model        = %(model)s,
+       embed_dims         = %(dims)s,
+       embed_holat        = 'ok',
+       embedded_at        = now(),
+       -- Vektor QAYSI matn uchun hisoblangani. `content_hash` bilan
+       -- farq qilsa vektor eskirgani BILINADI.
+       embed_content_hash = content_hash,
+       embed_manba        = 'model',
+       embed_xato         = NULL,
+       embed_xato_at      = NULL,
+       embed_urinish      = 0
+ WHERE id = %(id)s
+"""
+
+#: Bitta bo'lak uchun eng ko'p urinish. Undan oshgach
+#: `butunlay_yiqildi` va navbatdan CHIQADI — aks holda buzuq bo'lak
+#: navbat boshida abadiy aylanardi.
+MAX_URINISH = int(os.environ.get("EMBED_MAX_URINISH", "3"))
 
 ACTIVE_MODEL_SQL = ("SELECT name, dims FROM embed_model WHERE is_active LIMIT 1")
 
@@ -413,6 +520,10 @@ def vectorize(conn, args) -> None:
     import time
     t0 = time.time()
     bajarildi = 0
+    # MANBA BO'YICHA AJRATILGAN SANOQ. Tezlik FAQAT model chaqiruvi
+    # bo'yicha hisoblanadi — nusxalar uni shishirardi va "sekinlashdi"
+    # degan yolg'on signal berardi.
+    n_model = n_nusxa = n_yiqildi = 0
     while bajarildi < nishon:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(PENDING_SQL, {"batch": min(BATCH, nishon - bajarildi)})
@@ -420,31 +531,93 @@ def vectorize(conn, args) -> None:
         if not rows:
             break
 
-        vecs = embed_documents([r["text"] for r in rows])
-        if len(vecs) != len(rows):
-            sys.exit(f"XATO: model {len(vecs)} vektor qaytardi, {len(rows)} kutilgandi.")
+        # --- 1-QADAM: XESHDAN NUSXALASH (arzon, model chaqirilmaydi) ---
+        #
+        # O'lchangan: navbatning 51% i allaqachon hisoblangan matnning
+        # nusxasi. Model uchun ularni qayta hisoblash sof isrof.
+        nusxalandi = []
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(NUSXALA_SQL, {
+                    "model": model["name"], "dims": model["dims"],
+                    "hashes": [r["content_hash"] for r in rows],
+                    "ids": [r["id"] for r in rows]})
+                nusxalandi = [x["id"] for x in cur.fetchall()]
+            conn.commit()
+        except Exception as e:                              # noqa: BLE001
+            # Nusxalash IXTIYORIY tezlashtirish. Yiqilsa ish
+            # to'xtamaydi — model yo'li baribir ishlaydi.
+            conn.rollback()
+            print(f"      ! xeshdan nusxalash bajarilmadi: {str(e)[:100]}",
+                  file=sys.stderr)
+            nusxalandi = []
+
+        nusxa_id = set(nusxalandi)
+        qolgan_rows = [r for r in rows if r["id"] not in nusxa_id]
+        n_nusxa += len(nusxa_id)
+
+        if not qolgan_rows:
+            bajarildi += len(rows)
+            o_tgan = time.time() - t0
+            print(f"      {bajarildi:,}/{nishon:,}  "
+                  f"(butun partiya xeshdan nusxalandi)")
+            continue
+
+        # --- 2-QADAM: MODEL CHAQIRUVI ---
+        #
+        # PARTIYA YIQILSA BUTUN YURISH TO'XTAMAYDI. Ilgari istisno
+        # yuqoriga ko'tarilar va bo'lak `embedding IS NULL` bo'lib
+        # qolardi — ya'ni "navbatda" dan farq qilmasdi va sabab
+        # hech qayerda saqlanmasdi.
+        try:
+            vecs = embed_documents([r["text"] for r in qolgan_rows])
+        except Exception as e:                              # noqa: BLE001
+            xato = f"{type(e).__name__}: {str(e)[:200]}"
+            print(f"      ! partiya yiqildi: {xato}", file=sys.stderr)
+            with conn.cursor() as cur:
+                for r in qolgan_rows:
+                    cur.execute(YIQILDI_SQL, {"id": r["id"], "xato": xato,
+                                              "max": MAX_URINISH})
+            conn.commit()
+            n_yiqildi += len(qolgan_rows)
+            bajarildi += len(rows)
+            continue
+
+        if len(vecs) != len(qolgan_rows):
+            sys.exit(f"XATO: model {len(vecs)} vektor qaytardi, "
+                     f"{len(qolgan_rows)} kutilgandi.")
+        # O'LCHAM MOS KELMASA TO'XTAYMIZ — bu SXEMA nosozligi va uni
+        # bo'lak darajasida "yiqildi" deb yozish sababni yashirardi.
         if len(vecs[0]) != model["dims"]:
             sys.exit(f"XATO: model {len(vecs[0])} o'lchov qaytardi, "
                      f"`embed_model` da {model['dims']} yozilgan. "
                      "Sxema va model MOS EMAS.")
 
         with conn.cursor() as cur:
-            for r, v in zip(rows, vecs):
+            for r, v in zip(qolgan_rows, vecs):
                 cur.execute(SET_VECTOR_SQL, {"id": r["id"], "vec": vec_literal(v),
-                                             "model": model["name"]})
+                                             "model": model["name"],
+                                             "dims": model["dims"]})
         conn.commit()            # uzilsa ham shu partiya saqlanib qoladi
+        n_model += len(qolgan_rows)
 
         bajarildi += len(rows)
         o_tgan = time.time() - t0
-        tezlik = bajarildi / max(o_tgan, 0.001)
-        qolgan = (nishon - bajarildi) / max(tezlik, 0.001)
+        # TEZLIK FAQAT MODEL yo'li bo'yicha — nusxalar shishirmasin.
+        tezlik = n_model / max(o_tgan, 0.001)
+        qolgan = (nishon - bajarildi) / max(bajarildi / max(o_tgan, 0.001), 0.001)
         print(f"      {bajarildi:,}/{nishon:,}  "
-              f"({tezlik:.1f} bo'lak/s, ~{qolgan/60:.0f} daqiqa qoldi)")
+              f"(model {n_model:,} @ {tezlik:.1f}/s, xeshdan {n_nusxa:,}, "
+              f"yiqildi {n_yiqildi}, ~{qolgan/60:.0f} daqiqa qoldi)")
 
     _otkazish_nolla(conn, "vectors")     # yurish bo'ldi — hisob tozalanadi
     _qulf_qoy(conn, LOCK_VECTORS)
-    print(f"\nTayyor. {bajarildi:,} ta bo'lak vektorlandi "
+    print(f"\nTayyor. {bajarildi:,} ta bo'lak: model {n_model:,}, "
+          f"xeshdan {n_nusxa:,}, yiqildi {n_yiqildi} "
           f"({(time.time()-t0)/60:.1f} daqiqa).")
+    if n_nusxa:
+        print(f"      Xeshdan nusxalash {n_nusxa:,} ta model chaqiruvini "
+              f"tejadi ({100 * n_nusxa / max(bajarildi, 1):.0f}%).")
     # ESLATMA MATNI 2026-08-25 da YANGILANDI. Eskisi "indeks bo'sh
     # jadvalga qurilgan" derdi — bu NOTO'G'RI edi: HNSW pgvector'da
     # inkremental quriladi. Va `REINDEX` ham to'g'ri maslahat emas:
@@ -703,6 +876,94 @@ def vectorize_codes(conn, args) -> None:
               "`SELECT recompute_centroid();` dan keyin qayta yurgizing.")
 
 
+def qamrov_korsat(conn) -> None:
+    """Vektorlash qamrovi — hech narsa yozmaydi.
+
+    HAR BO'LAK AYNAN BITTA HOLATDA va yig'indi jamiga TENG.
+    `hisobga_olinmagan` noldan farqli bo'lsa jim bo'shliq qaytgan.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM v_embedding_coverage")
+        v = dict(cur.fetchone())
+        cur.execute("SELECT * FROM v_embedding_pending_reason")
+        sabablar = [dict(r) for r in cur.fetchall()]
+
+    print(f"Model: {v['faol_model']} ({v['faol_olcham']} o'lchov)")
+    print(f"\njami bo'lak            {v['jami']:>9,}")
+    print(f"  vektorlangan           {v['vektorlangan']:>9,}")
+    print(f"  navbatda               {v['navbatda']:>9,}")
+    print(f"  eskirgan               {v['eskirgan']:>9,}")
+    print(f"  yiqildi                {v['yiqildi']:>9,}")
+    print(f"  butunlay yiqildi       {v['butunlay_yiqildi']:>9,}")
+    print(f"  yaroqsiz               {v['yaroqsiz']:>9,}")
+    print(f"  ataylab o'tkazildi     {v['otkazildi']:>9,}")
+    print(f"  {'-' * 34}")
+    print(f"  HISOBGA OLINMAGAN      {v['hisobga_olinmagan']:>9,}  "
+          f"<- 0 bo'lishi SHART")
+    print(f"  {'-' * 34}")
+    print(f"  yaroqli (maxraj)       {v['yaroqli']:>9,}")
+    print(f"  QAMROV                 {v['qamrov_foiz']:>8}%")
+    print(f"\nmodel mos emas         {v['model_mos_emas']:>9,}")
+    print(f"  matn o'zgargan         {v['matn_ozgargan']:>9,}")
+    print(f"  manba: model / xesh    {v['modeldan']:>9,} / {v['xeshdan']:,}")
+
+    if sabablar:
+        print("\nNEGA VEKTORLANMAGAN:")
+        for r in sabablar:
+            print(f"    {r['soni']:>8,}  {r['holat']:<18} {r['sabab']}")
+
+    # NUSXA IMKONIYATI ALOHIDA SO'ROV — u sekin (157k qator ustida
+    # korrelyatsiyalangan EXISTS), shuning uchun har chaqiruvda emas.
+    print("\nNusxa imkoniyati hisoblanmoqda (sekin)...")
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM v_embedding_dedup")
+        d = dict(cur.fetchone())
+    print(f"    navbat                 {d['navbat']:>9,}")
+    print(f"    takrorsiz matn         {d['takrorsiz_navbat']:>9,}")
+    print(f"    XESHDAN NUSXALANADI    {d['xeshdan_nusxalanadi']:>9,}  "
+          f"({100 * d['xeshdan_nusxalanadi'] / max(d['navbat'], 1):.0f}% "
+          f"model chaqiruvisiz)")
+
+
+def qayta_belgila(conn, args) -> None:
+    """Eskirgan vektorlarni 'eskirgan' deb belgilaydi.
+
+    VEKTORNI O'CHIRMAYDI. Eski vektor joyida qoladi va qidiruv
+    ishlashda davom etadi — qayta hisoblash tugagunча "hech narsa
+    topilmaydi" holati bo'lmasin.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(ACTIVE_MODEL_SQL)
+        model = cur.fetchone()
+    if not model:
+        sys.exit("XATO: `embed_model` da faol model yo'q.")
+
+    jami = 0
+    if args.model_ozgardi:
+        with conn.cursor() as cur:
+            cur.execute(MODEL_OZGARDI_SQL, {"model": model["name"]})
+            n = cur.rowcount
+        conn.commit()
+        jami += n
+        print(f"Model '{model['name']}' dan boshqa bilan hisoblangan "
+              f"{n:,} ta vektor 'eskirgan' deb belgilandi.")
+    if args.matn_ozgardi:
+        with conn.cursor() as cur:
+            cur.execute(MATN_OZGARDI_SQL)
+            n = cur.rowcount
+        conn.commit()
+        jami += n
+        print(f"Matni o'zgargan {n:,} ta bo'lak 'eskirgan' deb belgilandi.")
+
+    if jami:
+        print(f"\nJami {jami:,} ta bo'lak navbatga qaytdi. Qayta hisoblash:")
+        print("  python etl_embed.py --vectors")
+        print("\nESLATMA: eski vektorlar O'CHIRILMADI — qidiruv "
+              "hisoblash tugagunga qadar ham ishlaydi.")
+    else:
+        print("Eskirgan vektor topilmadi — hammasi faol model bilan.")
+
+
 def main() -> None:
     if load_dotenv:
         load_dotenv()
@@ -723,12 +984,24 @@ def main() -> None:
     ap.add_argument("--all", action="store_true",
                     help="Allaqachon bo'lingan hujjatlarni ham qayta bo'ladi")
     ap.add_argument("--limit", type=int, help="Nechta hujjat (sinov uchun)")
+    ap.add_argument("--qamrov", action="store_true",
+                    help="Vektorlash QAMROVINI ko'rsatadi va chiqadi "
+                         "(bazaga yozmaydi)")
+    ap.add_argument("--model-ozgardi", action="store_true",
+                    help="Faol modeldan BOSHQA model bilan hisoblangan "
+                         "vektorlarni 'eskirgan' deb belgilaydi. "
+                         "AVTOMATIK EMAS — bu boshqariladigan qaror: "
+                         "95 874 vektorni qayta hisoblash soatlar oladi")
+    ap.add_argument("--matn-ozgardi", action="store_true",
+                    help="Matni o'zgargan bo'laklarni 'eskirgan' deb "
+                         "belgilaydi (`embed_content_hash` <> `content_hash`)")
     ap.add_argument("--dsn", default=os.environ.get("XT_DB_DSN"))
     args = ap.parse_args()
 
     if not (args.chunks or args.vectors or args.tenders or args.codes
-            or args.count_only):
-        ap.error("--chunks, --vectors, --tenders, --codes yoki "
+            or args.count_only or args.qamrov or args.model_ozgardi
+            or args.matn_ozgardi):
+        ap.error("--chunks, --vectors, --tenders, --codes, --qamrov yoki "
                  "--count-only ni tanlang.")
     if psycopg2 is None:
         sys.exit("XATO: pip install psycopg2-binary")
@@ -737,6 +1010,20 @@ def main() -> None:
 
     conn = psycopg2.connect(args.dsn)
     try:
+        # --- QAMROV: hech narsa yozmaydi, faqat ko'rsatadi ---
+        if args.qamrov:
+            qamrov_korsat(conn)
+            return
+
+        # --- BOSHQARILADIGAN QAYTA VEKTORLASH ---
+        #
+        # ATAYLAB ALOHIDA BUYRUQ. Model o'zgarganda ETL O'ZI qayta
+        # hisoblashni boshlab yuborsa, soatlik yurish to'satdan
+        # soatlarga cho'zilardi va buni hech kim so'ramagan bo'lardi.
+        if args.model_ozgardi or args.matn_ozgardi:
+            qayta_belgila(conn, args)
+            return
+
         # TENDER darajasi `doc_chunk` ga bog'liq emas — hujjat matni
         # umuman bo'lmagan tenderlar ham nomi/pozitsiyasi bo'yicha
         # qidirilishi kerak. Shuning uchun `doc_chunk` tekshiruvidan
