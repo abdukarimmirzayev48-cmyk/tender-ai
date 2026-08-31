@@ -77,10 +77,25 @@ ON CONFLICT (company_id, tender_id) DO UPDATE SET
     ai_ozgardi = (tender_routing.inson_qaror IS NOT NULL
                   AND tender_routing.ai_qaror
                       IS DISTINCT FROM EXCLUDED.ai_qaror),
+    -- FAQAT BIR MARTA YOZILADI (`ai_qaror_eski IS NULL` sharti).
+    --
+    -- NUQSON EDI: shartsiz yozilganda IKKINCHI o'zgarish
+    -- birinchisini USTIGA yozardi va inson HAQIQATAN ko'rgan qaror
+    -- YO'QOLARDI:
+    --     1-o'zgarish: inson `go` ni ko'rgan, AI -> review
+    --                  ai_qaror_eski = 'go'        TO'G'RI
+    --     2-o'zgarish: AI -> no_go
+    --                  ai_qaror_eski = 'review'    ASL YO'QOLDI
+    --
+    -- Kelishuv o'lchovi (`v_routing_kelishuv`) aynan shu ustunga
+    -- tayanadi, ya'ni nuqson tarixiy haqiqatni qayta yozardi.
+    -- Hozircha tishlamagan (`ai_ozgardi` = 0 qator), lekin u
+    -- yashirin edi va o'z-o'zidan tuzalmasdi.
     ai_qaror_eski = CASE
         WHEN tender_routing.inson_qaror IS NOT NULL
              AND tender_routing.ai_qaror
                  IS DISTINCT FROM EXCLUDED.ai_qaror
+             AND tender_routing.ai_qaror_eski IS NULL
         THEN tender_routing.ai_qaror
         ELSE tender_routing.ai_qaror_eski END
 -- FAQAT AI qarori HAQIQATAN o'zgarganda yozamiz. Aks holda har

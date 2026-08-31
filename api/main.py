@@ -2377,6 +2377,46 @@ def tender_qualification(tender_id: int, request: Request):
 # tomonda turadi, ERP esa `erp.v_tender_status` orqali o'z holatini
 # aytadi.
 # ---------------------------------------------------------------------------
+@app.get("/routing/agreement")
+def routing_agreement(request: Request):
+    """AI <-> INSON kelishuvi — halol maxraj bilan.
+
+    UCH NARSA ATAYLAB AJRATILGAN:
+
+      `kelishdi` / `bekor_qilindi`  — AI ANIQ da'vo qilgan (go/no_go)
+                                       va inson ANIQ javob bergan
+      `ai_qaror_yoq`               — AI `review` degan, ya'ni QAROR
+                                       QILMAGAN. Bu MUVAFFAQIYATSIZLIK
+                                       EMAS va kelishuv maxrajiga
+                                       KIRMAYDI
+      `kutildi`                    — inson `kutilsin` degan; na
+                                       kelishuv, na bekor qilish
+
+    Ilgari `v_routing_agreement` `review` ni 0 FOIZ deb ko'rsatardi
+    (formula tuzilishiga ko'ra u yerda hech qachon moslik chiqmasdi)
+    va bu ustun holat edi: 30 qarordan 25 tasi.
+
+    `kelishuv_foiz` maxraj nol bo'lsa **null** qaytadi — nol emas.
+    "O'lchanmadi" va "hech qachon kelishmadi" bir xil emas.
+
+    Kelishuv inson KO'RGAN AI qarori bilan hisoblanadi
+    (`ai_korilgan()`): AI fikrini keyin o'zgartirgani tarixiy
+    haqiqatni qayta yozmasligi kerak.
+    """
+    cid = company_id_of(request)
+    if not db.scalar("SELECT to_regclass('public.v_routing_kelishuv') IS NOT NULL"):
+        return {"tayyor": False,
+                "sabab": "schema_patch_routing_kelishuv.sql qo'llanmagan"}
+    umumiy = db.query_one(
+        "SELECT * FROM v_routing_kelishuv WHERE company_id = %(c)s", {"c": cid})
+    kesim = db.query(
+        "SELECT kesim, qiymat, inson_qarori, ai_qaror_yoq, kelishdi, "
+        "       bekor_qilindi "
+        "  FROM v_routing_kelishuv_kesim WHERE company_id = %(c)s "
+        " ORDER BY kesim, inson_qarori DESC", {"c": cid})
+    return {"tayyor": True, "umumiy": umumiy or {}, "kesim": kesim}
+
+
 @app.get("/routing/queue")
 def routing_queue(request: Request,
                   holat: Optional[str] = Query(None),
