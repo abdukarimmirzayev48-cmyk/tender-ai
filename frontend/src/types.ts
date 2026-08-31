@@ -374,7 +374,23 @@ export interface SavedSearch {
   currency: Nullable<string>
   min_cost: Nullable<number>
   max_cost: Nullable<number>
+  /** Ochiq tenderlardan nechtasi shu filtrga mos (server hisoblaydi). */
   match_count?: number
+
+  // --- SERVER QAYTARADI, LEKIN HALI HECH NARSA QILMAYDI ---
+  // Ular interfeysda KO'RSATILMAYDI: ishlamaydigan tugmani
+  // ko'rsatish yolg'on va'da bo'lardi. Holati va nima uchun
+  // qoldirilgani `docs/saved_search.md` §3 da.
+  //
+  // Tur ta'rifida ATAYLAB turibdi: server javobida ular bor va
+  // "yo'q" deb ko'rsatish turni haqiqatdan uzoqlashtirardi.
+  /** Bildirishnoma tsikli buni O'QIMAYDI (`company_profile` dan oladi). */
+  notify?: boolean
+  /** Skorlashda ISHLATILMAYDI. */
+  categories?: string[]
+  /** Hech qayerda to'ldirilmaydi — "yangi moslar" belgisi yo'q. */
+  last_seen_at?: Nullable<string>
+  created_at?: string
 }
 
 // --- AI -------------------------------------------------------------------

@@ -83,14 +83,39 @@ class ProfileIn(BaseModel):
 
 
 class SavedSearchIn(BaseModel):
+    """YARATISH uchun. `name` MAJBURIY: nomsiz qidiruvni yon panelda
+    ajratib bo'lmaydi."""
+
     name: str
     keywords: List[str] = []
-    categories: List[str] = []      # B bosqich (kategoriya) uchun tayyor
+    categories: List[str] = []      # SAQLANADI, lekin hali ISHLATILMAYDI
     regions: List[str] = []
     currency: Optional[str] = None
     min_cost: Optional[float] = None
     max_cost: Optional[float] = None
-    notify: bool = True
+    notify: bool = True             # SAQLANADI, lekin hali ISHLATILMAYDI
+
+
+class SavedSearchPatchIn(BaseModel):
+    """TAHRIRLASH uchun — HAR MAYDON IXTIYORIY.
+
+    NEGA ALOHIDA MODEL (o'lchangan): interfeys shakli
+    (`ProfileForm.tsx`) `categories` va `notify` ni YUBORMAYDI.
+    To'liq almashtirish semantikasida ular har tahrirlashda
+    JIMGINA tozalanardi — foydalanuvchi buni hech qayerda
+    ko'rmasdi. `notify_settings` da aynan shu xato bo'lgan va
+    `{"enabled": false}` yuborish SMTP sozlamasini o'chirib
+    yuborardi.
+    """
+
+    name: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    categories: Optional[List[str]] = None
+    regions: Optional[List[str]] = None
+    currency: Optional[str] = None
+    min_cost: Optional[float] = None
+    max_cost: Optional[float] = None
+    notify: Optional[bool] = None
 
 
 class CatalogItemIn(BaseModel):
@@ -3083,10 +3108,27 @@ def create_search(s: SavedSearchIn, request: Request):
 
 
 @app.put("/searches/{search_id}")
-def update_search(search_id: int, s: SavedSearchIn, request: Request):
+def update_search(search_id: int, s: SavedSearchPatchIn, request: Request):
+    """QISMAN yangilash: YUBORILMAGAN maydon joriy qiymatida qoladi.
+
+    Avval joriy qator o'qiladi (`SEARCH_GET_SQL`) — u ijarachi
+    bilan cheklangan, ya'ni boshqa kompaniyaning qidiruvi bu
+    yerdan ham ko'rinmaydi.
+    """
+    cid = company_id_of(request)
+    joriy = db.query_one(queries.SEARCH_GET_SQL,
+                         {"id": search_id, "company_id": cid})
+    if not joriy:
+        raise xatolar.Xato("SEARCH_NOT_FOUND")
+    berilgan = s.model_dump(exclude_unset=True)
+    params = {k: berilgan.get(k, joriy[k])
+              for k in ("name", "keywords", "categories", "regions",
+                        "currency", "min_cost", "max_cost", "notify")}
+    # Bo'sh nom yon panelda ajratib bo'lmaydigan yozuv beradi.
+    if not (params["name"] or "").strip():
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "name"})
     row = db.execute_returning(queries.SEARCH_UPDATE_SQL,
-                               {**s.model_dump(), "id": search_id,
-                                "company_id": company_id_of(request)})
+                               {**params, "id": search_id, "company_id": cid})
     if not row:
         raise xatolar.Xato("SEARCH_NOT_FOUND")
     return _shape_search(row)

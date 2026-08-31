@@ -209,7 +209,15 @@ export default function App() {
 
   const deleteSearch = useConfirm<SavedSearch>()
   async function removeSearch(s: SavedSearch) {
-    try { await api.deleteSearch(s.id) } catch { /* ignore */ }
+    // XATO YASHIRILMAYDI. Ilgari `catch { }` edi: o'chirish
+    // muvaffaqiyatsiz bo'lsa ham interfeys "o'chdi" deb ko'rsatar,
+    // ro'yxat yangilanganda element QAYTA PAYDO bo'lardi — sababsiz.
+    try {
+      await api.deleteSearch(s.id)
+    } catch (e) {
+      setError((e as Error).message)
+      return
+    }
     if (activeSearchId === s.id) { setActiveSearchId(null); setProfile(null) }
     loadSearches()
   }

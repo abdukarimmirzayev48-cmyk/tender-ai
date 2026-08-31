@@ -641,9 +641,12 @@ RETURNING {_SS_COLS}
 SEARCH_DELETE_SQL = ("DELETE FROM saved_search "
                      "WHERE id=%(id)s AND company_id=%(company_id)s RETURNING id")
 
-# Qidiruvni "ko'rildi" deb belgilash (yangi-mos belgisi tozalanadi — C bosqich)
-SEARCH_SEEN_SQL = ("UPDATE saved_search SET last_seen_at=now() "
-                   "WHERE id=%(id)s AND company_id=%(company_id)s RETURNING id")
+# `last_seen_at` — KEYINGA QOLDIRILGAN. Uni to'ldiradigan SQL bu
+# yerda BOR EDI, lekin CHAQIRUVCHISI YO'Q edi: "oxirgi ko'rgandan
+# keyingi yangilar" belgisi na endpointda, na interfeysda. O'lik
+# SQL "imkoniyat bor" degan yolg'on taassurot berardi, shuning
+# uchun olib tashlandi. Ustun jadvalda qoldi (ma'lumot yo'qotmaslik
+# uchun) va holati `docs/saved_search.md` da yozilgan.
 
 
 # --- /categories (B bosqich) — daraxt + OCHIQ tenderlar soni ---
