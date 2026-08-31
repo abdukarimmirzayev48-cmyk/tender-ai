@@ -33,7 +33,7 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
-from api import db, erp_stock
+from api import db, erp_stock, xatolar
 
 # ---------------------------------------------------------------------------
 # 1. Ustun sarlavhalarini tanish
@@ -143,13 +143,16 @@ def _zip_bombani_tekshir(data: bytes) -> None:
         return                      # buzuq — keyingi qadam aniq xato beradi
     if ochilgan > MAX_OCHILGAN_MB * 1024 * 1024:
         raise ImportFormatError(
-            f"Fayl ochilganda {ochilgan // (1024 * 1024)} MB bo'ladi — "
-            f"chegara {MAX_OCHILGAN_MB} MB.")
+            f"Ochilgan hajm {ochilgan // (1024 * 1024)} MB — chegara "
+            f"{MAX_OCHILGAN_MB} MB.",
+            kod="FILE_UNCOMPRESSED_TOO_LARGE",
+            params={"mb": ochilgan // (1024 * 1024), "chegara": MAX_OCHILGAN_MB})
     if data and ochilgan / max(len(data), 1) > MAX_SIQISH_NISBATI:
         raise ImportFormatError(
-            f"Siqilish nisbati juda yuqori "
-            f"({ochilgan // max(len(data), 1)}:1) — fayl xavfli deb "
-            f"hisoblandi.")
+            f"Siqilish nisbati {ochilgan // max(len(data), 1)}:1 — chegara "
+            f"{MAX_SIQISH_NISBATI}:1.",
+            kod="FILE_COMPRESSION_SUSPICIOUS",
+            params={"nisbat": ochilgan // max(len(data), 1)})
 
 
 def norm_header(s: Any) -> str:
@@ -316,7 +319,23 @@ def cell_text(raw: Any) -> Optional[str]:
 # 3. Fayl o'qish (.xlsx / .csv)
 # ---------------------------------------------------------------------------
 class ImportFormatError(ValueError):
-    """Butun faylga tegishli xato (qatorga emas) — import boshlanmaydi."""
+    """Butun faylga tegishli xato (qatorga emas) — import boshlanmaydi.
+
+    XATO KODI (`kod`) — TILGA BOG'LIQ EMAS. Xabar matni SERVER
+    JURNALI uchun qoladi va javobga TUSHMAYDI: ilgari
+    `detail=str(e)` orqali aynan shu o'zbekcha matn mijozga
+    ketardi va rus/ingliz foydalanuvchisi uni o'zbekcha ko'rardi.
+    Kod `api/xatolar.py:KODLAR` da tekshiriladi — imlo xatosi
+    ISHLAB CHIQISHDA chiqadi.
+    """
+
+    def __init__(self, xabar: str, *, kod: str = "",
+                 params: Optional[Dict[str, Any]] = None):
+        if kod and kod not in xatolar.KODLAR:
+            raise KeyError(f"noma'lum xato kodi: {kod!r}")
+        super().__init__(xabar)
+        self.kod = kod
+        self.params = params or {}
 
 
 def _read_xlsx(data: bytes) -> List[List[Any]]:
@@ -324,13 +343,13 @@ def _read_xlsx(data: bytes) -> List[List[Any]]:
         _zip_bombani_tekshir(data)
         from openpyxl import load_workbook
     except ImportError as e:      # pragma: no cover
-        raise ImportFormatError(
-            "Excel o‘qish uchun `openpyxl` o‘rnatilmagan.") from e
+        raise ImportFormatError("`openpyxl` o'rnatilmagan.",
+                                kod="EXCEL_LIB_MISSING") from e
     try:
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as e:
-        raise ImportFormatError(
-            f"Excel fayli ochilmadi (buzilgan yoki .xlsx emas): {e}") from e
+        raise ImportFormatError(f"Excel fayli ochilmadi: {e}",
+                                kod="EXCEL_UNREADABLE") from e
     ws = wb[wb.sheetnames[0]]
     rows = [list(r) for r in ws.iter_rows(values_only=True)]
     wb.close()
@@ -346,8 +365,8 @@ def _read_csv(data: bytes) -> List[List[Any]]:
         except UnicodeDecodeError:
             continue
     if text is None:
-        raise ImportFormatError(
-            "CSV kodlashi aniqlanmadi. Faylni UTF-8 da saqlang.")
+        raise ImportFormatError("CSV kodlashi aniqlanmadi.",
+                                kod="CSV_ENCODING_UNKNOWN")
     sample = text[:4096]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
@@ -368,9 +387,8 @@ def read_table(data: bytes, filename: str) -> Tuple[List[List[Any]], str]:
     if name.endswith((".csv", ".txt", ".tsv")):
         return _read_csv(data), "csv"
     if name.endswith((".xls", ".xlsm", ".ods")):
-        raise ImportFormatError(
-            "Bu format qo‘llab-quvvatlanmaydi. Faylni .xlsx yoki .csv "
-            "ko‘rinishida saqlang (Excel: “Farqli saqlash > .xlsx”).")
+        raise ImportFormatError("Format qo'llab-quvvatlanmaydi.",
+                                kod="FILE_FORMAT_UNSUPPORTED")
     if data[:2] == b"PK":
         return _read_xlsx(data), "xlsx"
     return _read_csv(data), "csv"
@@ -389,8 +407,8 @@ def _find_header(rows: List[List[Any]], limit: int = 10) -> Tuple[int, Dict[str,
                 best = (i, mapping, unknown)
     if best is None:
         raise ImportFormatError(
-            "Sarlavha qatori topilmadi: “Nomi” (yoki Наименование / Name) "
-            "ustuni yo‘q. Namunaviy shablonni yuklab oling.")
+            "Sarlavha qatori topilmadi: `Nomi` / `Наименование` / `Name`.",
+            kod="HEADER_ROW_MISSING")
     return best
 
 
@@ -591,7 +609,7 @@ def import_catalog(data: bytes, filename: str, company_id: int,
     """
     rows, fmt = read_table(data, filename)
     if not rows:
-        raise ImportFormatError("Fayl bo‘sh.")
+        raise ImportFormatError("Fayl bo'sh.", kod="FILE_EMPTY")
 
     header_idx, mapping, unknown = _find_header(rows)
     missing = [FIELD_LABELS[f] for f in REQUIRED_FIELDS if f not in mapping]

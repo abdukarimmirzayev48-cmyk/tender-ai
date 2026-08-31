@@ -195,14 +195,16 @@ def _extract(resp) -> Dict[str, Any]:
     # Rad etish HTTP 200 bilan keladi — content ga qo'l urishdan OLDIN tekshiramiz
     if resp.stop_reason == "refusal":
         cat = getattr(getattr(resp, "stop_details", None), "category", None)
-        raise ai.AIUnavailable(f"Claude so'rovni rad etdi (xavfsizlik: {cat}).")
+        raise ai.AIUnavailable(f"Claude so'rovni rad etdi (xavfsizlik: {cat}).",
+                               kod="AI_REFUSED")
     if resp.stop_reason == "max_tokens":
         # Opus 5 da fikrlash va javob matni BITTA byudjetni bo'lishadi
-        raise ai.AIUnavailable(
-            "Javob token chegarasiga yetdi — MAX_TOKENS ni oshiring.")
+        raise ai.AIUnavailable("Javob token chegarasiga yetdi.",
+                               kod="AI_TOKEN_LIMIT")
     raw = next((b.text for b in resp.content if b.type == "text"), None)
     if not raw:
-        raise ai.AIUnavailable("Claude bo'sh javob qaytardi.")
+        raise ai.AIUnavailable("Claude bo'sh javob qaytardi.",
+                               kod="AI_EMPTY_RESPONSE")
     return json.loads(raw)
 
 
@@ -245,9 +247,11 @@ def analyze(tender: Dict[str, Any], products: List[Dict[str, Any]],
             try:
                 resp = client.messages.create(**kwargs)
             except Exception as e2:  # noqa: BLE001
-                raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e2}") from e2
+                raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e2}",
+                                       kod="AI_CALL_FAILED") from e2
         else:
-            raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e}") from e
+            raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e}",
+                                   kod="AI_CALL_FAILED") from e
 
     return {
         "result": _extract(resp),

@@ -24,6 +24,8 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
+from api import xatolar
+
 MODEL = "claude-opus-4-8"
 KIND = "summary_v1"          # prompt/sxema o'zgarsa versiyani oshiring
 MAX_TOKENS = 8000
@@ -31,7 +33,23 @@ DEFAULT_EFFORT = os.environ.get("AI_EFFORT", "medium")   # low | medium | high
 
 
 class AIUnavailable(RuntimeError):
-    """API kaliti yo'q yoki chaqiruv muvaffaqiyatsiz."""
+    """API kaliti yo'q yoki chaqiruv muvaffaqiyatsiz.
+
+    XATO KODI (`kod`) — TILGA BOG'LIQ EMAS. Xabar matni SERVER
+    JURNALI uchun qoladi va javobga TUSHMAYDI: ilgari
+    `detail=str(e)` orqali aynan shu o'zbekcha matn mijozga
+    ketardi va rus/ingliz foydalanuvchisi uni o'zbekcha ko'rardi.
+    Kod `api/xatolar.py:KODLAR` da tekshiriladi — imlo xatosi
+    ISHLAB CHIQISHDA chiqadi.
+    """
+
+    def __init__(self, xabar: str, *, kod: str = "",
+                 params: Optional[Dict[str, Any]] = None):
+        if kod and kod not in xatolar.KODLAR:
+            raise KeyError(f"noma'lum xato kodi: {kod!r}")
+        super().__init__(xabar)
+        self.kod = kod
+        self.params = params or {}
 
 
 # ---------------------------------------------------------------------------
@@ -242,10 +260,9 @@ def paid_guard(nima: str = "AI chaqiruvi") -> None:
     """
     if not paid_allowed():
         raise AIUnavailable(
-            f"{nima} BLOKLANGAN: pullik amallar o'chirilgan.\n"
-            f"  Loyiha ishlab chiqarish holatiga chiqmaguncha hech "
-            f"qanday pullik chaqiruv bajarilmaydi.\n"
-            f"  Yoqish (ATAYLAB): .env da {PAID_ENV}=1")
+            f"{nima} BLOKLANGAN: pullik amallar o'chirilgan "
+            f"(AI_PAID_ENABLED).",
+            kod="AI_PAID_DISABLED", params={"amal": nima})
 
 
 def get_client():
@@ -257,14 +274,13 @@ def get_client():
     if _client is not None:
         return _client
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise AIUnavailable(
-            "ANTHROPIC_API_KEY o'rnatilmagan. .env fayliga qo'shing:\n"
-            "  ANTHROPIC_API_KEY=sk-ant-..."
-        )
+        raise AIUnavailable("ANTHROPIC_API_KEY o'rnatilmagan.",
+                            kod="AI_KEY_MISSING")
     try:
         import anthropic
     except ImportError as e:
-        raise AIUnavailable("`pip install anthropic` bajarilmagan.") from e
+        raise AIUnavailable("`pip install anthropic` bajarilmagan.",
+                            kod="AI_LIB_MISSING") from e
     _client = anthropic.Anthropic()
     return _client
 
@@ -294,14 +310,17 @@ def analyze(tender: Dict[str, Any], effort: str = DEFAULT_EFFORT) -> Dict[str, A
             messages=[{"role": "user", "content": text}],
         )
     except Exception as e:  # noqa: BLE001 — SDK xatolarini yuqoriga aniq uzatamiz
-        raise AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e}") from e
+        raise AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e}",
+                            kod="AI_CALL_FAILED") from e
 
     if resp.stop_reason == "refusal":
-        raise AIUnavailable("Claude so'rovni rad etdi (xavfsizlik).")
+        raise AIUnavailable("Claude so'rovni rad etdi (xavfsizlik).",
+                            kod="AI_REFUSED")
 
     raw = next((b.text for b in resp.content if b.type == "text"), None)
     if not raw:
-        raise AIUnavailable("Claude bo'sh javob qaytardi.")
+        raise AIUnavailable("Claude bo'sh javob qaytardi.",
+                            kod="AI_EMPTY_RESPONSE")
 
     return {
         "result": json.loads(raw),

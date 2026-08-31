@@ -58,7 +58,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from api import compliance, db, requirement
+from api import compliance, db, requirement, xatolar
 
 #: Hukm darajalari — `ai_gonogo.STATUSES` bilan bir xil so'zlar, chunki
 #: ikkalasi bitta interfeysda ko'rsatiladi.
@@ -468,7 +468,7 @@ def check(tender_id: int, company_id: int) -> Dict[str, Any]:
     """Bitta tender uchun malaka tekshiruvi. MODEL CHAQIRILMAYDI."""
     tender = db.query_one(SQL_TENDER, {"t": tender_id})
     if not tender:
-        raise ValueError(f"Tender topilmadi: {tender_id}")
+        raise xatolar.Xato("TENDER_NOT_FOUND", {"id": tender_id})
     profil = db.query_one(SQL_PROFIL, {"c": company_id}) or {
         "company_id": company_id}
     talablar = db.query(SQL_TALABLAR, {"t": tender_id, "c": company_id})

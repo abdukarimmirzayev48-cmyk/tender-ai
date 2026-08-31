@@ -202,13 +202,20 @@ def test_db():
             r = c.post("/auth/login",
                        json={"username": USERNAME, "password": "notogri"})
             eq("noto'g'ri parol -> 401", r.status_code, 401)
-            msg = str(r.json()["detail"]).lower()
-            check("login yoki parol" in msg,
-                  "xato matni QAYSI BIRI xato ekanini aytmaydi", msg[:60])
-            eq("mavjud bo'lmagan login -> 401",
-               c.post("/auth/login",
-                      json={"username": "zztest_yoq",
-                            "password": PASSWORD}).status_code, 401)
+            # ILGARI bu yerda O'ZBEKCHA matn ("login yoki parol")
+            # tekshirilardi. 20-vazifadan keyin javob TILGA BOG'LIQ
+            # EMAS, shuning uchun tekshiruv KOD bo'yicha va u
+            # KUCHLIROQ: bir xil kod IKKALA holatda ham qaytishi
+            # "qaysi biri xato" ekanini oshkor qilmaslikni
+            # ISBOTLAYDI (matn tekshiruvi buni isbotlamasdi).
+            kod1 = r.json()["error"]["code"]
+            eq("noto'g'ri parol -> AUTH_INVALID_CREDENTIALS", kod1,
+               "AUTH_INVALID_CREDENTIALS")
+            r2 = c.post("/auth/login",
+                        json={"username": "zztest_yoq", "password": PASSWORD})
+            eq("mavjud bo'lmagan login -> 401", r2.status_code, 401)
+            eq("mavjud bo'lmagan login AYNI kodni beradi",
+               r2.json()["error"]["code"], kod1)
 
             r = c.post("/auth/login",
                        json={"username": USERNAME, "password": PASSWORD})

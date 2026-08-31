@@ -51,7 +51,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from api import db
+from api import db, xatolar
 
 # ---------------------------------------------------------------------------
 # Lug'atlar
@@ -94,11 +94,24 @@ ERP_SESSIYA_HEADER = "x-erp-session"
 
 
 class RuxsatXato(RuntimeError):
-    """Huquq yetmadi. `code` HTTP holatiga aylanadi."""
+    """Huquq yetmadi. `code` HTTP holatiga aylanadi.
 
-    def __init__(self, xabar: str, code: int = 403):
+    XATO KODI (`kod`) — TILGA BOG'LIQ EMAS. Xabar matni SERVER
+    JURNALI uchun qoladi va javobga TUSHMAYDI: ilgari
+    `detail=str(e)` orqali aynan shu o'zbekcha matn mijozga
+    ketardi va rus/ingliz foydalanuvchisi uni o'zbekcha ko'rardi.
+    Kod `api/xatolar.py:KODLAR` da tekshiriladi — imlo xatosi
+    ISHLAB CHIQISHDA chiqadi.
+    """
+
+    def __init__(self, xabar: str, code: int = 403, *, kod: str = "",
+                 params: Optional[Dict[str, Any]] = None):
+        if kod and kod not in xatolar.KODLAR:
+            raise KeyError(f"noma'lum xato kodi: {kod!r}")
         super().__init__(xabar)
         self.code = code
+        self.kod = kod
+        self.params = params or {}
 
 
 # ---------------------------------------------------------------------------
@@ -159,15 +172,15 @@ def qosh(company_id: int, *, login: str, ism: str, rol: str,
          manba: str = "mahalliy", erp_user_id: Optional[int] = None,
          izoh: Optional[str] = None) -> Dict[str, Any]:
     if rol not in ROLLAR:
-        raise ValueError(f"Noma'lum rol: {rol}")
+        raise xatolar.Xato("INVALID_ENUM", {"maydon": "rol", "qiymat": rol})
     if manba not in ("erp", "mahalliy"):
-        raise ValueError(f"Noma'lum manba: {manba}")
+        raise xatolar.Xato("INVALID_ENUM", {"maydon": "manba", "qiymat": manba})
     if manba == "erp" and not erp_user_id:
-        raise ValueError("`erp` aktorida `erp_user_id` bo'lishi SHART.")
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "erp_user_id"})
     if manba == "mahalliy" and erp_user_id:
-        raise ValueError("`mahalliy` aktorda `erp_user_id` bo'lmaydi.")
+        raise xatolar.Xato("FIELD_INVALID", {"maydon": "erp_user_id"})
     if not (login or "").strip() or not (ism or "").strip():
-        raise ValueError("`login` va `ism` bo'sh bo'lmasligi kerak.")
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "login, ism"})
     return db.execute_returning(
         "INSERT INTO actor (company_id, manba, erp_user_id, login, ism, rol, izoh) "
         "VALUES (%(cid)s, %(manba)s, %(euid)s, %(login)s, %(ism)s, %(rol)s, %(izoh)s) "
@@ -181,7 +194,7 @@ def yangila(company_id: int, actor_id: int, *, rol: Optional[str] = None,
             izoh: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Aktorni yangilaydi. `company_id` SHARTDA — IDOR himoyasi."""
     if rol is not None and rol not in ROLLAR:
-        raise ValueError(f"Noma'lum rol: {rol}")
+        raise xatolar.Xato("INVALID_ENUM", {"maydon": "rol", "qiymat": rol})
     return db.execute_returning(
         "UPDATE actor SET rol = COALESCE(%(rol)s, rol), "
         "                 ism = COALESCE(%(ism)s, ism), "
@@ -326,21 +339,23 @@ def aniqla(request: Any, company_id: int) -> Kimlik:
         # TUSHIRILMAYDI — bu "isbot bor" degan noto'g'ri taassurot
         # qoldirardi. Chaqiruvchi buni ko'rishi kerak.
         raise RuxsatXato(
-            "ERP sessiyasi tasdiqlanmadi yoki bu hodim shu kompaniyaga "
-            "xaritalanmagan.", 403)
+            "ERP sessiyasi tasdiqlanmadi yoki hodim bu kompaniyaga "
+            "xaritalanmagan.", 403, kod="ACTOR_ERP_SESSION_INVALID")
 
     xom = (sarlavhalar.get(AKTOR_HEADER) or "").strip()
     if xom:
         if not xom.isdigit():
-            raise RuxsatXato(f"`{AKTOR_HEADER}` butun son bo'lishi kerak.", 400)
+            raise RuxsatXato(f"`{AKTOR_HEADER}` butun son bo'lishi kerak.", 400,
+                             kod="ACTOR_HEADER_INVALID")
         a = bitta(company_id, int(xom))
         if not a:
             # BOSHQA IJARACHINING aktori ham shu yerga tushadi —
             # javob BIR XIL: "topilmadi". Farqni aytish "bu id bor"
             # degan ma'lumotni sizdirardi.
-            raise RuxsatXato("Bunday aktor yo'q.", 404)
+            raise RuxsatXato("Bunday aktor yo'q.", 404, kod="ACTOR_NOT_FOUND")
         if not a["active"]:
-            raise RuxsatXato(f"Aktor faol emas: {a['login']}", 403)
+            raise RuxsatXato(f"Aktor faol emas: {a['login']}", 403,
+                             kod="ACTOR_INACTIVE", params={"login": a["login"]})
         return Kimlik(company_id, a["id"], "aktor_elon", a["rol"],
                       a["login"], a["ism"])
 
@@ -376,17 +391,18 @@ def ruxsat_tekshir(k: Kimlik, amal: str) -> None:
         aniq aktor talab qilinadi.
     """
     if amal not in RUXSAT:
-        raise ValueError(f"Noma'lum amal: {amal}")
+        raise xatolar.Xato("INVALID_ENUM", {"maydon": "amal", "qiymat": amal})
 
     if k.ishonch == "servis":
         raise RuxsatXato(
-            "Bu amal INSON qarori — service kaliti bilan bajarilmaydi.", 403)
+            "Bu amal INSON qarori — service kaliti bilan bajarilmaydi.", 403,
+            kod="ACTOR_SERVICE_KEY_FORBIDDEN")
 
     if k.ishonch == "kompaniya_sessiyasi":
         if aktor_majburiymi(k.company_id):
             raise RuxsatXato(
-                f"Bu kompaniyada aktor MAJBURIY: `{AKTOR_HEADER}` "
-                f"sarlavhasida aktorni ko'rsating.", 403)
+                f"Bu kompaniyada aktor MAJBURIY: `{AKTOR_HEADER}` sarlavhasi.", 403,
+                kod="ACTOR_REQUIRED", params={"sarlavha": AKTOR_HEADER})
         # Kompaniya hisobi — ijarachining egasi. Rol tekshirilmaydi,
         # chunki rol AKTORGA beriladi, aktor esa yo'q.
         return
@@ -394,7 +410,8 @@ def ruxsat_tekshir(k: Kimlik, amal: str) -> None:
     if k.rol not in RUXSAT[amal]:
         raise RuxsatXato(
             f"`{k.rol}` roli `{amal}` amalini bajara olmaydi "
-            f"(kerak: {', '.join(RUXSAT[amal])}).", 403)
+            f"(kerak: {', '.join(RUXSAT[amal])}).", 403,
+            kod="ACTOR_FORBIDDEN", params={"rol": k.rol, "amal": amal})
 
 
 # ---------------------------------------------------------------------------

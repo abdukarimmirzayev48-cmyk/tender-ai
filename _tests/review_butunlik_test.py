@@ -137,12 +137,21 @@ def test_kodda_soxta_yol_yoq() -> None:
               not yomon, "; ".join(yomon)[:120])
 
     # `review_set` INSON dalilini talab qiladi.
-    check("review_set: `by` majburiy",
-          "inson qarori uchun `by` (kim) SHART" in req)
+    #
+    # 20-vazifadan keyin xato O'ZBEKCHA MATN emas, KOD bilan
+    # ko'tariladi (`api/xatolar.py`) — javob uch tilli interfeysga
+    # bog'lanishi uchun. Shuning uchun manba tekshiruvi ham KOD
+    # bo'yicha: u tilga bog'liq emas va tarjima o'zgarganda
+    # yiqilmaydi.
+    check("review_set/bulk: `by` majburiy",
+          req.count('Xato("FIELD_REQUIRED", {"maydon": "by"})') == 2,
+          f"{req.count(chr(88))}")
     check("review_set: mashina holatlarini QO'YA OLMAYDI",
           "INSON_QARORLARI" in req and "MASHINA_HOLATLARI" in req)
-    check("review_bulk: `by` majburiy",
-          "ommaviy tasdiq uchun `by` (kim) SHART" in req)
+    check("review_set/bulk: ishonch darajasi tekshiriladi",
+          req.count('Xato("TRUST_LEVEL_INVALID"') == 2)
+    check("review_set/bulk: `aktor_elon` aktorsiz o'tmaydi",
+          req.count('Xato("ACTOR_REQUIRED_FOR_TRUST"') == 2)
 
     main = io.open(os.path.join(ROOT, "api", "main.py"), encoding="utf-8").read()
     check("API sxemasi holatni Literal bilan qulflaydi",

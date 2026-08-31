@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from api import db, qualification
+from api import db, qualification, xatolar
 
 #: Broker qarorlari.
 INSON_QARORLAR = ("olindi", "rad", "kutilsin")
@@ -245,7 +245,7 @@ def navbat(company_id: int, holat: Optional[str] = None,
     boshlangan" deb o'ylab tenderni ikkinchi marta ochmasdi.
     """
     if holat is not None and holat not in HOLATLAR:
-        raise ValueError(f"Noma'lum holat: {holat}")
+        raise xatolar.Xato("INVALID_ENUM", {"maydon": "holat", "qiymat": holat})
     qatorlar = db.query(SQL_NAVBAT, {"c": company_id, "holat": holat,
                                      "limit": limit})
 
@@ -310,12 +310,12 @@ def qaror(routing_id: int, company_id: int, inson_qaror: str,
     joyida BALAND OVOZDA yiqitadi.
     """
     if inson_qaror not in INSON_QARORLAR:
-        raise ValueError(f"Noma'lum qaror: {inson_qaror}")
+        raise xatolar.Xato("INVALID_ENUM",
+                           {"maydon": "inson_qaror", "qiymat": inson_qaror})
     if ishonch not in ("erp_sessiya", "aktor_elon", "kompaniya_sessiyasi"):
-        raise ValueError(
-            f"inson qarori uchun yaroqsiz ishonch darajasi: {ishonch}")
+        raise xatolar.Xato("TRUST_LEVEL_INVALID", {"ishonch": ishonch})
     if ishonch in ("erp_sessiya", "aktor_elon") and not actor_id:
-        raise ValueError(f"`{ishonch}` darajasi aktor SHART qiladi")
+        raise xatolar.Xato("ACTOR_REQUIRED_FOR_TRUST", {"ishonch": ishonch})
     return db.execute_returning("""
         UPDATE tender_routing
            SET inson_qaror = %(q)s,

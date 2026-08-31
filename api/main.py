@@ -32,18 +32,20 @@ from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
-from fastapi import (Cookie, Depends, FastAPI, File, Header, HTTPException,
-                     Query, Request, Response, UploadFile)
+from fastapi import (Cookie, Depends, FastAPI, File, Header, Query, Request,
+                     Response, UploadFile)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (JSONResponse, RedirectResponse,
                                Response as FileResponse, StreamingResponse)
 from pydantic import BaseModel, field_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 load_dotenv()  # .env ni import paytida yuklaymiz (pool DSN'ni ko'rishi uchun)
 
 from api import (ai, ai_chat, ai_docs, ai_gonogo, ai_match, auth, jurnal,  # noqa: E402
                  catalog_auto, compliance, db, erp_status, erp_stock, i18n, importer,
                  kodlash, matching, notify, ommaviy_url, pricing, queries,
-                 stock, telegram, translit)
+                 stock, telegram, translit, xatolar)
 
 _log = logging.getLogger(__name__)
 
@@ -154,16 +156,19 @@ class PricingSettingsIn(BaseModel):
                      "vat_percent", "risk_reserve_fixed", "logistics_fixed")
     @classmethod
     def _oraliq(cls, v, info):
-        # Pydantic'ning o'z `Field(ge=…)` xabari inglizcha ("Input should be…"),
-        # interfeys esa o'zbekcha. Shuning uchun chegarani qo'lda tekshiramiz.
+        # Pydantic'ning o'z `Field(ge=…)` xabari INGLIZCHA ("Input
+        # should be…"), interfeys esa UCH TILLI. Ilgari bu yerda
+        # o'zbekcha jumla yozilardi va u rus foydalanuvchisiga ham
+        # o'zbekcha ketardi. Endi KOD ko'tariladi: uni 422
+        # ishlovchisi `error.fields[].code` ga qo'yadi va interfeys
+        # o'z tilida ko'rsatadi.
         if v is None:
             return v
         yuqori = _PERCENT_MAX.get(info.field_name)
         if v < 0:
-            raise ValueError(f"{_MAYDON_NOMI[info.field_name]} manfiy bo'lmasligi kerak.")
+            raise ValueError("FIELD_NEGATIVE")
         if yuqori is not None and v > yuqori:
-            raise ValueError(
-                f"{_MAYDON_NOMI[info.field_name]} {yuqori}% dan oshmasligi kerak.")
+            raise ValueError("FIELD_PERCENT_RANGE")
         return v
 
 
@@ -232,14 +237,14 @@ class NotifySettingsIn(BaseModel):
     @classmethod
     def _ball_oraligi(cls, v):
         if v is not None and not 0 <= v <= 100:
-            raise ValueError("Moslik chegarasi 0 va 100 orasida bo'lishi kerak.")
+            raise ValueError("FIELD_SCORE_RANGE")
         return v
 
     @field_validator("smtp_port")
     @classmethod
     def _port_oraligi(cls, v):
         if v is not None and not 1 <= v <= 65535:
-            raise ValueError("SMTP porti 1 va 65535 orasida bo'lishi kerak.")
+            raise ValueError("FIELD_PORT_RANGE")
         return v
 
     @field_validator("email", "from_email")
@@ -252,7 +257,7 @@ class NotifySettingsIn(BaseModel):
             return None
         v = v.strip()
         if not re.fullmatch(r"[^@\s]+@[^@\s.]+(\.[^@\s.]+)+", v):
-            raise ValueError(f"Email manzili noto'g'ri: {v!r}")
+            raise ValueError("EMAIL_INVALID")
         return v
 
 
@@ -276,9 +281,7 @@ class CompanyDocumentIn(BaseModel):
         bo'lsa ham cheklist "yo'q" deb turaveradi. Shuning uchun rad etamiz."""
         v = (v or "").strip()
         if v not in compliance.BY_CODE:
-            raise ValueError(
-                f"Noma'lum hujjat turi: {v!r}. "
-                f"Ruxsat etilganlari: {', '.join(compliance.BY_CODE)}")
+            raise ValueError("INVALID_ENUM")
         return v
 
     @field_validator("name")
@@ -286,7 +289,7 @@ class CompanyDocumentIn(BaseModel):
     def _nom_bosh_emas(cls, v):
         v = (v or "").strip()
         if not v:
-            raise ValueError("Hujjat nomi bo'sh bo'lmasligi kerak.")
+            raise ValueError("FIELD_EMPTY")
         return v
 
     @field_validator("valid_until")
@@ -296,7 +299,7 @@ class CompanyDocumentIn(BaseModel):
         xatosi, va cheklist buni "muddati o'tgan" deb noto'g'ri belgilaydi."""
         iss = info.data.get("issued_at")
         if v and iss and v < iss:
-            raise ValueError("Amal qilish muddati berilgan sanadan oldin.")
+            raise ValueError("DATE_ORDER_INVALID")
         return v
 
 
@@ -477,9 +480,7 @@ def gate(request: Request,
         if (request.method, template) not in SERVICE_PATHS:
             # Kalit to'g'ri, lekin bu eshik unga ochilmagan. 403 (401 emas):
             # kimligi ma'lum, huquqi yetmaydi.
-            raise HTTPException(
-                status_code=403,
-                detail="Service kaliti bu endpoint uchun ruxsat bermaydi.")
+            raise xatolar.Xato("AUTH_SERVICE_KEY_FORBIDDEN")
         request.state.account = None
         request.state.service = True
         return
@@ -490,11 +491,11 @@ def gate(request: Request,
     bearer = _bearer(authorization)
     token, from_cookie = (bearer, False) if bearer else (tai_session, True)
     if not token:
-        raise HTTPException(status_code=401, detail="Kirilmagan.")
+        raise xatolar.Xato("AUTH_NOT_AUTHENTICATED")
     try:
         account = auth.verify(token)
     except auth.AuthError as e:
-        raise HTTPException(status_code=e.code, detail=str(e))
+        raise xatolar.kodli(e, "AUTH_NOT_AUTHENTICATED")
 
     # CSRF FAQAT cookie uchun: Bearer da token ataylab qo'yiladi, ya'ni
     # "begona sayt bizning nomimizdan" holati yuzaga kelmaydi.
@@ -503,9 +504,7 @@ def gate(request: Request,
         sent = request.headers.get(CSRF_HEADER)
         if not sent or not secrets.compare_digest(sent, account.get("csrf") or ""):
             # 403 (401 emas): kim ekani ma'lum, so'rovning manbai shubhali.
-            raise HTTPException(
-                status_code=403,
-                detail="CSRF tokeni mos kelmadi — sahifani yangilang.")
+            raise xatolar.Xato("AUTH_CSRF_MISMATCH")
 
     request.state.account = account
     request.state.service = False
@@ -674,8 +673,116 @@ async def _db_unavailable_handler(request, exc: db.DBUnavailable):
     logging.getLogger("api").error("DB yetib bo'lmadi: %s", exc)
     return JSONResponse(
         status_code=503,
-        content={"error": "database_unavailable",
-                 "detail": "Ma'lumotlar bazasi vaqtincha mavjud emas."},
+        content=xatolar.tana("DATABASE_UNAVAILABLE",
+                             tashxis=jurnal.sorov_id.get()),
+    )
+
+
+# ---------------------------------------------------------------------------
+# XATO KODLARI — JAVOB TILGA BOG'LIQ EMAS (20-vazifa)
+#
+# Uch ishlovchi, BITTA shakl (`xatolar.tana()`):
+#   `Xato`                  — biznes xatosi, kodi bor
+#   `HTTPException`         — FastAPI ning o'zi ko'targani (404 marshrut,
+#                             405 metod); kod HOLATDAN olinadi
+#   `RequestValidationError`— maydon tekshiruvi (422)
+#
+# TEXNIK TAFSILOT JAVOBGA TUSHMAYDI, jurnalga tushadi. Foydalanuvchi
+# `diagnostic_id` ni aytsa, jurnaldan AYNAN o'sha so'rov topiladi —
+# ya'ni tafsilotni olib tashlash yordamni qiyinlashtirmaydi.
+# ---------------------------------------------------------------------------
+@app.exception_handler(xatolar.Xato)
+async def _xato_handler(request, exc: xatolar.Xato):
+    xatolar.jurnalga(exc.kod, exc.status, exc.ichki, exc.params)
+    javob = JSONResponse(
+        status_code=exc.status,
+        content=xatolar.tana(exc.kod, exc.params, jurnal.sorov_id.get()),
+    )
+    # 429 da `Retry-After` — standart yo'l bilan "qachon qayta urinish
+    # mumkin" degan savolga javob. Matndan emas, SONDAN olinadi.
+    kutish = exc.params.get("kutish_soniya")
+    if exc.status == 429 and kutish:
+        javob.headers["Retry-After"] = str(int(kutish))
+    return javob
+
+
+#: HTTP holati -> kod. FastAPI O'ZI ko'targan istisnolar uchun
+#: (marshrut topilmadi, metod ruxsat etilmagan). Bu ro'yxat
+#: TO'LIQ EMASLIGI ataylab: ilova kodidagi har xato `Xato` bilan
+#: ko'tariladi va bu yerga TUSHMAYDI.
+_HOLAT_KODI = {
+    401: "AUTH_NOT_AUTHENTICATED",
+    403: "AUTH_LOGIN_REQUIRED",
+    404: "RECORD_NOT_FOUND",
+    405: "FIELD_INVALID",
+    413: "FILE_TOO_LARGE",
+    422: "VALIDATION_ERROR",
+    500: "INTERNAL_ERROR",
+    503: "DATABASE_UNAVAILABLE",
+}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_handler(request, exc: StarletteHTTPException):
+    kod = _HOLAT_KODI.get(exc.status_code, "INTERNAL_ERROR")
+    xatolar.jurnalga(kod, exc.status_code, str(exc.detail))
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=xatolar.tana(kod, tashxis=jurnal.sorov_id.get()),
+        headers=getattr(exc, "headers", None),
+    )
+
+
+#: Pydantic xato turi -> bizning kod. To'liq emasligi ATAYLAB:
+#: ro'yxatda yo'q tur `FIELD_INVALID` beradi va bu YOLG'ON emas —
+#: "qiymat noto'g'ri" har holatda rost.
+_PYDANTIC_KODI = {
+    "missing": "FIELD_REQUIRED",
+    "string_too_short": "FIELD_EMPTY",
+    "string_too_long": "FIELD_TOO_LONG",
+    "literal_error": "INVALID_ENUM",
+    "enum": "INVALID_ENUM",
+}
+
+
+@app.exception_handler(RequestValidationError)
+async def _validatsiya_handler(request, exc: RequestValidationError):
+    """Maydon tekshiruvi (422).
+
+    MAYDON RO'YXATI javobda QOLADI: "nimadir noto'g'ri" deyish
+    foydalanuvchiga qaysi maydonni tuzatishni AYTMAYDI. Lekin
+    pydantic ning INGLIZCHA tushuntirishi olib tashlanadi — u
+    tarjima qilinmaydi va interfeys uch tilli.
+
+    Maydon nomlari — SXEMA nomlari (`min_score`, `smtp_port`), ya'ni
+    tildan mustaqil. Ularni odam o'qiydigan nomga interfeys
+    aylantiradi.
+    """
+    nomlar, maydonlar = [], []
+    for x in exc.errors():
+        yol = ".".join(str(p) for p in x.get("loc", ()) if p != "body")
+        # Pydantic `ValueError("FIELD_NEGATIVE")` ni "Value error,
+        # FIELD_NEGATIVE" deb o'raydi — kodni shundan ajratamiz.
+        xom = str(x.get("msg", "")).replace("Value error, ", "").strip()
+        if xom in xatolar.KODLAR:
+            kod = xom
+        else:
+            # Pydantic'ning O'Z xatolari (maydon yo'q, tur mos emas):
+            # ularning `msg` i INGLIZCHA va tarjima qilinmaydi, lekin
+            # `type` i BARQAROR mashina qiymati — kodni SHUNDAN
+            # olamiz. Ilgari hammasi `FIELD_INVALID` ga tushardi va
+            # "maydon TO'LDIRILMAGAN" bilan "qiymat NOTO'G'RI"
+            # farqi yo'qolardi.
+            kod = _PYDANTIC_KODI.get(str(x.get("type", "")), "FIELD_INVALID")
+        if yol:
+            nomlar.append(yol)
+        maydonlar.append({"field": yol, "code": kod})
+    xatolar.jurnalga("VALIDATION_ERROR", 422, str(exc.errors())[:400])
+    return JSONResponse(
+        status_code=422,
+        content=xatolar.tana("VALIDATION_ERROR",
+                             {"maydonlar": ", ".join(nomlar)},
+                             jurnal.sorov_id.get(), maydonlar),
     )
 
 
@@ -900,18 +1007,20 @@ def _auth(fn, *a, **kw):
     try:
         return fn(*a, **kw)
     except auth.AuthError as e:
-        h = ({"Retry-After": str(int(getattr(e, "retry_after", 60)))}
-             if e.code == 429 else None)
-        raise HTTPException(status_code=e.code, detail=str(e), headers=h)
+        # `Retry-After` sarlavhasini ISHLOVCHI qo'yadi: u `params`
+        # dagi `kutish_soniya` SONIDAN olinadi, matndan emas.
+        # Ilgari u shu yerda edi va faqat SHU chegaradan o'tgan
+        # xatolarga tegishli bo'lardi.
+        raise xatolar.kodli(e, "AUTH_NOT_AUTHENTICATED")
 
 
 def _token(authorization: Optional[str]) -> str:
     """`Authorization: Bearer <token>` dan tokenni ajratadi."""
     if not authorization:
-        raise HTTPException(status_code=401, detail="Token yo'q.")
+        raise xatolar.Xato("AUTH_TOKEN_MISSING")
     parts = authorization.split(None, 1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Token formati noto'g'ri.")
+        raise xatolar.Xato("AUTH_TOKEN_MALFORMED")
     return parts[1].strip()
 
 
@@ -942,7 +1051,7 @@ def kimlik_of(request: Request, cid: Optional[int] = None):
         return _aktor.aniqla(request, cid if cid is not None
                              else company_id_of(request))
     except _aktor.RuxsatXato as e:
-        raise HTTPException(status_code=e.code, detail=str(e)) from e
+        raise xatolar.kodli(e, "ACTOR_FORBIDDEN")
 
 
 def ruxsat(k, amal: str) -> None:
@@ -951,7 +1060,7 @@ def ruxsat(k, amal: str) -> None:
     try:
         _aktor.ruxsat_tekshir(k, amal)
     except _aktor.RuxsatXato as e:
-        raise HTTPException(status_code=e.code, detail=str(e)) from e
+        raise xatolar.kodli(e, "ACTOR_FORBIDDEN")
 
 
 def audit_yoz(k, request: Request, *, amal: str, entity: str,
@@ -970,9 +1079,7 @@ def audit_yoz(k, request: Request, *, amal: str, entity: str,
                    ip=client_ip(request),
                    user_agent=request.headers.get("user-agent"))
     except Exception as e:                                    # noqa: BLE001
-        raise HTTPException(
-            status_code=500,
-            detail=f"O'zgarish bajarildi, LEKIN audit yozilmadi: {e}") from e
+        raise xatolar.Xato("AUDIT_WRITE_FAILED", ichki=str(e))
 
 
 def company_id_of(request: Request) -> int:
@@ -998,7 +1105,7 @@ def company_id_of(request: Request) -> int:
     try:
         return auth.sole_company_id()
     except auth.AuthError as e:
-        raise HTTPException(status_code=e.code, detail=str(e)) from e
+        raise xatolar.kodli(e, "ACTOR_FORBIDDEN")
 
 
 @app.post("/auth/login")
@@ -1030,7 +1137,7 @@ def auth_logout(response: Response,
     ok = False
     try:
         ok = _auth(auth.logout, tai_session or _token(authorization))
-    except HTTPException:
+    except xatolar.Xato:
         pass
     _clear_auth_cookies(response)
     return {"ok": ok}
@@ -1088,9 +1195,9 @@ def auth_set_password(body: AccountIn, request: Request,
     ma'nosiz bo'lardi."""
     a = getattr(request.state, "account", None) or {}
     if not body.password:
-        raise HTTPException(status_code=400, detail="Yangi parol berilmagan.")
+        raise xatolar.Xato("PASSWORD_REQUIRED")
     if not body.current_password:
-        raise HTTPException(status_code=400, detail="Joriy parolni kiriting.")
+        raise xatolar.Xato("PASSWORD_CURRENT_REQUIRED")
     return _auth(auth.set_password, a["id"], body.password,
                  current=body.current_password,
                  # Tartib DARVOZA bilan bir xil bo'lishi SHART: u ham
@@ -1107,7 +1214,7 @@ def _token_opt(authorization: Optional[str]) -> Optional[str]:
     tekshirgan, token esa faqat "qaysi sessiyani qoldirish" uchun."""
     try:
         return _token(authorization)
-    except HTTPException:
+    except xatolar.Xato:
         return None
 
 
@@ -1345,7 +1452,7 @@ def get_tender(tender_id: int):
     """Bitta tender to'liq — lotlar va har lotda tovarlar bilan."""
     tender = build_tender_detail(tender_id)
     if tender is None:
-        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND", {"id": tender_id})
     return tender
 
 
@@ -1356,7 +1463,7 @@ def _tender_bor_yoki_404(tender_id: int) -> None:
     shunday qiladi; qolganlarini ham shu qatorga keltiramiz."""
     if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
                         {"id": tender_id}):
-        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND", {"id": tender_id})
 
 
 def _tirik_yoki_409(row: dict, tender_id: int) -> None:
@@ -1373,9 +1480,7 @@ def _tirik_yoki_409(row: dict, tender_id: int) -> None:
     """
     reason = matching.closed_reason(row)
     if reason:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Tender {tender_id} — {reason}. AI tahlili qilinmadi.")
+        raise xatolar.Xato("AI_SKIPPED", {"id": tender_id, "sabab": reason})
 
 
 @app.get("/tenders/{tender_id}/documents")
@@ -1408,7 +1513,7 @@ def download_document(tender_id: int, ref: str):
     """
     row = db.query_one(queries.DOCUMENT_BY_REF_SQL, {"id": tender_id, "ref": ref})
     if not row:
-        raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
+        raise xatolar.Xato("DOCUMENT_NOT_FOUND")
 
     platform = row.get("source_platform") or "xt-xarid"
     if platform == "xt-xarid" and row.get("file_id"):
@@ -1422,8 +1527,7 @@ def download_document(tender_id: int, ref: str):
                                stream=True, timeout=60)
             up.raise_for_status()
         except requests.RequestException as e:
-            raise HTTPException(status_code=502,
-                                detail=f"Manbadan olinmadi: {e}") from e
+            raise xatolar.kodli(e, "SOURCE_FETCH_FAILED")
         name = row.get("name") or "document"
         return StreamingResponse(
             up.iter_content(chunk_size=65536),
@@ -1432,8 +1536,7 @@ def download_document(tender_id: int, ref: str):
                      f'attachment; filename="{quote(name)}"'},
         )
 
-    raise HTTPException(status_code=501,
-                        detail=f"'{platform}' uchun yuklab olish qo'llab-quvvatlanmaydi.")
+    raise xatolar.Xato("PLATFORM_DOWNLOAD_UNSUPPORTED", {"platforma": platform})
 
 
 @app.get("/stats")
@@ -1454,9 +1557,7 @@ def stats(
     if region:
         selected = db.query_one(queries.STATS_REGION_SQL, {"region": region})
         if not selected or selected.get("level") != 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Statistika uchun level=1 viloyat kodini yuboring.")
+            raise xatolar.Xato("STATS_LEVEL_INVALID")
 
     p = {"status": status, "region": region}
     open_count = db.scalar(queries.STATS_OPEN_COUNT_SQL, p) or 0
@@ -1674,7 +1775,7 @@ def ai_match_tender(
     """
     row = db.query_one(queries.AI_TENDER_SQL, {"id": tender_id})
     if not row:
-        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND", {"id": tender_id})
     _tirik_yoki_409(row, tender_id)
 
     products = db.query(queries.CATALOG_LIST_SQL, {"company_id": company_id})
@@ -1705,7 +1806,7 @@ def ai_match_tender(
     except ai.AIUnavailable as e:
         # Kalit yo'q / chaqiruv muvaffaqiyatsiz — 503, chunki bu vaqtinchalik
         # va foydalanuvchi aybi emas. Frontend buni tushunarli ko'rsatadi.
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        raise xatolar.kodli(e, "AI_UNAVAILABLE")
 
     saved = db.execute_returning(queries.AI_UPSERT_SQL, {
         "tender_id": tender_id, "kind": ai_match.KIND, "company_id": company_id,
@@ -1801,9 +1902,9 @@ def ai_gonogo_tender(
         return gonogo_cached(tender_id, current_account(request)["id"],
                              refresh=refresh)
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise xatolar.kodli(e, "TENDER_NOT_FOUND")
     except ai.AIUnavailable as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        raise xatolar.kodli(e, "AI_UNAVAILABLE")
 
 
 # ---------------------------------------------------------------------------
@@ -1830,7 +1931,7 @@ def tender_documents_text(
         row = db.query_one(queries.DOCUMENT_TEXT_FULL_SQL,
                            {"id": tender_id, "ref": ref})
         if not row:
-            raise HTTPException(status_code=404, detail="Hujjat matni topilmadi.")
+            raise xatolar.Xato("DOCUMENT_TEXT_NOT_FOUND")
         return {
             "file_ref": ref,
             "status": row["status"],
@@ -1908,8 +2009,7 @@ def _yuklangani(file: UploadFile, max_mb: int = MAX_IMPORT_MB) -> bytes:
             break
         jami += len(b)
         if jami > chegara:
-            raise HTTPException(
-                status_code=413, detail=f"Fayl {max_mb} MB dan katta.")
+            raise xatolar.Xato("FILE_TOO_LARGE", {"max_mb": max_mb})
         bolaklar.append(b)
     return b"".join(bolaklar)
 
@@ -1928,7 +2028,7 @@ def catalog_import(
                                        company_id_of(request), dry_run=dry_run)
     except importer.ImportFormatError as e:
         # 422 — fayl formatiga oid xato (qatorga emas, butun faylga tegishli)
-        raise HTTPException(status_code=422, detail=str(e))
+        raise xatolar.kodli(e, "IMPORT_FORMAT_INVALID")
 
 
 @app.get("/catalog/import/template")
@@ -1950,7 +2050,7 @@ def tender_stock_check(tender_id: int, request: Request):
     ALOHIDA `shortages` ro'yxatida. Qoldiq eskirgan bo'lsa `preliminary: true`."""
     res = stock.check_tender_stock(tender_id, company_id_of(request))
     if res is None:
-        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND", {"id": tender_id})
     return res
 
 
@@ -2011,7 +2111,7 @@ def post_tender_pricing(tender_id: int, body: PricingIn):
     """
     t = db.query_one(queries.PRICING_TENDER_SQL, {"id": tender_id})
     if not t:
-        raise HTTPException(status_code=404, detail=f"Tender {tender_id} topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND", {"id": tender_id})
 
     company_id = company_id_of(request)
     settings = db.query_one(queries.PRICING_SETTINGS_GET_SQL,
@@ -2030,8 +2130,10 @@ def post_tender_pricing(tender_id: int, body: PricingIn):
     if not result["ok"]:
         # Noto'g'ri kiruvchidan chiqqan smetani SAQLAMAYMIZ (masalan valyuta
         # aralashgan) — foydalanuvchi avval tuzatadi.
-        raise HTTPException(status_code=400, detail="; ".join(
-            e["message"] for e in result["errors"]))
+        raise xatolar.Xato(
+            "CATALOG_IMPORT_INVALID",
+            {"soni": len(result["errors"])},
+            ichki="; ".join(e["message"] for e in result["errors"]))
 
     saved = db.execute_returning(queries.TENDER_PRICING_UPSERT_SQL, {
         "tender_id": tender_id,
@@ -2084,7 +2186,7 @@ def update_company_document(doc_id: int, d: CompanyDocumentIn,
                                {**d.model_dump(), "id": doc_id,
                                 "company_id": company_id_of(request)})
     if not row:
-        raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
+        raise xatolar.Xato("DOCUMENT_NOT_FOUND")
     return compliance.shape_document(row)
 
 
@@ -2122,7 +2224,7 @@ def company_documents_import(
                                            company_id_of(request),
                                            dry_run=dry_run)
     except importer.ImportFormatError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise xatolar.kodli(e, "IMPORT_FORMAT_INVALID")
 
 
 @app.post("/company/documents/parse")
@@ -2144,7 +2246,7 @@ def company_documents_parse(
     try:
         ok, report = compliance.parse_document_file(data, file.filename or "")
     except importer.ImportFormatError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise xatolar.kodli(e, "IMPORT_FORMAT_INVALID")
     return {**report, "rows": compliance.rows_json(ok)}
 
 
@@ -2154,7 +2256,7 @@ def delete_company_document(doc_id: int, request: Request):
                                {"id": doc_id,
                                 "company_id": company_id_of(request)})
     if not row:
-        raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
+        raise xatolar.Xato("DOCUMENT_NOT_FOUND")
     return None
 
 
@@ -2166,7 +2268,7 @@ def tender_compliance(tender_id: int, request: Request):
     Hujjatlar manbasi — SHU kompaniyaning bazasi (`company_document`)."""
     if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
                         {"id": tender_id}):
-        raise HTTPException(status_code=404, detail="Tender topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND")
     return compliance.check(tender_id, company_id=company_id_of(request))
 
 
@@ -2190,7 +2292,7 @@ def tender_compliance_for(tender_id: int, body: ComplianceDocsIn):
     ro'yxat, bog'liqlik bir tomonlama."""
     if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
                         {"id": tender_id}):
-        raise HTTPException(status_code=404, detail="Tender topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND")
     res = compliance.check(tender_id, docs=body.documents)
     res["doc_source"] = "external" if body.documents is not None else "company"
     return res
@@ -2226,7 +2328,7 @@ def tender_requirements(tender_id: int, request: Request):
     from api import requirement
     if not db.query_one("SELECT 1 AS x FROM tender WHERE id = %(id)s",
                         {"id": tender_id}):
-        raise HTTPException(status_code=404, detail="Tender topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND")
     cid = company_id_of(request)
     items = requirement.review_items(tender_id, cid)
     # VAQT O'LCHOVI: tender ochilgan payt shu yerda yoziladi.
@@ -2310,7 +2412,7 @@ def requirement_review(req_id: int, body: ReviewIn, request: Request):
             doc_type=body.doc_type, blind_value=body.blind_value,
             actor_id=k.actor_id, ishonch=k.ishonch)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise xatolar.kodli(e, "FIELD_INVALID")
     if row:
         audit_yoz(k, request, amal=f"talab_{body.status}",
                   entity="tender_requirement", entity_id=req_id,
@@ -2323,7 +2425,7 @@ def requirement_review(req_id: int, body: ReviewIn, request: Request):
     if not row:
         # Yo'q, yoki BOSHQA kompaniyaniki — ikkalasida ham 404.
         # Farqni aytish "bu id mavjud" degan ma'lumot sizdirardi.
-        raise HTTPException(status_code=404, detail="Talab topilmadi.")
+        raise xatolar.Xato("REQUIREMENT_NOT_FOUND")
     qolgan = db.scalar(
         "SELECT count(*) FROM tender_requirement "
         "WHERE company_id=%(c)s AND tender_id=%(t)s "
@@ -2376,7 +2478,7 @@ def tender_qualification(tender_id: int, request: Request):
     try:
         return qualification.check(tender_id, cid)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise xatolar.kodli(e, "REQUIREMENT_NOT_FOUND")
 
 
 # ---------------------------------------------------------------------------
@@ -2477,7 +2579,7 @@ def routing_queue(request: Request,
     try:
         items = routing.navbat(cid, holat=holat, limit=limit)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise xatolar.kodli(e, "FIELD_INVALID")
     return {"items": items, "jami": len(items),
             "moslik": routing.moslik(cid)}
 
@@ -2504,8 +2606,7 @@ def routing_open(routing_id: int, request: Request,
     row = routing.ochildi(routing_id, company_id_of(request), broker)
     if not row:
         # Yo'q, boshqa kompaniyaniki, yoki ALLAQACHON YOPILGAN.
-        raise HTTPException(status_code=404,
-                            detail="Yozuv topilmadi yoki allaqachon yopilgan.")
+        raise xatolar.Xato("RECORD_ALREADY_CLOSED")
     return row
 
 
@@ -2537,9 +2638,9 @@ def routing_decision(routing_id: int, body: RoutingDecisionIn,
                             izoh=body.izoh, actor_id=k.actor_id,
                             ishonch=k.ishonch, broker_nomi=k.ism)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise xatolar.kodli(e, "FIELD_INVALID")
     if not row:
-        raise HTTPException(status_code=404, detail="Yozuv topilmadi.")
+        raise xatolar.Xato("RECORD_NOT_FOUND")
     audit_yoz(k, request, amal=f"yonaltirish_{body.qaror}",
               entity="tender_routing", entity_id=routing_id,
               keyin={"inson_qaror": row.get("inson_qaror"),
@@ -2577,7 +2678,7 @@ def requirements_review_all(tender_id: int, body: ReviewBulkIn,
                   keyin={"tegdi": n, "status": body.status},
                   izoh=f"{n} ta talab bir amalda")
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise xatolar.kodli(e, "FIELD_INVALID")
     if n:
         requirement.review_tugadi(tender_id, cid, n)
     return {"tender_id": tender_id, "ozgardi": n, "status": body.status}
@@ -2650,7 +2751,7 @@ def put_notify_settings(s: NotifySettingsIn, request: Request):
         return notify.save_settings(s.model_dump(exclude_unset=True),
                                     company_id_of(request))
     except notify.NotifyError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise xatolar.kodli(e, "NOTIFY_CONFIG_INVALID")
 
 
 @app.post("/notify/test")
@@ -2661,7 +2762,7 @@ def notify_test(request: Request):
         return notify.send_test(company_id=company_id_of(request))
     except notify.NotifyError as e:
         # Sozlama/SMTP xatosi — foydalanuvchi tuzatishi mumkin -> 400
-        raise HTTPException(status_code=400, detail=str(e))
+        raise xatolar.kodli(e, "NOTIFY_CONFIG_INVALID")
 
 
 class NotifySendIn(BaseModel):
@@ -2728,7 +2829,7 @@ def notify_run(request: Request,
     try:
         res = notify.run(dry_run=dry_run, company_id=company_id_of(request))
     except notify.NotifyError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise xatolar.kodli(e, "NOTIFY_CONFIG_INVALID")
     # Xabar tanasi (text/html) javobda kerak emas — faqat xulosa
     return {k: v for k, v in res.items() if k not in ("text", "html")}
 
@@ -2741,15 +2842,11 @@ def telegram_bot_info():
     """Bot haqida (username) — foydalanuvchi QAYSI botga /start yozishini
     bilsin. Token yo'q/noto'g'ri bo'lsa 400 va ANIQ matn."""
     if not telegram.token_set():
-        raise HTTPException(
-            status_code=400,
-            detail=("Telegram bot tokeni serverда yo'q. .env fayliga "
-                    "TELEGRAM_BOT_TOKEN=... qo'shing va API'ni qayta ishga "
-                    "tushiring."))
+        raise xatolar.Xato("TELEGRAM_TOKEN_MISSING")
     try:
         return telegram.get_me()
     except telegram.TelegramError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise xatolar.kodli(e, "TELEGRAM_API_ERROR")
 
 
 @app.get("/notify/telegram/subscribers")
@@ -2774,7 +2871,7 @@ def telegram_link_create(request: Request):
     try:
         return notify.create_link(company_id_of(request))
     except notify.NotifyError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise xatolar.kodli(e, "NOTIFY_CONFIG_INVALID")
 
 
 @app.get("/notify/telegram/link/{token}")
@@ -2809,7 +2906,7 @@ def telegram_subscriber_update(chat_id: str, body: SubscriberIn, request: Reques
                                {"chat_id": chat_id, "enabled": body.enabled,
                                 "company_id": company_id})
     if not row:
-        raise HTTPException(status_code=404, detail="Obunachi topilmadi.")
+        raise xatolar.Xato("SUBSCRIBER_NOT_FOUND")
     # KOMPANIYA UZATILADI: so'rov `company_id` bilan chegaralangan,
     # lekin QAYTARILADIGAN ro'yxat kompaniyasiz olinardi va
     # `sole_company_id()` ga tushardi.
@@ -2828,7 +2925,7 @@ def telegram_subscriber_delete(chat_id: str, request: Request):
                                {"chat_id": chat_id,
                                 "company_id": company_id})
     if not row:
-        raise HTTPException(status_code=404, detail="Obunachi topilmadi.")
+        raise xatolar.Xato("SUBSCRIBER_NOT_FOUND")
     # KOMPANIYA UZATILADI: so'rov `company_id` bilan chegaralangan,
     # lekin QAYTARILADIGAN ro'yxat kompaniyasiz olinardi va
     # `sole_company_id()` ga tushardi.
@@ -2848,7 +2945,7 @@ def telegram_test(request: Request, chat_id: Optional[str] = Query(
         return notify.send_telegram_test(chat_id=chat_id,
                                          company_id=company_id_of(request))
     except notify.NotifyError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise xatolar.kodli(e, "NOTIFY_CONFIG_INVALID")
 
 
 @app.get("/products")
@@ -2991,7 +3088,7 @@ def update_search(search_id: int, s: SavedSearchIn, request: Request):
                                {**s.model_dump(), "id": search_id,
                                 "company_id": company_id_of(request)})
     if not row:
-        raise HTTPException(status_code=404, detail="Qidiruv topilmadi.")
+        raise xatolar.Xato("SEARCH_NOT_FOUND")
     return _shape_search(row)
 
 
@@ -3001,7 +3098,7 @@ def delete_search(search_id: int, request: Request):
                                {"id": search_id,
                                 "company_id": company_id_of(request)})
     if not row:
-        raise HTTPException(status_code=404, detail="Qidiruv topilmadi.")
+        raise xatolar.Xato("SEARCH_NOT_FOUND")
     return None
 
 
@@ -3145,7 +3242,7 @@ def update_product(product_id: int, p: CatalogItemIn, request: Request):
                                {**p.model_dump(), "id": product_id,
                                 "company_id": cid})
     if not row:
-        raise HTTPException(status_code=404, detail="Mahsulot topilmadi.")
+        raise xatolar.Xato("PRODUCT_NOT_FOUND")
     _auto_classify_catalog(cid, product_id, force=True)
     return _shape_product(row)
 
@@ -3156,7 +3253,7 @@ def delete_product(product_id: int, request: Request):
                                {"id": product_id,
                                 "company_id": company_id_of(request)})
     if not row:
-        raise HTTPException(status_code=404, detail="Mahsulot topilmadi.")
+        raise xatolar.Xato("PRODUCT_NOT_FOUND")
     return None
 
 
@@ -3173,7 +3270,7 @@ def catalog_match(body: CatalogMatchIn, request: Request):
         p = db.query_one(queries.CATALOG_GET_SQL,
                          {"company_id": cid, "product_id": body.product_id})
         if not p:
-            raise HTTPException(status_code=404, detail="Mahsulot topilmadi.")
+            raise xatolar.Xato("PRODUCT_NOT_FOUND")
         # Eski keng kod bo'lsa, lotlar tarixidagi kuchli dalil asosida aniq
         # 8-belgili sinfga fon jarayonisiz, shu so'rovning o'zida toraytiramiz.
         _auto_classify_catalog(cid, body.product_id)
@@ -3383,7 +3480,7 @@ def kod_takliflar(product_id: int, request: Request, limit: int = 6):
         "SELECT id, name, category_code, keywords FROM catalog_product "
         "WHERE id = %(id)s AND company_id = %(c)s", {"id": product_id, "c": cid})
     if not p:
-        raise HTTPException(404, "Mahsulot topilmadi.")
+        raise xatolar.Xato("PRODUCT_NOT_FOUND")
 
     keng = kodlash.takliflar(dict(p), level=5, limit=limit)
     aniq = kodlash.takliflar(dict(p), level=8, limit=limit)
@@ -3414,9 +3511,9 @@ def kod_tasdiq(product_id: int, body: KodQarorIn, request: Request):
     kim = (acc.get("username") or "").strip()
     if not kim:
         # SERVICE kaliti (ERP) odam emas — tasdiq qo'ya olmaydi.
-        raise HTTPException(403, "Tasdiqni faqat kirgan foydalanuvchi qo'ya oladi.")
+        raise xatolar.Xato("AUTH_LOGIN_REQUIRED")
     if not kodlash.tasdiqla(company_id_of(request), product_id, body.code, kim):
-        raise HTTPException(404, "Bog'lanish topilmadi.")
+        raise xatolar.Xato("LINK_NOT_FOUND")
     return None
 
 
@@ -3424,7 +3521,7 @@ def kod_tasdiq(product_id: int, body: KodQarorIn, request: Request):
 def kod_rad(product_id: int, body: KodQarorIn, request: Request):
     """Inson taklifni RAD etadi (qator qoladi — takror taklif chiqmasin)."""
     if not kodlash.rad_et(company_id_of(request), product_id, body.code):
-        raise HTTPException(404, "Bog'lanish topilmadi.")
+        raise xatolar.Xato("LINK_NOT_FOUND")
     return None
 
 
@@ -3578,7 +3675,7 @@ def kod_qaror(body: AtamaQarorIn, request: Request):
     acc = current_account(request)
     kim = (acc.get("username") or "").strip()
     if not kim:
-        raise HTTPException(403, "Qarorni faqat kirgan foydalanuvchi qo'ya oladi.")
+        raise xatolar.Xato("AUTH_LOGIN_REQUIRED")
     cid = company_id_of(request)
     k = kimlik_of(request, cid)
     # Kod berish — TASDIQ (u katalogga yoziladi va moslashtirishga
@@ -3596,7 +3693,7 @@ def kod_qaror(body: AtamaQarorIn, request: Request):
     except ValueError as e:
         # BO'SH yoki yaroqsiz kod shu yerda to'xtaydi va broker
         # TUSHUNARLI xabar oladi (baza xabari emas).
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise xatolar.kodli(e, "FIELD_INVALID")
 
     # Kod berilgan bo'lsa — shu atamaga tegishli MAHSULOTLARGA
     # biriktiramiz va biriktirmani QARORGA bog'laymiz (audit izi).
@@ -3659,12 +3756,12 @@ def manba_tender(tender_id: int, request: Request):
     """
     company_id_of(request)
     if not db.scalar("SELECT to_regclass('public.v_tender_manba') IS NOT NULL"):
-        raise HTTPException(status_code=501,
-                            detail="schema_patch_manba_url.sql qo'llanmagan")
+        raise xatolar.Xato("SCHEMA_PATCH_MISSING",
+                           {"patch": "schema_patch_manba_url.sql"})
     t = db.query_one("SELECT * FROM v_tender_manba WHERE ichki_id = %(id)s",
                      {"id": tender_id})
     if not t:
-        raise HTTPException(status_code=404, detail="Tender topilmadi.")
+        raise xatolar.Xato("TENDER_NOT_FOUND")
     return {"tender": t,
             "hujjatlar": db.query(
                 "SELECT * FROM v_hujjat_manba WHERE tender_id = %(id)s "
@@ -3731,10 +3828,10 @@ def aktor_qosh(body: AktorIn, request: Request):
                          manba=body.manba, erp_user_id=body.erp_user_id,
                          izoh=body.izoh)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise xatolar.kodli(e, "FIELD_INVALID")
     except Exception as e:                                    # noqa: BLE001
         # Takroriy login/erp_user_id — baza indeksi to'sadi.
-        raise HTTPException(status_code=409, detail=str(e)) from e
+        raise xatolar.kodli(e, "ACTOR_ERP_MISMATCH")
     audit_yoz(k, request, amal="aktor_qoshildi", entity="actor",
               entity_id=int(row["id"]),
               keyin={"login": row["login"], "rol": row["rol"],
@@ -3752,12 +3849,12 @@ def aktor_yangila(actor_id: int, body: AktorYangilashIn, request: Request):
     oldin = aktor.bitta(cid, actor_id)
     if not oldin:
         # Boshqa ijarachiniki ham shu yerga tushadi — javob BIR XIL.
-        raise HTTPException(status_code=404, detail="Aktor topilmadi.")
+        raise xatolar.Xato("ACTOR_NOT_FOUND")
     try:
         row = aktor.yangila(cid, actor_id, rol=body.rol, ism=body.ism,
                             active=body.active, izoh=body.izoh)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise xatolar.kodli(e, "FIELD_INVALID")
     audit_yoz(k, request, amal="aktor_yangilandi", entity="actor",
               entity_id=actor_id,
               oldin={"rol": oldin["rol"], "ism": oldin["ism"],
@@ -3976,19 +4073,17 @@ class ChatIn(BaseModel):
     def _bosh_emas(cls, v):
         v = (v or "").strip()
         if not v:
-            raise ValueError("Savol bo'sh bo'lmasligi kerak.")
+            raise ValueError("FIELD_EMPTY")
         if len(v) > 8000:
-            raise ValueError("Savol juda uzun (8000 belgidan ko'p).")
+            raise ValueError("FIELD_TOO_LONG")
         return v
 
 
 def _chat_tayyor() -> None:
     """Sxema qo'llanganmi. Qo'llanmagan bo'lsa ANIQ xato — 500 emas."""
     if not ai_chat.schema_ready():
-        raise HTTPException(
-            status_code=503,
-            detail=("AI-Chat sxemasi qo'llanmagan. Bajaring: "
-                    "psql -d xtxarid -f schema_patch_ai_chat.sql"))
+        raise xatolar.Xato("SCHEMA_PATCH_MISSING",
+                           {"patch": "schema_patch_ai_chat.sql"})
 
 
 @app.post("/chat")
@@ -4009,7 +4104,7 @@ async def chat(body: ChatIn, request: Request):
         try:
             s = ai_chat.load_session(body.session_id, company_id)
         except LookupError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+            raise xatolar.kodli(e, "CHAT_SESSION_NOT_FOUND")
     else:
         sid = ai_chat.create_session(company_id, body.tender_id,
                                      body.message[:120],
@@ -4058,7 +4153,7 @@ def chat_history(session_id: str, request: Request):
     try:
         s = ai_chat.load_session(session_id, company_id)
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise xatolar.kodli(e, "CHAT_SESSION_NOT_FOUND")
     return {"session": s, "messages": ai_chat.messages(session_id)}
 
 
@@ -4068,7 +4163,7 @@ def chat_archive(session_id: str, request: Request):
     xarajat hisobi (`ai_usage`) tekshirish uchun kerak bo'lishi mumkin."""
     _chat_tayyor()
     if not ai_chat.archive_session(session_id, company_id_of(request)):
-        raise HTTPException(status_code=404, detail="Suhbat topilmadi.")
+        raise xatolar.Xato("CHAT_SESSION_NOT_FOUND")
     return None
 
 

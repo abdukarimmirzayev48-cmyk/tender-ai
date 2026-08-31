@@ -35,7 +35,7 @@ import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
-from api import db
+from api import db, xatolar
 
 # =====================================================================
 # SQL — modul bilan birga
@@ -726,37 +726,25 @@ def review_set(req_id: int, company_id: int, status: str,
     bilan ham himoya qiladi — bu yerda ANIQ xato beramiz.
     """
     if status not in INSON_QARORLARI:
-        raise ValueError(
-            f"noma'lum yoki ruxsat etilmagan holat: {status}. "
-            f"Ruxsat etilgan: {', '.join(sorted(INSON_QARORLARI))}. "
-            f"Mashina holatlarini ({', '.join(sorted(MASHINA_HOLATLARI))}) "
-            f"ko'rib chiqish API si QO'YA OLMAYDI.")
+        raise xatolar.Xato("INVALID_ENUM", {"maydon": "status", "qiymat": status})
     if by is None or int(by) <= 0:
-        raise ValueError(
-            "inson qarori uchun `by` (kim) SHART va musbat bo'lishi kerak — "
-            "aks holda 'tasdiqlangan, lekin kim tasdiqlagani noma'lum' "
-            "qatori paydo bo'lardi (2026-08-30 da o'lchangan: 1487 ta)")
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "by"})
     # ISHONCH DARAJASI MAJBURIY. `by` (kompaniya) kim ekanini
     # aytadi, `ishonch` esa BU MA'LUMOT QANCHALIK ISHONCHLI ekanini.
     # Ikkinchisisiz atribut o'z sifatini yashirardi.
     if not ishonch:
-        raise ValueError(
-            "inson qarori uchun `ishonch` darajasi SHART "
-            "(`api/aktor.py:aniqla()` beradi)")
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "ishonch"})
     if ishonch not in ("erp_sessiya", "aktor_elon", "kompaniya_sessiyasi"):
-        raise ValueError(
-            f"inson qarori uchun yaroqsiz ishonch darajasi: {ishonch}")
+        raise xatolar.Xato("TRUST_LEVEL_INVALID", {"ishonch": ishonch})
     if ishonch in ("erp_sessiya", "aktor_elon") and not actor_id:
-        raise ValueError(
-            f"`{ishonch}` darajasi aktor SHART qiladi — aks holda "
-            f"'odam bor' deb yozib, kimligini bo'sh qoldirardik")
+        raise xatolar.Xato("ACTOR_REQUIRED_FOR_TRUST", {"ishonch": ishonch})
     if status == "corrected" and not (corrected or "").strip():
-        raise ValueError("'corrected' uchun `corrected_value` SHART — "
-                         "aks holda 'tuzatdim, lekin nimaga?' holati qoladi")
+        raise xatolar.Xato("CORRECTED_VALUE_REQUIRED")
     if status != "corrected":
         corrected = None
     if doc_type is not None and doc_type not in doc_type_vocab():
-        raise ValueError(f"noma'lum hujjat turi: {doc_type}")
+        raise xatolar.Xato("INVALID_ENUM",
+                           {"maydon": "doc_type", "qiymat": doc_type})
     return db.execute_returning(SQL_REVIEW_SET, {
         "id": req_id, "company_id": company_id, "status": status,
         "corrected": (corrected or "").strip()[:2000] or None,
@@ -1085,18 +1073,17 @@ def review_bulk(tender_id: int, company_id: int, status: str,
     tuzatayotgan muammoni qaytarardi.
     """
     if status not in ("approved", "rejected"):
-        raise ValueError("ommaviy amal faqat approved/rejected bo'ladi")
+        raise xatolar.Xato("INVALID_ENUM",
+                           {"maydon": "amal", "qiymat": "ommaviy"})
     if by is None or int(by) <= 0:
-        raise ValueError(
-            "ommaviy tasdiq uchun `by` (kim) SHART va musbat bo'lishi kerak")
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "by"})
     # OMMAVIY AMAL — atribut uchun eng xavfli yo'l: bitta chaqiruv
     # yuzlab qatorga tegadi. Shuning uchun ishonch darajasi bu yerda
     # ham MAJBURIY.
     if ishonch not in ("erp_sessiya", "aktor_elon", "kompaniya_sessiyasi"):
-        raise ValueError(
-            f"ommaviy qaror uchun yaroqsiz ishonch darajasi: {ishonch}")
+        raise xatolar.Xato("TRUST_LEVEL_INVALID", {"ishonch": ishonch})
     if ishonch in ("erp_sessiya", "aktor_elon") and not actor_id:
-        raise ValueError(f"`{ishonch}` darajasi aktor SHART qiladi")
+        raise xatolar.Xato("ACTOR_REQUIRED_FOR_TRUST", {"ishonch": ishonch})
     rows = db.query("""
         UPDATE tender_requirement
            SET review_status = %(status)s,

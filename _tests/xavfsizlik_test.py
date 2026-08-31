@@ -113,7 +113,11 @@ def test_xato_sizishi():
     blok = blok[:blok.index("\n\n\n")]
     check("javobda `str(exc)` YO'Q", "str(exc)" not in blok, blok[-120:])
     check("tafsilot SERVER jurnaliga yoziladi", "logging" in blok)
-    check("mijozga umumiy xabar", "vaqtincha mavjud emas" in blok)
+    # 20-vazifadan keyin javob TILGA BOG'LIQ EMAS: o'zbekcha jumla
+    # o'rniga KOD qaytadi. Xavfsizlik xossasi O'ZGARMADI — tafsilot
+    # baribir javobga tushmaydi.
+    check("mijozga KOD qaytadi (matn emas)",
+          'xatolar.tana("DATABASE_UNAVAILABLE"' in blok)
 
 
 # =====================================================================
@@ -132,7 +136,7 @@ def test_yuklash():
     fn = fn[:fn.index("\n\n\n")]
     check("bo'laklab o'qiydi", "file.file.read(1024" in fn)
     check("chegaradan oshsa DARHOL to'xtaydi",
-          "if jami > chegara" in fn and "413" in fn)
+          "if jami > chegara" in fn and 'Xato("FILE_TOO_LARGE"' in fn)
 
     from api import importer
     bomba = io.BytesIO()

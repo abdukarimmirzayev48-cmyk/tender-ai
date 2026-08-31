@@ -23,6 +23,8 @@ import os
 from html import escape
 from typing import Any, Dict, List, Optional
 
+from api import xatolar
+
 import requests
 
 # Bot API manzili. Token URL ichida ketadi, shuning uchun xato matnlarига
@@ -45,7 +47,23 @@ UPDATES_LIMIT = 100
 
 class TelegramError(RuntimeError):
     """Telegram orqali yuborib bo'lmadi (token/chat/tarmoq xatosi).
-    `notify.NotifyError` bilan bir xil rolda — API uni 400 ga aylantiradi."""
+    `notify.NotifyError` bilan bir xil rolda — API uni 400 ga aylantiradi.
+
+    XATO KODI (`kod`) — TILGA BOG'LIQ EMAS. Xabar matni SERVER
+    JURNALI uchun qoladi va javobga TUSHMAYDI: ilgari
+    `detail=str(e)` orqali aynan shu o'zbekcha matn mijozga
+    ketardi va rus/ingliz foydalanuvchisi uni o'zbekcha ko'rardi.
+    Kod `api/xatolar.py:KODLAR` da tekshiriladi — imlo xatosi
+    ISHLAB CHIQISHDA chiqadi.
+    """
+
+    def __init__(self, xabar: str, *, kod: str = "",
+                 params: Optional[Dict[str, Any]] = None):
+        if kod and kod not in xatolar.KODLAR:
+            raise KeyError(f"noma'lum xato kodi: {kod!r}")
+        super().__init__(xabar)
+        self.kod = kod
+        self.params = params or {}
 
 
 # ---------------------------------------------------------------------------
@@ -66,10 +84,8 @@ def require_token() -> str:
     """Token yo'q bo'lsa ANIQ xato — jimgina o'tilmaydi."""
     t = token()
     if not t:
-        raise TelegramError(
-            "Telegram bot tokeni topilmadi. Uni serverdagi .env fayliga "
-            "qo'shing: TELEGRAM_BOT_TOKEN=... (tokenni @BotFather beradi), "
-            "so'ng API'ni qayta ishga tushiring.")
+        raise TelegramError("Telegram bot tokeni topilmadi (TELEGRAM_BOT_TOKEN).",
+                            kod="TELEGRAM_TOKEN_MISSING")
     return t
 
 
@@ -115,22 +131,23 @@ def call(method: str, params: Optional[Dict[str, Any]] = None) -> Any:
         # str(e) ichida URL (ya'ni TOKEN) bo'lishi mumkin — shuning uchun
         # xato TURI yoziladi, matni emas.
         raise TelegramError(
-            f"Telegram serveriga ulanib bo'lmadi ({method}): "
-            f"{type(e).__name__}. Internet/proksi sozlamalarini tekshiring."
-        ) from e
+            f"Telegram serveriga ulanib bo'lmadi ({method}): {type(e).__name__}",
+            kod="TELEGRAM_UNREACHABLE") from e
 
     try:
         body = r.json()
     except ValueError as e:
         raise TelegramError(
-            f"Telegram tushunarsiz javob qaytardi ({method}, HTTP {r.status_code})."
-        ) from e
+            f"Telegram tushunarsiz javob qaytardi ({method}, HTTP {r.status_code}).",
+            kod="TELEGRAM_BAD_RESPONSE") from e
 
     if not body.get("ok"):
         params_ = body.get("parameters") or {}
-        raise TelegramError(_uz_error(
-            method, body.get("error_code") or r.status_code,
-            str(body.get("description") or ""), params_.get("retry_after")))
+        raise TelegramError(
+            _uz_error(method, body.get("error_code") or r.status_code,
+                      str(body.get("description") or ""),
+                      params_.get("retry_after")),
+            kod="TELEGRAM_API_ERROR")
     return body.get("result")
 
 

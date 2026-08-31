@@ -335,7 +335,8 @@ def extract(tender_id: int, company_id: int, *, dry_run: bool = True,
     except Exception as e:                                  # noqa: BLE001
         requirement._run_yoz(company_id, tender_id, "llm", "failed", 0, None,
                              hash_, model=MODEL, error=str(e)[:400])
-        raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e}") from e
+        raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e}",
+                               kod="AI_CALL_FAILED") from e
 
     from api import ai_match
     natija = ai_match._extract(resp)

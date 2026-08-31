@@ -293,7 +293,11 @@ def test_format_errors():
         importer.import_catalog(b"x", "hisobot.xls", TEST_COMPANY_ID, dry_run=True)
         check(".xls rad etildi", False)
     except importer.ImportFormatError as e:
-        check(".xls rad etildi", "xlsx" in str(e).lower(), f"-> {e}")
+        # 20-vazifadan keyin foydalanuvchiga ko'rsatiladigan maslahat
+        # (".xlsx ga saqlang") TARJIMADA, xato matnida emas — u uch
+        # tilli. Shu sababli KOD tekshiriladi.
+        check(".xls rad etildi", e.kod == "FILE_FORMAT_UNSUPPORTED",
+              f"-> kod={e.kod!r}")
 
 
 def test_cp1251():

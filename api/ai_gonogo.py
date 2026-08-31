@@ -383,9 +383,11 @@ def analyze(tender: Dict[str, Any], products: List[Dict[str, Any]],
             try:
                 resp = client.messages.create(**kwargs)
             except Exception as e2:  # noqa: BLE001
-                raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e2}") from e2
+                raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e2}",
+                                       kod="AI_CALL_FAILED") from e2
         else:
-            raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e}") from e
+            raise ai.AIUnavailable(f"Claude chaqiruvi muvaffaqiyatsiz: {e}",
+                                   kod="AI_CALL_FAILED") from e
 
     return {
         "result": normalize(ai_match._extract(resp)),

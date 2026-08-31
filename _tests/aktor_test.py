@@ -147,10 +147,13 @@ def test_mijoz_aktor_yubormaydi():
     rt = io.open(os.path.join(ROOT, "api", "routing.py"), encoding="utf-8").read()
     q = rt[rt.index("def qaror("):]
     q = q[:q.index("\n\n\n")]
+    # 20-vazifadan keyin xatolar KOD bilan ko'tariladi (javob uch
+    # tilli interfeysga bog'lanishi uchun) — tekshiruv ham kod
+    # bo'yicha: u tarjima o'zgarganda yiqilmaydi.
     check("`routing.qaror` ishonch darajasini TALAB qiladi",
-          "yaroqsiz ishonch darajasi" in q)
+          'Xato("TRUST_LEVEL_INVALID"' in q)
     check("`routing.qaror` aktorsiz `aktor_elon` ni rad etadi",
-          "aktor SHART qiladi" in q)
+          'Xato("ACTOR_REQUIRED_FOR_TRUST"' in q)
 
 
 # =====================================================================

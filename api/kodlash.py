@@ -59,7 +59,7 @@ import re
 from typing import Any, Dict, List, Optional, Sequence
 
 from api import categories as C
-from api import db, translit
+from api import db, translit, xatolar
 
 #: Taklif uchun ishlatiladigan daraja. 2 juda keng (butun NACE bo'limi),
 #: 8 juda tor (823 ta sinf, ko'pi bitta tenderda uchraydi). 5 — guruh.
@@ -341,7 +341,7 @@ def tasdiqla(company_id: int, product_id: int, code: str, kim: str,
     yozilmasin.
     """
     if not (kim or "").strip():
-        raise ValueError("tasdiqlagan (kim) bo'sh bo'la olmaydi")
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "kim"})
     # `company_id` shartda TURISHI SHART — ko'p-ijarachilik: A kompaniya
     # B ning bog'lanishini tasdiqlay olmasin. Statik SQL skaneri
     # (_tests/multitenant_test.py) shu qoidani majburlaydi.
@@ -1196,32 +1196,27 @@ def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
     saqlaydi.
     """
     if not (kim or "").strip():
-        raise ValueError("kim bo'sh bo'la olmaydi")
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "kim"})
     # `kim` — KOMPANIYA login'i (sessiyadan). U "qaysi odam" degan
     # savolga javob bermaydi, shuning uchun aktor va uning ishonch
     # darajasi ALOHIDA yoziladi.
     if ishonch not in ("erp_sessiya", "aktor_elon", "kompaniya_sessiyasi"):
-        raise ValueError(
-            f"kodlash qarori uchun yaroqsiz ishonch darajasi: {ishonch}")
+        raise xatolar.Xato("TRUST_LEVEL_INVALID", {"ishonch": ishonch})
     if ishonch in ("erp_sessiya", "aktor_elon") and not actor_id:
-        raise ValueError(f"`{ishonch}` darajasi aktor SHART qiladi")
+        raise xatolar.Xato("ACTOR_REQUIRED_FOR_TRUST", {"ishonch": ishonch})
     if qaror not in QARORLAR:
-        raise ValueError(
-            f"noma'lum qaror: {qaror!r}. Ruxsat etilgan: {', '.join(QARORLAR)}")
+        raise xatolar.Xato("INVALID_ENUM", {"maydon": "qaror", "qiymat": qaror})
 
     # BO'SH KODNI TASODIFAN TASDIQLASH — ANIQ XATO BERADI.
     # Baza ham to'sadi (`kod_qaror_kod_mos` + `kod_qaror_code_bosh_emas`
     # + FK), lekin u yerdan kelgan xabar brokerga tushunarsiz bo'lardi.
     code = (code or "").strip() or None
     if qaror == "kod" and not code:
-        raise ValueError(
-            "'kod' qarori uchun KOD SHART — bo'sh kod bilan tasdiqlab "
-            "bo'lmaydi")
+        raise xatolar.Xato("CODE_REQUIRED")
     if qaror != "kod" and code:
-        raise ValueError(
-            f"{qaror!r} qarorida kod bo'lmaydi (kod berildi: {code!r})")
+        raise xatolar.Xato("CODE_NOT_ALLOWED", {"qaror": qaror})
     if qoshimcha_kod and qaror != "kod":
-        raise ValueError("qo'shimcha kod faqat 'kod' qarorida bo'ladi")
+        raise xatolar.Xato("CODE_NOT_ALLOWED", {"qaror": qaror})
 
     taklif_code = (taklif_code or "").strip() or None
     if taklif_skor is not None and taklif_code is None:
@@ -1238,8 +1233,8 @@ def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
         if len(matn.encode("utf-8")) > DALIL_MAX:
             # KESMAYMIZ va JIMGINA TASHLAMAYMIZ: yarim dalil to'liq
             # dalildek ko'rinardi. Aniq xato — mijoz kichraytirsin.
-            raise ValueError(
-                f"dalil juda katta ({len(matn)} belgi), chegara {DALIL_MAX} bayt")
+            raise xatolar.Xato("EVIDENCE_TOO_LARGE",
+                               {"belgi": len(matn), "chegara": DALIL_MAX})
         d_json = matn
 
     umumiy = {"c": company_id, "k": kalit, "a": atama, "q": qaror,

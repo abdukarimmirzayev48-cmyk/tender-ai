@@ -107,16 +107,20 @@ def check_password(password: str, username: str = "") -> None:
     Xato matni NIMA QILISH kerakligini aytadi."""
     p = password or ""
     if len(p) < PASSWORD_MIN:
-        raise AuthError(f"Parol kamida {PASSWORD_MIN} belgi bo'lsin. "
-                        f"Uzun sodda ibora eng yaxshi tanlov.", 400)
+        raise AuthError(f"Parol kamida {PASSWORD_MIN} belgi bo'lsin.", 400,
+                        kod="PASSWORD_TOO_SHORT",
+                        params={"min": PASSWORD_MIN})
     if len(p) > PASSWORD_MAX:
-        raise AuthError(f"Parol {PASSWORD_MAX} belgidan uzun bo'lmasin.", 400)
+        raise AuthError(f"Parol {PASSWORD_MAX} belgidan uzun bo'lmasin.", 400,
+                        kod="PASSWORD_TOO_LONG",
+                        params={"max": PASSWORD_MAX})
     if p.lower() in WEAK_PASSWORDS:
-        raise AuthError("Bu parol juda ko'p ishlatiladi — boshqasini "
-                        "tanlang.", 400)
+        raise AuthError("Bu parol juda ko'p ishlatiladi.", 400,
+                        kod="PASSWORD_TOO_COMMON")
     u = (username or "").strip().lower()
     if u and u in p.lower():
-        raise AuthError("Parol login nomini o'z ichiga olmasin.", 400)
+        raise AuthError("Parol login nomini o'z ichiga olmasin.", 400,
+                        kod="PASSWORD_CONTAINS_LOGIN")
 
 # --- SERVER-SERVER kaliti (ERP uchun) ---------------------------------------
 # ERP odam nomidan emas, O'Z NOMIDAN keladi: cheklist qoidasi, hujjat
@@ -143,11 +147,25 @@ def verify_service(key: Optional[str]) -> bool:
 
 
 class AuthError(RuntimeError):
-    """Kirish/huquq xatosi -> main.py da 401/403."""
+    """Kirish/huquq xatosi -> main.py da 401/403.
 
-    def __init__(self, msg: str, code: int = 401):
+    `kod` — TILGA BOG'LIQ BO'LMAGAN xato kodi
+    (`api/xatolar.py:KODLAR`). `msg` esa SERVER JURNALI uchun: u
+    javobga TUSHMAYDI. Ilgari `detail=str(e)` orqali aynan shu
+    o'zbekcha matn mijozga ketardi va rus/ingliz tilidagi
+    foydalanuvchi uni o'zbekcha ko'rardi.
+
+    `kod` MAJBURIY EMAS deb qoldirilmadi: standart qiymat qo'ysak,
+    yangi `raise` kodsiz o'tib ketardi va u tarjimasiz xato
+    bo'lardi. Sinov kodsiz `raise` ni sanaydi va nol talab qiladi.
+    """
+
+    def __init__(self, msg: str, code: int = 401, *, kod: str = "",
+                 params: Optional[Dict[str, Any]] = None):
         super().__init__(msg)
         self.code = code
+        self.kod = kod
+        self.params = params or {}
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +174,8 @@ class AuthError(RuntimeError):
 def hash_password(password: str, *, iterations: int = ITERATIONS,
                   salt: Optional[bytes] = None) -> str:
     if not password or len(password) < 6:
-        raise AuthError("Parol kamida 6 belgidan iborat bo'lishi kerak.", 400)
+        raise AuthError("Parol kamida 6 belgidan iborat bo'lishi kerak.", 400,
+                        kod="PASSWORD_TOO_SHORT", params={"min": 6})
     salt = salt or secrets.token_bytes(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
@@ -377,8 +396,9 @@ def _blocked(last_at) -> "AuthError":
         now = _dt.datetime.now(_dt.timezone.utc)
         wait = max(1, int(ATTEMPT_WINDOW_MIN * 60 - (now - last_at).total_seconds()))
     mins = max(1, round(wait / 60))
-    e = AuthError(f"Juda ko'p urinish. {mins} daqiqadan keyin qayta "
-                  f"urinib ko'ring.", 429)
+    e = AuthError(f"Juda ko'p urinish ({mins} daqiqa).", 429,
+                  kod="AUTH_RATE_LIMITED",
+                  params={"daqiqa": mins, "kutish_soniya": wait})
     e.retry_after = wait
     return e
 
@@ -391,7 +411,9 @@ def attempts(hours: int = 24, limit: int = 100,
     urinish hujumning eng ko'p uchraydigan izi."""
     if not _attempts_ready():
         raise AuthError("Urinishlar jurnali yo'q: schema_patch_auth_4.sql "
-                        "bazaga qo'llanmagan.", 503)
+                        "bazaga qo'llanmagan.", 503,
+                        kod="SCHEMA_PATCH_MISSING",
+                        params={"patch": "schema_patch_auth_4.sql"})
     return [{**r, "created_at": (r["created_at"].isoformat()
                                  if r["created_at"] else None)}
             for r in db.query(ATTEMPT_LIST_SQL, {
@@ -410,7 +432,9 @@ def schema_ready() -> bool:
 def _need_schema() -> None:
     if not schema_ready():
         raise AuthError("Auth jadvallari yo'q: schema_patch_auth_2.sql "
-                        "bazaga qo'llanmagan.", 503)
+                        "bazaga qo'llanmagan.", 503,
+                        kod="SCHEMA_PATCH_MISSING",
+                        params={"patch": "schema_patch_auth_2.sql"})
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +480,8 @@ def login(username: str, password: str, *,
     ok = verify_password(password, stored)
     if not row or not ok or not row["active"]:
         record_attempt(uname, ip, False, user_agent=user_agent)
-        raise AuthError("Login yoki parol noto'g'ri.", 401)
+        raise AuthError("Login yoki parol noto'g'ri.", 401,
+                        kod="AUTH_INVALID_CREDENTIALS")
 
     # Muvaffaqiyatli urinish ham yoziladi: u xatolar zanjirini UZADI.
     record_attempt(uname, ip, True, user_agent=user_agent)
@@ -496,15 +521,18 @@ def verify(token: str) -> Dict[str, Any]:
     401."""
     _need_schema()
     if not token:
-        raise AuthError("Token yo'q.", 401)
+        raise AuthError("Token yo'q.", 401, kod="AUTH_TOKEN_MISSING")
     r = db.query_one(SESSION_GET_SQL, {"token_hash": _token_hash(token)})
     if not r:
-        raise AuthError("Sessiya topilmadi — qaytadan kiring.", 401)
+        raise AuthError("Sessiya topilmadi.", 401,
+                        kod="AUTH_SESSION_NOT_FOUND")
     if r["expires_at"] <= _dt.datetime.now(_dt.timezone.utc):
         db.execute_returning(SESSION_DELETE_SQL, {"token_hash": _token_hash(token)})
-        raise AuthError("Sessiya muddati tugadi — qaytadan kiring.", 401)
+        raise AuthError("Sessiya muddati tugadi.", 401,
+                        kod="AUTH_SESSION_EXPIRED")
     if not r["active"]:
-        raise AuthError("Hisob faol emas.", 403)
+        raise AuthError("Hisob faol emas.", 403,
+                        kod="AUTH_ACCOUNT_INACTIVE")
     db.execute_returning(SESSION_TOUCH_SQL, {"id": r["session_id"]})
     return shape(r)
 
@@ -529,9 +557,10 @@ def create_account(username: str, company_name: str, password: str, *,
     _need_schema()
     uname = (username or "").strip().lower()
     if not uname:
-        raise AuthError("Login bo'sh.", 400)
+        raise AuthError("Login bo'sh.", 400, kod="AUTH_USERNAME_EMPTY")
     if db.query_one(ACC_BY_NAME_SQL, {"username": uname}):
-        raise AuthError(f"'{uname}' logini band.", 409)
+        raise AuthError(f"'{uname}' logini band.", 409,
+                        kod="AUTH_USERNAME_TAKEN", params={"login": uname})
     # Talab YARATISHDA ham amal qiladi: aks holda zaif parol tizimga
     # birinchi kundanoq kirib qolardi.
     check_password(password, uname)
@@ -544,7 +573,8 @@ def update_account(account_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
     _need_schema()
     cur = db.query_one(ACC_BY_ID_SQL, {"id": account_id})
     if not cur:
-        raise AuthError("Hisob topilmadi.", 404)
+        raise AuthError("Hisob topilmadi.", 404,
+                        kod="AUTH_ACCOUNT_NOT_FOUND")
     return shape(db.execute_returning(ACC_UPDATE_SQL, {
         "id": account_id,
         "company_name": (data.get("company_name")
@@ -570,11 +600,13 @@ def set_password(account_id: int, password: str, *,
     _need_schema()
     row = db.query_one(ACC_HASH_BY_ID_SQL, {"id": account_id})
     if not row:
-        raise AuthError("Hisob topilmadi.", 404)
+        raise AuthError("Hisob topilmadi.", 404,
+                        kod="AUTH_ACCOUNT_NOT_FOUND")
 
     if current is not None and not verify_password(current, row["password_hash"]):
         # 400 (401 emas): kim ekani MA'LUM va sessiyasi joyida.
-        raise AuthError("Joriy parol noto'g'ri.", 400)
+        raise AuthError("Joriy parol noto'g'ri.", 400,
+                        kod="PASSWORD_CURRENT_WRONG")
 
     check_password(password, row["username"])
     # "Eskisidan farq qilsin" faqat O'ZI ALMASHTIRAYOTGANDA. Qoidaning
@@ -582,7 +614,8 @@ def set_password(account_id: int, password: str, *,
     # qo'ymaslik. Admin (yoki CLI) ma'lum parolni QAYTA TIKLAYOTGAN
     # bo'lsa, bu boshqa amal va uni taqiqlash o'rnatishni buzardi.
     if current is not None and verify_password(password, row["password_hash"]):
-        raise AuthError("Yangi parol eskisidan farq qilsin.", 400)
+        raise AuthError("Yangi parol eskisidan farq qilsin.", 400,
+                        kod="PASSWORD_SAME_AS_OLD")
 
     db.execute_returning(PASSWORD_UPDATE_SQL,
                          {"id": account_id, "h": hash_password(password)})
@@ -617,8 +650,9 @@ def sole_company_id() -> int:
     if len(rows) == 1:
         return int(rows[0]["id"])
     if not rows:
-        raise AuthError("Faol kompaniya hisobi yo'q.", 503)
+        raise AuthError("Faol kompaniya hisobi yo'q.", 503,
+                        kod="COMPANY_ACCOUNT_MISSING")
     ro = ", ".join(f"{r['id']}({r['username']})" for r in rows)
     raise AuthError(
-        f"Bir nechta faol kompaniya: {ro}. Qaysi biri nomidan bajarilishini "
-        "aniq ko'rsating (`.env` dagi ERP_COMPANY_ID).", 409)
+            f"Bir nechta faol kompaniya: {ro}.", 409,
+            kod="COMPANY_AMBIGUOUS")

@@ -1016,14 +1016,22 @@ def test_kanallar_mustaqil():
 
 @case
 def test_telegram_sozlanmagan_aniq_xato():
-    """Obunachi yo'q / token yo'q -> ANIQ xato, jimgina o'tmaydi."""
+    """Obunachi yo'q / token yo'q -> ANIQ xato, jimgina o'tmaydi.
+
+    20-vazifadan keyin "nima qilish kerak" degan MASLAHAT tarjimada
+    (`err.TELEGRAM_NOT_LINKED`), xato matnida emas — interfeys uch
+    tilli va o'zbekcha jumla rus foydalanuvchisiga yordam bermasdi.
+    Shu sababli tekshiruv KOD bo'yicha: u sababni bir xil ANIQ
+    ko'rsatadi va tarjimaga bog'lanadi.
+    """
     # (a) obunachi yo'q — sinov xabari aniq sabab aytadi
     with _TgPatch(with_subscriber=False):
         try:
             notify.send_telegram_test()
             raise AssertionError("obunachi yo'q edi — xato kutilgandi")
         except notify.NotifyError as e:
-            ok("/start" in str(e), f"xato nima qilishni aytmadi: {e}")
+            ok(e.kod == "TELEGRAM_NOT_LINKED",
+               f"xato sababni kod bilan aytmadi: kod={e.kod!r} ({e})")
 
     # (b) token yo'q — `require_token` HAQIQIY holida qoladi
     eski = os.environ.pop("TELEGRAM_BOT_TOKEN", None)

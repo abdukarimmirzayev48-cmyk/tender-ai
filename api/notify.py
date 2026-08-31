@@ -54,7 +54,7 @@ from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
 from api import (db, i18n, matching, ommaviy_url, queries, telegram,
-                 translit)
+                 translit, xatolar)
 
 # Xabar turi/kanali (notify_sent.kind). HAR KANAL O'Z JURNALINI yuritadi:
 # aks holda email allaqachon "yuborilgan" deb belgilagan tenderlar keyinroq
@@ -96,7 +96,23 @@ log = logging.getLogger("api.notify")
 
 class NotifyError(RuntimeError):
     """Bildirishnoma yuborib bo'lmadi (sozlama/SMTP xatosi). API buni 400/503
-    ga aylantiradi, skript esa aniq matn bilan to'xtaydi."""
+    ga aylantiradi, skript esa aniq matn bilan to'xtaydi.
+
+    XATO KODI (`kod`) — TILGA BOG'LIQ EMAS. Xabar matni SERVER
+    JURNALI uchun qoladi va javobga TUSHMAYDI: ilgari
+    `detail=str(e)` orqali aynan shu o'zbekcha matn mijozga
+    ketardi va rus/ingliz foydalanuvchisi uni o'zbekcha ko'rardi.
+    Kod `api/xatolar.py:KODLAR` da tekshiriladi — imlo xatosi
+    ISHLAB CHIQISHDA chiqadi.
+    """
+
+    def __init__(self, xabar: str, *, kod: str = "",
+                 params: Optional[Dict[str, Any]] = None):
+        if kod and kod not in xatolar.KODLAR:
+            raise KeyError(f"noma'lum xato kodi: {kod!r}")
+        super().__init__(xabar)
+        self.kod = kod
+        self.params = params or {}
 
 
 # ---------------------------------------------------------------------------
@@ -358,15 +374,17 @@ def create_link(company_id: Optional[int] = None) -> Dict[str, Any]:
     """
     if not links_ready():
         raise NotifyError(
-            "Ulash jadvali yo'q. Ishga tushiring: "
-            "psql ... -f schema_patch_notify_link.sql")
+            "Ulash jadvali yo'q: schema_patch_notify_link.sql",
+            kod="SCHEMA_PATCH_MISSING",
+            params={"patch": "schema_patch_notify_link.sql"})
     try:
         bot = telegram.get_me()
     except telegram.TelegramError as e:
-        raise NotifyError(str(e)) from e
+        raise NotifyError(str(e), kod=e.kod, params=e.params) from e
     username = bot.get("username")
     if not username:
-        raise NotifyError("Bot username aniqlanmadi — tokenni tekshiring.")
+        raise NotifyError("Bot username aniqlanmadi (getMe).",
+                          kod="TELEGRAM_BOT_UNKNOWN")
 
     token = secrets.token_urlsafe(18)      # ~24 belgi, [A-Za-z0-9_-]
     row = db.execute_returning(LINK_CREATE_SQL, {"company_id": _cid(company_id),
@@ -408,13 +426,14 @@ def consume_links() -> Dict[str, Any]:
     """
     if not subscribers_ready() or not links_ready():
         raise NotifyError(
-            "Obunachilar/ulash jadvali yo'q. Ishga tushiring: "
-            "psql ... -f schema_patch_notify_subscribers.sql va "
-            "psql ... -f schema_patch_notify_link.sql")
+            "Obunachilar/ulash jadvali yo'q: "
+            "schema_patch_notify_subscribers.sql + _link.sql",
+            kod="SCHEMA_PATCH_MISSING",
+            params={"patch": "schema_patch_notify_subscribers.sql"})
     try:
         chats = telegram.discover_chats()
     except telegram.TelegramError as e:
-        raise NotifyError(str(e)) from e
+        raise NotifyError(str(e), kod=e.kod, params=e.params) from e
 
     # Bot GLOBAL — barcha kompaniyalarning ochiq tokenlari o'qiladi. Qaysi
     # kompaniyaga obuna bo'lish esa TOKENDAN aniqlanadi (LINK_USE_SQL).
@@ -598,7 +617,7 @@ def _base_url_saqlash(data: Dict[str, Any],
         try:
             ommaviy_url.bazani_tekshir((xom or "").strip().rstrip("/"))
         except ommaviy_url.OmmaviyUrlXato as e:
-            raise NotifyError(str(e)) from e
+            raise NotifyError(str(e), kod="PUBLIC_URL_INVALID") from e
     return ommaviy_url.bazaviy_url(xom)
 
 
@@ -641,24 +660,25 @@ def save_settings(data: Dict[str, Any],
     if params["enabled"] and not (params["email"]
                                   or _profile_email(company_id)):
         raise NotifyError(
-            "Bildirishnomani yoqish uchun email manzili kerak "
-            "(shu yerda yoki kompaniya profilida).")
+            "Bildirishnomani yoqish uchun email manzili kerak.",
+            kod="NOTIFY_EMAIL_REQUIRED")
     # Telegram uchun chat ID TALAB QILINMAYDI: obunachilar botga /start
     # bosganda o'zi qo'shiladi. Yoqish uchun faqat token kerak — obunachi
     # hali bo'lmasa ham kanal yoqilgan turaveradi va birinchi /start dan
     # keyin ishlay boshlaydi.
     if params["telegram_enabled"] and not telegram.token_set():
         raise NotifyError(
-            "Telegram bot tokeni serverда yo'q. .env fayliga "
-            "TELEGRAM_BOT_TOKEN=... qo'shing va API'ni qayta ishga tushiring.")
+            "Telegram bot tokeni serverda yo'q (TELEGRAM_BOT_TOKEN).",
+            kod="TELEGRAM_TOKEN_MISSING")
 
     # Patch qo'llanmagan — Telegram maydonlarini saqlab bo'lmaydi. Buni
     # JIMGINA tashlab ketmaymiz: foydalanuvchi yoqmoqchi bo'lsa aytamiz.
     if not telegram_columns_ready() and (params["telegram_enabled"]
                                          or params["telegram_chat_id"]):
         raise NotifyError(
-            "Telegram sozlamalari uchun baza patchi qo'llanmagan. "
-            "Ishga tushiring: psql ... -f schema_patch_notify_telegram.sql")
+            "Telegram patchi qo'llanmagan: schema_patch_notify_telegram.sql",
+            kod="SCHEMA_PATCH_MISSING",
+            params={"patch": "schema_patch_notify_telegram.sql"})
 
     # SQL faqat MAVJUD ustunlardan quriladi, shuning uchun ortiqcha kalitlar
     # (masalan patch qo'llanmagan bazada `lang`) parametrlardan chiqariladi.
@@ -704,9 +724,8 @@ def recipient(st: Dict[str, Any],
     to = ((st.get("email") or "").strip()
           or (_profile_email(company_id) or "").strip())
     if not to:
-        raise NotifyError(
-            "Qabul qiluvchi email yo'q. Sozlamalarда email kiriting yoki "
-            "kompaniya profilining email maydonini to'ldiring.")
+        raise NotifyError("Qabul qiluvchi email yo'q (sozlama ham, profil ham).",
+                          kod="NOTIFY_EMAIL_REQUIRED")
     return to
 
 
@@ -1002,7 +1021,7 @@ def card_url(base_url: Optional[str], tender_id: int) -> str:
     try:
         return ommaviy_url.havola(f"/?tender={tender_id}", base_url)
     except ommaviy_url.OmmaviyUrlXato as e:
-        raise NotifyError(str(e)) from e
+        raise NotifyError(str(e), kod="PUBLIC_URL_INVALID") from e
 
 
 def _money(v: Any, currency: Optional[str],
@@ -1256,10 +1275,8 @@ def require_subscribers(company_id: Optional[int] = None) -> List[Dict[str, Any]
     """Xabar ketadigan obunachilar. Bitta ham bo'lmasa — ANIQ xato."""
     subs = enabled_subscribers(company_id)
     if not subs:
-        raise NotifyError(
-            "Telegram ulanmagan. Akkaunt → Bildirishnoma bo'limida "
-            "\"Telegramni ulash\" tugmasini bosing va ochilgan havola orqali "
-            "botga /start yuboring.")
+        raise NotifyError("Telegram ulanmagan: obunachi yo'q.",
+                          kod="TELEGRAM_NOT_LINKED")
     return subs
 
 
@@ -1275,7 +1292,7 @@ def send_telegram(chat_id: str, tenders: List[Dict[str, Any]],
     try:
         return telegram.send_blocks(chat_id, head, blocks, foot)
     except telegram.TelegramError as e:
-        raise NotifyError(str(e)) from e
+        raise NotifyError(str(e), kod=e.kod, params=e.params) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1292,16 +1309,14 @@ def check_smtp(st: Optional[Dict[str, Any]] = None) -> None:
     c = smtp_config()
     if not c["host"]:
         raise NotifyError(
-            "Platformaning pochta serveri sozlanmagan. Serverdagi .env ga "
-            "qo'shing: SMTP_HOST=..., SMTP_FROM=... (va kerak bo'lsa "
-            "SMTP_USER / SMTP_PASSWORD), so'ng API'ni qayta ishga tushiring.")
+            "Pochta serveri sozlanmagan (SMTP_HOST / SMTP_FROM).",
+            kod="SMTP_NOT_CONFIGURED")
     if c["user"] and not c["password"]:
-        raise NotifyError(
-            "SMTP paroli topilmadi. Uni .env fayliga qo'shing: "
-            "SMTP_PASSWORD=... (keyin API/skriptni qayta ishga tushiring).")
+        raise NotifyError("SMTP paroli topilmadi (SMTP_PASSWORD).",
+                          kod="SMTP_PASSWORD_MISSING")
     if not c["from_email"]:
-        raise NotifyError(
-            "Jo'natuvchi manzil yo'q. .env ga SMTP_FROM=... qo'shing.")
+        raise NotifyError("Jo'natuvchi manzil yo'q (SMTP_FROM).",
+                          kod="SMTP_NOT_CONFIGURED")
 
 
 def send(st: Dict[str, Any], to: str, subj: str, text: str, html: str) -> None:
@@ -1345,7 +1360,8 @@ def send(st: Dict[str, Any], to: str, subj: str, text: str, html: str) -> None:
     except NotifyError:
         raise
     except (smtplib.SMTPException, OSError) as e:
-        raise NotifyError(f"SMTP xatosi ({host}:{port}): {e}") from e
+        raise NotifyError(f"SMTP xatosi ({host}:{port}): {e}",
+                          kod="SMTP_SEND_FAILED") from e
 
 
 def mark_sent(tender_id: int, email: str, score: int,
@@ -1431,8 +1447,9 @@ def send_telegram_test(st: Optional[Dict[str, Any]] = None,
 
     # HAMMASI yiqilsa — bu xato, jimgina "yuborildi" demaymiz.
     if not sent:
-        raise NotifyError(errors[0]["error"] if errors
-                          else "Telegram obunachisi yo'q.")
+        raise NotifyError(
+            errors[0]["error"] if errors else "Telegram obunachisi yo'q.",
+            kod=("TELEGRAM_API_ERROR" if errors else "TELEGRAM_NO_SUBSCRIBERS"))
     try:
         bot = telegram.get_me()
     except telegram.TelegramError:

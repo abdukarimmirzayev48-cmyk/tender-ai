@@ -44,6 +44,8 @@ const BASE = import.meta.env.VITE_API_BASE || '/api'
 // MUHIM: cookie ishlashi uchun so'rov SAME-ORIGIN bo'lishi kerak —
 // `VITE_API_BASE=/api` (Vite proksisi). To'liq manzil yozilsa cookie
 // cross-site bo'lib qoladi.
+import { xatoMatni, type TVars } from './i18n'
+
 const CSRF_COOKIE = 'tai_csrf'
 const SEEN_KEY = 'tender-ai:seen'
 
@@ -144,22 +146,47 @@ export function errMatn(detail: unknown): string {
 /** Xato + STRUKTURALI `detail`.
  *  `errMatn()` obyekt-detail'ni satrga aylantira olmaydi ("[object Object]"),
  *  ERP esa 409 da {message, opportunity_id} qaytaradi — mavjud kartaga havola
- *  qurish uchun xom tana kerak. `message` avvalgidek "409: ..." ko'rinishida
- *  qoladi, shuning uchun eski chaqiruvchilar uchun hech narsa o'zgarmaydi. */
+ *  qurish uchun xom tana kerak.
+ *
+ *  `code` — SERVER BERGAN, TILGA BOG'LIQ BO'LMAGAN kod
+ *  (`api/xatolar.py:KODLAR`). `message` esa SHU KODNING joriy tildagi
+ *  tarjimasi: shu tufayli xatoni ko'rsatadigan 24 ta komponent
+ *  o'zgarmasdan uch tilli bo'ldi — ular avvalgidek `e.message` ni
+ *  chizadi.
+ *
+ *  `diagnosticId` — server jurnalidagi so'rov identifikatori
+ *  (`X-Request-Id` bilan bir xil). Texnik tafsilot javobga
+ *  tushmaydi; foydalanuvchi shu belgilarni aytsa, jurnaldan aynan
+ *  o'sha so'rov topiladi. */
 export class ApiError extends Error {
   status: number
   detail: unknown
+  /** Server bergan barqaror xato kodi (`TENDER_NOT_FOUND`). Kodsiz
+   *  javoblarda (masalan proksi bergan 502 HTML) `undefined`. */
+  code?: string
+  /** Tarjimaga qo'yiladigan qiymatlar (`{id}`, `{max_mb}`). */
+  params?: Record<string, unknown>
+  /** 422 da: qaysi maydon, qaysi kod bilan. */
+  fields?: { field: string; code: string }[]
+  diagnosticId?: string
   /** 429 dagi `Retry-After` (soniya). Server matni bitta tilda keladi,
    *  interfeys esa uch tilli — shuning uchun xabarni MATNDAN emas, shu
    *  SONDAN yig'amiz. */
   retryAfter?: number
   constructor(message: string, status: number, detail: unknown,
-              retryAfter?: number) {
+              retryAfter?: number, kod?: string,
+              params?: Record<string, unknown>,
+              fields?: { field: string; code: string }[],
+              diagnosticId?: string) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
     this.retryAfter = retryAfter
+    this.code = kod
+    this.params = params
+    this.fields = fields
+    this.diagnosticId = diagnosticId
   }
 }
 
@@ -211,14 +238,37 @@ async function request<T>(
     }
     let detail = res.statusText
     let raw: unknown = null
+    let kod: string | undefined
+    let params: Record<string, unknown> | undefined
+    let fields: { field: string; code: string }[] | undefined
+    let tashxis: string | undefined
+    let kodli = false
     try {
       const b = await res.json()
       raw = b.detail
-      detail = errMatn(b.detail) || b.error || detail
-    } catch { /* JSON emas */ }
+      const xato = b.error
+      // KODLI JAVOB (20-vazifadan keyin server shunday qaytaradi):
+      // matn SHU YERDA, foydalanuvchi tilida yig'iladi. Ilgari
+      // server o'zbekcha jumla yuborardi va u rus/ingliz
+      // interfeysiga o'zbekcha yetib borardi.
+      if (xato && typeof xato === 'object' && typeof xato.code === 'string') {
+        kod = xato.code
+        params = (xato.params || {}) as Record<string, unknown>
+        fields = xato.fields
+        tashxis = xato.diagnostic_id || undefined
+        detail = xatoMatni(kod!, params as TVars)
+        kodli = true
+      } else {
+        detail = errMatn(b.detail) || (typeof xato === 'string' ? xato : '')
+          || detail
+      }
+    } catch { /* JSON emas — masalan proksi bergan HTML */ }
     const ra = Number(res.headers.get('Retry-After'))
-    throw new ApiError(`${res.status}: ${detail}`, res.status, raw,
-      Number.isFinite(ra) && ra > 0 ? ra : undefined)
+    // KODSIZ javobda holat raqami MATNDA qoladi: u yagona
+    // ma'lumot va uni yashirsak xato "sababsiz" ko'rinardi.
+    throw new ApiError(kodli ? detail : `${res.status}: ${detail}`,
+      res.status, raw, Number.isFinite(ra) && ra > 0 ? ra : undefined,
+      kod, params, fields, tashxis)
   }
   // 204 No Content — TANA BO'SH. DELETE va /catalog/seen shunday javob beradi.
   // Shartsiz res.json() chaqirilsa bu yerda SyntaxError chiqadi va chaqiruvchi

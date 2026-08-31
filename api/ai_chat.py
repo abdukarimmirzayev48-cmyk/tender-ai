@@ -37,7 +37,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from starlette.concurrency import run_in_threadpool
 
-from api import ai, atama, db, queries, translit
+from api import ai, atama, db, queries, translit, xatolar
 from api.ai import AIUnavailable  # mavjud istisno — qayta yaratmaymiz
 
 # =====================================================================
@@ -532,7 +532,8 @@ def embed_query(text: str) -> List[float]:
     try:
         return _load_embedder()([text], "query")[0]
     except Exception as e:  # noqa: BLE001
-        raise AIUnavailable(f"Embedding modeli mavjud emas: {e}") from e
+        raise AIUnavailable(f"Embedding modeli mavjud emas: {e}",
+                            kod="EMBED_UNAVAILABLE") from e
 
 
 def embed_documents(texts: List[str]) -> List[List[float]]:
@@ -1327,13 +1328,17 @@ def check_quota(company_id: int) -> None:
     if not row:
         return
     if not row["enabled"]:
-        raise AIUnavailable("AI-Chat bu kompaniya uchun o'chirilgan.")
+        raise AIUnavailable("AI-Chat bu kompaniya uchun o'chirilgan.",
+                            kod="AI_CHAT_DISABLED")
     if float(row["spent"]) >= float(row["limit_usd"]):
         raise AIUnavailable(
             f"Oylik AI byudjeti tugadi ({float(row['spent']):.2f}$ / "
-            f"{float(row['limit_usd']):.2f}$).")
+            f"{float(row['limit_usd']):.2f}$).",
+            kod="AI_BUDGET_EXCEEDED")
     if int(row["today_messages"]) >= int(row["daily_limit"]):
-        raise AIUnavailable(f"Kunlik xabar limiti tugadi ({row['daily_limit']}).")
+        raise AIUnavailable(f"Kunlik xabar limiti tugadi ({row['daily_limit']}).",
+                            kod="AI_DAILY_LIMIT",
+                            params={"chegara": row["daily_limit"]})
 
 
 def record_usage(company_id: int, model: str, usage: Any, kind: str = "chat") -> None:
@@ -1375,7 +1380,7 @@ def create_session(company_id: int, tender_id: Optional[int],
 def load_session(session_id: str, company_id: int) -> dict:
     row = db.query_one(SQL_SESSION_GET, {"id": session_id, "company_id": company_id})
     if not row:
-        raise LookupError("Sessiya topilmadi.")
+        raise xatolar.Xato("CHAT_SESSION_NOT_FOUND")
     return row
 
 
