@@ -499,7 +499,28 @@ SELECT
           WHERE tg2.tender_id = t.id AND tg2.good_code IS NOT NULL) AS good_codes,
     ARRAY(SELECT DISTINCT tg.name FROM tender_good tg
           WHERE tg.tender_id = t.id AND tg.name IS NOT NULL
-          ORDER BY tg.name LIMIT 6) AS goods_preview
+          ORDER BY tg.name LIMIT 6) AS goods_preview,
+    -- TOVAR LOTLARI NOMI — matn mosligining YAGONA dalili.
+    --
+    -- `goods_blob` dan farqi: XIZMAT lotlari va lug'atda kodi
+    -- topilmagan lotlar CHIQARIB TASHLANADI. Sabab o'lchangan
+    -- (`schema_patch_xizmat.sql`): `Кабель` bo'yicha 13 moslikdan
+    -- 4 tasi soxta edi va TO'RTALASI HAM xizmat tavsifidan yoki
+    -- tender sarlavhasidan kelgandi (precision 0.692).
+    --
+    -- DIQQAT: bu izohda FOIZ BELGISI yo'q va bo'lmasligi ham kerak —
+    -- psycopg2 uni platsderjatel deb o'qiydi va so'rov yiqiladi
+    -- (yuqoridagi `good_codes` izohida ham shu ogohlantirish bor;
+    -- men aynan shu tuzoqqa tushdim).
+    --
+    -- Tender SARLAVHASI bu yerga QO'SHILMAYDI — u yolg'iz o'zi
+    -- moslik dalili emas: "kabel liniyasini ko'chirish loyihasi"
+    -- kabel SOTIB OLMAYDI.
+    COALESCE((SELECT string_agg(DISTINCT tg3.name, ' ')
+                FROM tender_good tg3
+               WHERE tg3.tender_id = t.id
+                 AND tg3.name IS NOT NULL
+                 AND lot_tovarmi(tg3.good_code, tg3.name)), '') AS tovar_blob
 FROM tender t
 LEFT JOIN dim_status s ON s.status_code = t.status AND s.domain = 'tender'
 LEFT JOIN dim_area   a ON a.area_id = t.area_leaf_id

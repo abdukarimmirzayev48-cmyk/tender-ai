@@ -242,7 +242,37 @@ def product_matches(cand: Dict[str, Any], product: Dict[str, Any], *,
         return None
 
     terms = [product.get("name")] + (product.get("keywords") or [])
-    blob = _norm(f"{cand.get('name') or ''} {cand.get('goods_blob') or ''}")
+
+    # DALIL TOVAR LOTIDAN KELISHI SHART.
+    #
+    # O'LCHANGAN SABAB (2026-08-31, 784 ochiq tender). Matn mosligining
+    # 99.1% i bitta keng atamadan (`Кабель`) kelardi va u 13 tenderga
+    # mos kelib, 4 tasi SOXTA edi (precision 69.2%). To'rtalasi ham
+    # XIZMAT tavsifidan yoki tender SARLAVHASIDAN kelgandi:
+    #     "Услуга по прокладке ... кабеля"      (kabel yotqizish)
+    #     "Строительно-монтажные работы"        (sarlavhada)
+    #     "Услуга по ... испытанию изоляции"    (sinov xizmati)
+    #
+    # `tovar_blob` da FAQAT tovar lotlari nomi bor
+    # (`lot_tovarmi()`, `schema_patch_xizmat.sql`). Tender sarlavhasi
+    # va xizmat lotlari QO'SHILMAYDI.
+    #
+    # O'LCHANGAN NATIJA (yorliq — tenderda 27.3x loti bormi):
+    #     ESKI   mos 13  TP 9  FP 4  precision  69.2%  recall 56.2%
+    #     YANGI  mos  9  TP 9  FP 0  precision 100.0%  recall 56.2%
+    # Recall O'ZGARMADI.
+    #
+    # `Кабель` QORA RO'YXATGA OLINMAGAN — u hali ham mos keladi,
+    # lekin faqat TOVAR loti dalil bo'lganda.
+    #
+    # ORQAGA MOSLIK: `tovar_blob` kaliti YO'Q bo'lsa (eski chaqiruvchi,
+    # sinov qatori) eski xulq saqlanadi. BO'SH bo'lsa (hamma lot
+    # xizmat) — moslik YO'Q, va bu KUTILGAN.
+    if "tovar_blob" in cand:
+        blob = _norm(cand.get("tovar_blob") or "")
+    else:
+        blob = _norm(f"{cand.get('name') or ''} {cand.get('goods_blob') or ''}")
+
     for t in terms:
         # _hits — alifbodan qat'i nazar va SO'Z BOSHIDAN: katalogda
         # "nasos" bo'lsa "Насос" tovarli tender ham mos keladi.
