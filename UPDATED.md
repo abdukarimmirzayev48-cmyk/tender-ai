@@ -1210,6 +1210,14 @@ TO'XTATADI. Jimgina almashtirmaydi — to'g'ri manzil noma'lum.
 Tekshiruv `card_url()` ICHIDA, ya'ni uchala ko'rinish (email matni,
 email HTML, Telegram) avtomatik qamrab olinadi.
 
+> **KEYIN O'ZGARDI (19-vazifa).** Bu qatlam yetarli emasdi:
+> tekshiruv faqat YUBORISHDA edi, ya'ni noto'g'ri sozlama soatlab
+> ko'rinmasdi; frontend QURILMASI esa umuman qamrab olinmagan edi
+> va unga `localhost:8000` singib qolardi. Mantiq
+> `api/ommaviy_url.py` ga ko'chdi (yagona manba), asosiy
+> o'zgaruvchi `APP_PUBLIC_URL` bo'ldi va tekshiruv ISHGA TUSHISHGA
+> ko'chdi. Batafsil: `docs/deploy.md` §10.
+
 ### Zaxira — sinalmagani zaxira emas
 
 `backup.sh` dump oladi va DARHOL `pg_restore --list` bilan

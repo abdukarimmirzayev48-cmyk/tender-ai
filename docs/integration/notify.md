@@ -70,8 +70,14 @@ class NotifySettingsIn(BaseModel):
     smtp_user: Optional[str] = None
     smtp_use_tls: bool = True
     from_email: Optional[str] = None
-    base_url: str = "http://localhost:5173"   # kartochka havolasi shundan quriladi
+    base_url: Optional[str] = None       # bo'sh -> `api/ommaviy_url.py`
 ```
+
+> **19-vazifadan keyin:** kartochka havolasi `api/ommaviy_url.py`
+> da quriladi (yagona manba). Bazadagi ijarachi qiymati mahalliy
+> bo'lsa muhitdagi `APP_PUBLIC_URL` yutadi, `staging`/`production`
+> da esa mahalliy manzil umuman qabul qilinmaydi. Batafsil:
+> `docs/deploy.md` §10.
 
 ### 1.3. Endpointlar — `/catalog/seen` dan keyin (945-satr atrofi)
 

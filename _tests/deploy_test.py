@@ -121,28 +121,43 @@ def test_sirlar():
 
 def test_localhost():
     bolim("3. OMMAVIY HAVOLADA `localhost` BO'LMASIN")
-    prod = oqi("env", "production.env.example")
-    m = re.search(r"^PUBLIC_BASE_URL=(.*)$", prod, re.M)
-    check("`PUBLIC_BASE_URL` production namunasida bor", bool(m))
-    if m:
-        u = m.group(1).strip()
-        check("production `PUBLIC_BASE_URL` mahalliy EMAS",
-              "localhost" not in u and "127.0.0.1" not in u, u)
-        check("production `PUBLIC_BASE_URL` HTTPS", u.startswith("https://"), u)
-
-    stg = oqi("env", "staging.env.example")
-    m2 = re.search(r"^PUBLIC_BASE_URL=(.*)$", stg, re.M)
-    check("staging `PUBLIC_BASE_URL` mahalliy EMAS",
-          bool(m2) and "localhost" not in m2.group(1), m2.group(1) if m2 else "")
+    # ASOSIY nom 19-vazifada `APP_PUBLIC_URL` ga o'tdi va tanlash
+    # mantig'i `api/ommaviy_url.py` ga ko'chdi (yagona manba).
+    # BATAFSIL tekshiruv `_tests/ommaviy_url_test.py` da; bu yerda
+    # joylashtirish ARTEFAKTLARI tekshiriladi.
+    for muhit in ("production", "staging"):
+        s = oqi("env", f"{muhit}.env.example")
+        m = re.search(r"^APP_PUBLIC_URL=(.*)$", s, re.M)
+        check(f"`APP_PUBLIC_URL` {muhit} namunasida bor", bool(m))
+        if m:
+            u = m.group(1).strip()
+            check(f"{muhit} `APP_PUBLIC_URL` mahalliy EMAS",
+                  "localhost" not in u and "127.0.0.1" not in u, u)
+            check(f"{muhit} `APP_PUBLIC_URL` HTTPS", u.startswith("https://"), u)
 
     # KOD DARAJASIDA: `dev` dan boshqa muhitda mahalliy havola
-    # yuborilmasin.
-    src = io.open(os.path.join(ROOT, "api", "notify.py"), encoding="utf-8").read()
-    check("`url_tekshir()` mavjud", "def url_tekshir" in src)
-    check("`card_url()` tekshiruvni CHAQIRADI",
-          re.search(r"def card_url.*?url_tekshir\(url\)", src, re.S) is not None)
-    check("`PUBLIC_BASE_URL` muhitdan o'qiladi",
-          'os.environ.get("PUBLIC_BASE_URL"' in src)
+    # yuborilmasin — va bu ISHGA TUSHISHDA tekshirilsin, yuborishda
+    # emas: aks holda noto'g'ri sozlama soatlab ko'rinmasdi.
+    src = io.open(os.path.join(ROOT, "api", "ommaviy_url.py"),
+                  encoding="utf-8").read()
+    check("`bazani_tekshir()` mavjud", "def bazani_tekshir" in src)
+    check("`ishga_tushishda_tekshir()` mavjud",
+          "def ishga_tushishda_tekshir" in src)
+    nsrc = io.open(os.path.join(ROOT, "api", "notify.py"),
+                   encoding="utf-8").read()
+    check("`card_url()` yagona quruvchidan o'tadi",
+          re.search(r"def card_url.*?ommaviy_url\.havola\(", nsrc, re.S)
+          is not None)
+    msrc = io.open(os.path.join(ROOT, "api", "main.py"),
+                   encoding="utf-8").read()
+    check("qo'rovul `lifespan` ga ulangan",
+          "ommaviy_url.ishga_tushishda_tekshir()" in msrc)
+
+    # QURILMA: mahalliy manzil frontend qurilmasiga ham singib
+    # qolardi (o'lchangan: `localhost:8000` x1, `localhost:5173` x3).
+    d = oqi("bin", "deploy.sh")
+    check("joylashtirish qurilma NATIJASINI tekshiradi",
+          "frontend/dist/assets" in d and "MAHALLIY manzil bor" in d)
 
 
 def test_qayta_yuklash():

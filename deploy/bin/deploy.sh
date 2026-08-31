@@ -64,37 +64,70 @@ python3 -m venv "${YANGI}/.venv"
 "${YANGI}/.venv/bin/pip" install --quiet --upgrade pip
 "${YANGI}/.venv/bin/pip" install --quiet -r "${YANGI}/requirements-api.txt"
 
-# --- 4) Frontend QURILADI (dev-server ISHLATILMAYDI) -------------------------
-# Vite dev-server 0.0.0.0 ga boglanadi va uning zaifliklari bor
-# (docs/xavfsizlik.md M-9). Joylashtirishda faqat statik qurilma.
-log "frontend quriladi"
-( cd "${YANGI}/frontend" && npm ci --silent && npm run build )
-[ -d "${YANGI}/frontend/dist" ] || xato "frontend/dist yaratilmadi"
-
-# --- 5) MIGRATSIYA — EGASI roli bilan ---------------------------------------
-# Ilova roli (tai_app) da DDL huquqi ATAYLAB yoq.
+# --- 4) MUHIT FAYLI O'QILADI -------------------------------------------------
+# QURILMADAN OLDIN o'qiladi: frontend qurilmasi ham muhit qiymatlariga
+# muhtoj (VITE_API_BASE, APP_ENV). Ilgari bu blok qurilmadan KEYIN edi
+# va qurilma sozlamasiz yurardi.
 set -a
 # shellcheck disable=SC1090
 . "$ENVFILE"
 set +a
+export APP_ENV="$MUHIT"
+
+# --- 5) Frontend QURILADI (dev-server ISHLATILMAYDI) -------------------------
+# Vite dev-server 0.0.0.0 ga boglanadi va uning zaifliklari bor
+# (docs/xavfsizlik.md M-9). Joylashtirishda faqat statik qurilma.
+#
+# `.env.production` SHU YERDA YOZILADI. O'LCHANGAN NOSOZLIK: reliz
+# `git archive` bilan yasaladi va `frontend/.env` KUZATILMAGAN fayl —
+# u relizga TUSHMAYDI. Shu sababli qurilma `VITE_API_BASE` siz yurardi
+# va zaxira qiymat (`http://localhost:8000`) qurilmaga SINGIB qolardi:
+# ishlab chiqarish sahifasidagi har so'rov foydalanuvchi brauzerida
+# `localhost:8000` ga ketardi.
+#
+# BU FAYLDA SIR YO'Q: `VITE_*` qiymatlari ta'rifi bo'yicha qurilmaga
+# tushadi, ya'ni ular OMMAVIY. Sir hech qachon `VITE_` prefiksi bilan
+# berilmasin.
+log "frontend sozlamasi yoziladi"
+cat > "${YANGI}/frontend/.env.production" <<EOF
+VITE_API_BASE=${VITE_API_BASE:-/api}
+VITE_ERP_WEB=${VITE_ERP_WEB:-}
+EOF
+
+log "frontend quriladi"
+( cd "${YANGI}/frontend" && npm ci --silent && npm run build )
+[ -d "${YANGI}/frontend/dist" ] || xato "frontend/dist yaratilmadi"
+
+# QURILMA TEKSHIRUVI — mahalliy manzil singib qolmaganiga ISHONMAYMIZ,
+# QARAYMIZ. `vite.config.ts` dagi qo'rovul sozlamani tekshiradi;
+# bu yerda NATIJA tekshiriladi, ya'ni manbaga qaytib kelgan yangi
+# qotirilgan `localhost` ham ushlanadi.
+if grep -rqE 'localhost|127\.0\.0\.1|0\.0\.0\.0' "${YANGI}/frontend/dist/assets"; then
+    grep -roE 'localhost:[0-9]*|127\.0\.0\.1:[0-9]*' "${YANGI}/frontend/dist/assets"         | sort -u | head -20 >&2
+    xato "qurilmada MAHALLIY manzil bor (yuqorida) — ommaviy sahifada ishlamaydi"
+fi
+log "qurilma toza: mahalliy manzil yo'q"
+
+# --- 6) MIGRATSIYA — EGASI roli bilan ---------------------------------------
+# Ilova roli (tai_app) da DDL huquqi ATAYLAB yoq.
 : "${XT_DB_DSN_OWNER:?migratsiya uchun XT_DB_DSN_OWNER kerak (env faylda)}"
 log "migratsiya holati"
 "${YANGI}/.venv/bin/python" "${YANGI}/migratsiya.py" --holat --dsn "$XT_DB_DSN_OWNER" || true
 log "migratsiya qollanadi"
 "${YANGI}/.venv/bin/python" "${YANGI}/migratsiya.py" --qolla --dsn "$XT_DB_DSN_OWNER"
 
-# --- 6) ALMASHTIRISH (atomar) ------------------------------------------------
+# --- 7) ALMASHTIRISH (atomar) ------------------------------------------------
 ESKI="$(readlink -f "$JORIY" 2>/dev/null || true)"
 ln -sfn "$YANGI" "$JORIY"
 log "current -> $YANGI"
 
-# --- 7) Xizmatlar ------------------------------------------------------------
+# --- 8) Xizmatlar ------------------------------------------------------------
 sudo systemctl restart "tenderai-api@${MUHIT}"
 sudo systemctl enable --now "tenderai-etl@${MUHIT}.timer"          >/dev/null
 sudo systemctl enable --now "tenderai-backup@${MUHIT}.timer"       >/dev/null
 sudo systemctl enable --now "tenderai-restore-test@${MUHIT}.timer" >/dev/null
 
-# --- 8) SOGLIQ TEKSHIRUVI — otmasa AVTOMATIK QAYTARILADI ---------------------
+# --- 9) SOGLIQ TEKSHIRUVI — otmasa AVTOMATIK QAYTARILADI ---------------------
 if ! "${YANGI}/deploy/bin/health-check.sh" "$MUHIT"; then
     log "sogliq tekshiruvi OTMADI — orqaga qaytarilmoqda"
     if [ -n "$ESKI" ] && [ -d "$ESKI" ]; then
@@ -105,13 +138,13 @@ if ! "${YANGI}/deploy/bin/health-check.sh" "$MUHIT"; then
     xato "qaytariladigan eski reliz yoq"
 fi
 
-# --- 9) STAGING muvaffaqiyatli -> TASDIQ yoziladi ---------------------------
+# --- 10) STAGING muvaffaqiyatli -> TASDIQ yoziladi ---------------------------
 if [ "$MUHIT" = "staging" ]; then
     printf '%s' "$REF" > "${ILDIZ}/.verified"
     log "staging tasdigi yozildi: $REF"
 fi
 
-# --- 10) Eski relizlar (oxirgi 5 tasi qoladi) -------------------------------
+# --- 11) Eski relizlar (oxirgi 5 tasi qoladi) -------------------------------
 ( cd "$RELIZLAR" && ls -1dt */ 2>/dev/null | tail -n +6 | xargs -r rm -rf )
 
 log "TUGADI: ${MUHIT} <- ${REF}"

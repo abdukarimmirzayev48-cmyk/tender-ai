@@ -53,7 +53,8 @@ from email.message import EmailMessage
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
-from api import db, i18n, matching, queries, telegram, translit
+from api import (db, i18n, matching, ommaviy_url, queries, telegram,
+                 translit)
 
 # Xabar turi/kanali (notify_sent.kind). HAR KANAL O'Z JURNALINI yuritadi:
 # aks holda email allaqachon "yuborilgan" deb belgilagan tenderlar keyinroq
@@ -542,9 +543,9 @@ def get_settings(company_id: Optional[int] = None) -> Dict[str, Any]:
         "id": 1, "enabled": False, "email": None, "min_score": 70,
         "smtp_host": None, "smtp_port": 587, "smtp_user": None,
         "smtp_use_tls": True, "from_email": None,
-        # Muhitdan (`PUBLIC_BASE_URL`) — mahalliy manzil qattiq
-        # yozilmaydi. Sabab `card_url()` ustidagi izohda.
-        "base_url": bazaviy_url(None),
+        # Muhitdan (`APP_PUBLIC_URL`) — mahalliy manzil qattiq
+        # yozilmaydi. Sabab `api/ommaviy_url.py` ustidagi izohda.
+        "base_url": ommaviy_url.bazaviy_url(None),
         "telegram_enabled": False, "telegram_chat_id": None,
         "lang": i18n.DEFAULT_LANG, "updated_at": None,
     }
@@ -574,6 +575,33 @@ def get_settings(company_id: Optional[int] = None) -> Dict[str, Any]:
     return st
 
 
+def _base_url_saqlash(data: Dict[str, Any],
+                      joriy: Optional[str]) -> str:
+    """Saqlanadigan `base_url`. ANIQ berilgan qiymat TEKSHIRILADI.
+
+    IKKI HOLAT ATAYLAB AJRATILGAN:
+
+      ANIQ BERILGAN (`"base_url" in data`) — foydalanuvchi shakl
+      orqali yozdi. `dev` dan boshqa muhitda mahalliy manzil
+      RAD ETILADI: uni jimgina muhitdagi qiymatga almashtirish
+      "saqladim" deb ko'rsatib, boshqa narsani saqlash bo'lardi.
+
+      BERILMAGAN — PUT faqat boshqa maydonni o'zgartiryapti
+      (`exclude_unset`). Bunda bazadagi eski mahalliy qiymat
+      muhitdagi bilan JIMGINA tuzatiladi (ogohlantirish bilan):
+      aks holda eski ijarachi yozuvi tufayli hech qanday
+      sozlamani saqlab bo'lmay qolardi.
+    """
+    aniq = "base_url" in data
+    xom = data["base_url"] if aniq else joriy
+    if aniq:
+        try:
+            ommaviy_url.bazani_tekshir((xom or "").strip().rstrip("/"))
+        except ommaviy_url.OmmaviyUrlXato as e:
+            raise NotifyError(str(e)) from e
+    return ommaviy_url.bazaviy_url(xom)
+
+
 def save_settings(data: Dict[str, Any],
                   company_id: Optional[int] = None) -> Dict[str, Any]:
     """Sozlamalarni saqlaydi (bitta faol yozuv).
@@ -597,7 +625,7 @@ def save_settings(data: Dict[str, Any],
         "smtp_user": (take("smtp_user") or None),
         "smtp_use_tls": bool(take("smtp_use_tls", True)),
         "from_email": (take("from_email") or None),
-        "base_url": bazaviy_url(take("base_url")),
+        "base_url": _base_url_saqlash(data, cur.get("base_url")),
         "telegram_enabled": bool(take("telegram_enabled", False)),
         "telegram_chat_id": (str(take("telegram_chat_id") or "").strip() or None),
         # Xabar tili — interfeys tili bilan bir xil (frontend uni tanlanganда
@@ -944,63 +972,17 @@ def find_candidates(min_score: Optional[int] = None,
 # ---------------------------------------------------------------------------
 # Xabar matni
 # ---------------------------------------------------------------------------
-#: Joylashtirishning OMMAVIY manzili. Bu MUHIT xossasi, ijarachi
-#: sozlamasi emas: bitta joylashtirishda bitta ommaviy URL bo'ladi.
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
-
-#: Bu nomlar OMMAVIY havolada BO'LMASLIGI kerak.
-_MAHALLIY = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal")
-
-APP_ENV = os.environ.get("APP_ENV", "dev").strip().lower()
-
-
-def mahalliymi(url: Optional[str]) -> bool:
-    """URL mahalliy manzilga ishora qiladimi."""
-    u = (url or "").lower()
-    return any(m in u for m in _MAHALLIY)
-
-
-def bazaviy_url(db_qiymati: Optional[str] = None) -> str:
-    """Ommaviy bazaviy URL. Tartib MUHIM.
-
-    1. Bazadagi qiymat — LEKIN u mahalliy bo'lsa VA muhitda haqiqiy
-       manzil berilgan bo'lsa, MUHIT yutadi. Sabab o'lchangan:
-       ishlab chiquvchi bazasida `base_url = 'http://localhost:5173'`
-       yozib qo'yilgan va u joylashtirishga KO'CHIB o'tardi.
-    2. `PUBLIC_BASE_URL` muhit o'zgaruvchisi.
-    3. Oxirgi zaxira — mahalliy manzil (FAQAT `dev` uchun ma'noli).
-
-    Bu funksiya HAVOLANI BLOKLAMAYDI — u faqat tanlaydi. Bloklash
-    `url_tekshir()` da va u yuborishdan OLDIN chaqiriladi.
-    """
-    db_q = (db_qiymati or "").strip().rstrip("/")
-    if db_q and not (mahalliymi(db_q) and PUBLIC_BASE_URL):
-        return db_q
-    if PUBLIC_BASE_URL:
-        if db_q:
-            log.warning("bazadagi base_url mahalliy (%s) — muhitdagi "
-                        "PUBLIC_BASE_URL ishlatildi", db_q)
-        return PUBLIC_BASE_URL
-    return "http://localhost:5173"
-
-
-def url_tekshir(url: str) -> None:
-    """Ommaviy havola yuborishga YAROQLIMI. Yaroqsiz bo'lsa TO'XTATADI.
-
-    `dev` DAN BOSHQA muhitda mahalliy manzilli havola yuborish —
-    foydalanuvchiga ISHLAMAYDIGAN havola yuborish demak. Jimgina
-    yuborilsa, buni faqat qabul qiluvchi payqardi.
-
-    ATAYLAB XATO KO'TARADI, jimgina almashtirmaydi: to'g'ri manzil
-    NOMA'LUM, taxmin qilib qo'yish esa yana bir buzuq havola berardi.
-    """
-    if APP_ENV != "dev" and mahalliymi(url):
-        raise NotifyError(
-            f"Ommaviy havola MAHALLIY manzilga ishora qilyapti: {url}\n"
-            f"  APP_ENV={APP_ENV} da bu ISHLAMAYDIGAN havola.\n"
-            f"  Tuzatish: `PUBLIC_BASE_URL=https://<domen>` muhitda "
-            f"bering yoki bildirishnoma sozlamasida `base_url` ni "
-            f"to'g'rilang.")
+#: OMMAVIY MANZIL — `api/ommaviy_url.py` DA (yagona manba).
+#:
+#: Ilgari tanlash va tekshirish mantig'i SHU FAYLDA edi. U ilovaning
+#: xossasi, bildirishnomaning emas: parol tiklash havolasi ham,
+#: chuqur havola ham AYNAN shu manzildan qurilishi kerak. Bu yerda
+#: qolsa, ikkinchi chaqiruvchi uni TAKRORLAB yozardi.
+#:
+#: Quyidagi ikki nom ESKI CHAQIRUVCHILAR uchun qoldirildi va
+#: `ommaviy_url` ga UZATADI — ikkinchi nusxa EMAS.
+mahalliymi = ommaviy_url.mahalliymi
+bazaviy_url = ommaviy_url.bazaviy_url
 
 
 def card_url(base_url: Optional[str], tender_id: int) -> str:
@@ -1008,15 +990,19 @@ def card_url(base_url: Optional[str], tender_id: int) -> str:
 
     Frontend `?tender=<id>` parametrini o'qib drawer'ni ochadi.
 
-    HAVOLA SHU YERDA TEKSHIRILADI — ya'ni tekshiruv HAR uchala
-    ko'rinishni (email matni, email HTML, Telegram) avtomatik
-    qamrab oladi. Yuborish funksiyalariga alohida qo'shilsa,
-    yangi kanal qo'shilganda uni UNUTISH oson bo'lardi.
+    HAVOLA `ommaviy_url.havola()` DA quriladi va SHU YERDA
+    tekshiriladi — email matni, email HTML va Telegram uchalasi
+    ayni shu funksiyadan o'tadi. Yuborish funksiyalariga alohida
+    qo'shilsa, yangi kanal qo'shilganda uni UNUTISH oson bo'lardi.
+
+    XATO TURI O'RALADI: yuborish yo'lidagi chaqiruvchilar FAQAT
+    `NotifyError` ni ushlaydi va `OmmaviyUrlXato` ulardan JIMGINA
+    o'tib ketardi.
     """
-    base = bazaviy_url(base_url)
-    url = f"{base}/?tender={tender_id}"
-    url_tekshir(url)
-    return url
+    try:
+        return ommaviy_url.havola(f"/?tender={tender_id}", base_url)
+    except ommaviy_url.OmmaviyUrlXato as e:
+        raise NotifyError(str(e)) from e
 
 
 def _money(v: Any, currency: Optional[str],

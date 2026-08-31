@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 load_dotenv()  # api.db DSN'ni ko'rishi uchun importdan OLDIN
 
-from api import db, notify  # noqa: E402
+from api import db, notify, ommaviy_url  # noqa: E402
 
 # Windows konsoli standart kodlashда (cp1251/cp866) tender nomlaridagi kirill
 # va o'zbekcha belgilarni chiqara olmaydi -> UnicodeEncodeError. Chop etish
@@ -73,6 +73,17 @@ def main() -> None:
 
     if not os.environ.get("XT_DB_DSN"):
         sys.exit("XATO: XT_DB_DSN o'rnatilmagan (.env faylini tekshiring).")
+
+    # OMMAVIY MANZIL — ISHDAN OLDIN. Bu skript ETL taymeridan yuriladi,
+    # ya'ni HAQIQIY yuborish yo'li shu. Manzil yaroqsiz bo'lsa nosozlik
+    # `notify.run()` ning O'RTASIDA — nomzodlar hisoblanib, ba'zi
+    # xabarlar allaqachon ketgandan KEYIN — chiqardi. Oldin
+    # tekshiramiz: `--dry-run` da ham, chunki yaroqsiz sozlamani
+    # quruq yurishda ko'rish aynan kerak.
+    try:
+        ommaviy_url.ishga_tushishda_tekshir()
+    except ommaviy_url.OmmaviyUrlXato as e:
+        sys.exit(f"XATO: {e}")
 
     db.init_pool()
     try:

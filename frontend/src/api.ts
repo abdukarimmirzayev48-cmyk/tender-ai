@@ -1,5 +1,5 @@
 // Backend API qatlami — barcha so'rovlar shu yerdan o'tadi.
-// Bazaviy manzil .env dagi VITE_API_BASE dan (default localhost:8000).
+// Bazaviy manzil .env dagi VITE_API_BASE dan (zaxira: `/api`, same-origin).
 import type {
   AiMatchResult, Category, CompanyDocument, CompanyProfileData, ComplianceResult,
   DocumentTextResult, DocumentType, Freshness, GoNoGoResult, Paged, PricingInputs,
@@ -15,7 +15,20 @@ import type {
   TelegramSubscriber, TenderDetail, TenderRow, NotifySettingsData, Nullable,
 } from './types'
 
-const BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+// ZAXIRA QIYMAT `/api` — SAME-ORIGIN.
+//
+// Ilgari `http://localhost:8000` edi va bu O'LCHANGAN nosozlik berdi:
+// `deploy/bin/deploy.sh` relizni `git archive` bilan yasaydi,
+// `frontend/.env` esa KUZATILMAGAN fayl — ya'ni relizga tushmaydi.
+// Natijada `npm run build` `VITE_API_BASE` siz yurardi va qurilmaga
+// `localhost:8000` SINGIB QOLARDI: ishlab chiqarish sahifasidagi HAR
+// so'rov foydalanuvchi brauzerida `localhost:8000` ga ketardi.
+//
+// `/api` zaxirasi ikki sababdan to'g'ri: (1) joylashtirishda Caddy
+// aynan shu yo'lni backendga uzatadi, (2) sessiya cookie'si
+// `SameSite=Lax` va u FAQAT same-origin so'rovda ketadi — to'liq
+// manzil yozilsa kirish umuman ishlamaydi.
+const BASE = import.meta.env.VITE_API_BASE || '/api'
 
 // --- KIMLIK (auth-4) ---------------------------------------------------------
 // Tender-AI ga KOMPANIYA hisobi bilan kiriladi (odam emas — hodimlar ERP da).

@@ -76,7 +76,7 @@ sudo chmod 0640 /etc/tenderai/staging.env
 sudo chown root:tenderai /etc/tenderai/staging.env
 ```
 
-**Majburiy:** `PUBLIC_BASE_URL`, `XT_DB_DSN`, `XT_DB_DSN_OWNER`.
+**Majburiy:** `APP_PUBLIC_URL`, `XT_DB_DSN`, `XT_DB_DSN_OWNER`.
 
 ---
 
@@ -128,12 +128,17 @@ joylashtiruvi **sog'liq tekshiruvidan o'tgach** o'zi yozadi.
 
 1. `git archive` → yangi reliz katalogi (`releases/<vaqt>-<ref>`)
 2. `python -m venv` + `pip install -r requirements-api.txt`
-3. `npm ci && npm run build` → `frontend/dist`
-4. **Migratsiya** (egasi roli bilan)
-5. `ln -sfn` → `current` (**atomar**)
-6. `systemctl restart tenderai-api@<muhit>` + timer'lar
-7. **Sog'liq tekshiruvi** — o'tmasa **avtomatik orqaga qaytariladi**
-8. Eski relizlar: oxirgi 5 tasi qoladi
+3. **Muhit fayli o'qiladi** (`/etc/tenderai/<muhit>.env`) va
+   `APP_ENV` beriladi — **qurilmadan oldin**, chunki frontend
+   qurilmasi ham muhit qiymatlariga muhtoj (§10)
+4. `frontend/.env.production` yoziladi → `npm ci && npm run build`
+   → `frontend/dist`, so'ng **qurilmada mahalliy manzil bor-yo'qligi
+   tekshiriladi** (topilsa to'xtaydi)
+5. **Migratsiya** (egasi roli bilan)
+6. `ln -sfn` → `current` (**atomar**)
+7. `systemctl restart tenderai-api@<muhit>` + timer'lar
+8. **Sog'liq tekshiruvi** — o'tmasa **avtomatik orqaga qaytariladi**
+9. Eski relizlar: oxirgi 5 tasi qoladi
 
 ---
 
@@ -238,21 +243,72 @@ tashlardi.
 
 ## 10. Ommaviy havolalar `localhost` bo'lmasin
 
-**O'lchangan holat:** bazada `notify_settings.base_url =
-'http://localhost:5173'` yozilgan edi (haqiqiy ijarachi uchun).
-Bildirishnoma o'chiq bo'lgani uchun buzuq havola hali yuborilmagan.
+**Yagona manba: `api/ommaviy_url.py`.** Qabul qiluvchi bosadigan
+har qanday havola shu moduldan quriladi.
+
+### Muhit o'zgaruvchisi
+
+| Nom | Holat |
+|---|---|
+| `APP_PUBLIC_URL` | **asosiy** |
+| `PUBLIC_BASE_URL` | eski (ishlaydi, ogohlantirish yozadi) |
+
+Ikkalasi ham berilib, qiymatlari **boshqa** bo'lsa — xizmat ishga
+tushmaydi. "Qaysi biri to'g'ri" degan savolga taxmin bilan javob
+berish ikkita haqiqat manbai demak.
+
+`localhost` ga ruxsat **faqat** `APP_ENV=dev` da. Alohida "ruxsat
+bayrog'i" ataylab qo'shilmadi: uni ishlab chiqarishga ham yozib
+qo'yish mumkin bo'lardi va qo'riqchi o'z-o'zini o'chirardi.
+
+### To'rt qatlam
+
+1. **Ishga tushish** — `ommaviy_url.ishga_tushishda_tekshir()`
+   `api/main.py` dagi `lifespan` da va `notify_new.py` da (ETL
+   yuborish yo'li). `staging`/`production` da manzil berilmagan
+   yoki mahalliy bo'lsa **xizmat ko'tarilmaydi**.
+2. **Tanlash** — bazadagi ijarachi qiymati mahalliy bo'lsa va
+   muhitda haqiqiysi bo'lsa, **muhit yutadi** (ogohlantirish bilan).
+3. **Qurish** — `ommaviy_url.havola()` yagona quruvchi. Email
+   matni, email HTML va Telegram uchalasi shundan o'tadi, ya'ni
+   yangi kanal qo'shilganda tekshiruvni unutib bo'lmaydi.
+4. **Yozish** — sozlama shaklida **aniq berilgan** mahalliy qiymat
+   `dev` dan boshqa muhitda rad etiladi. Jimgina almashtirilmaydi:
+   "saqladim" deb ko'rsatib boshqa narsani saqlash yolg'on bo'lardi.
+
+### Frontend qurilmasi (o'lchangan nosozlik)
+
+Reliz `git archive` bilan yasaladi, `frontend/.env` esa
+kuzatilmagan fayl — u **relizga tushmaydi**. Shu sababli qurilma
+`VITE_API_BASE` siz yurardi va zaxira qiymat singib qolardi:
+
+```
+dist/assets/index-*.js:  localhost:8000  x1   butun API
+dist/assets/index-*.js:  localhost:5173  x3   sozlama shakli
+```
+
+Ya'ni ishlab chiqarish sahifasidagi **har so'rov** foydalanuvchi
+brauzerida `localhost:8000` ga ketardi va qurilma muvaffaqiyatli
+tugardi.
 
 Endi uch qatlam:
 
-1. `PUBLIC_BASE_URL` — **muhit** o'zgaruvchisi (joylashtirish xossasi).
-2. Bazadagi qiymat **mahalliy** bo'lsa va muhitda haqiqiysi bo'lsa —
-   **muhit yutadi** (jurnalga ogohlantirish yoziladi).
-3. `url_tekshir()` — `APP_ENV != dev` da mahalliy havola bo'lsa
-   **yuborishni to'xtatadi**. Jimgina almashtirmaydi: to'g'ri manzil
-   noma'lum, taxmin qilish yana bir buzuq havola berardi.
+1. Manbada qotirilgan mahalliy manzil **yo'q** (`VITE_API_BASE`
+   zaxirasi `/api` — same-origin, cookie shuni talab qiladi).
+2. `deploy.sh` muhit faylidan `frontend/.env.production` ni
+   **yozadi** va `APP_ENV` ni beradi.
+3. `vite.config.ts` dagi qo'rovul plagin `staging`/`production` da
+   sozlama yaroqsiz bo'lsa **qurilmani to'xtatadi**; `deploy.sh`
+   esa qurilma natijasini `grep` bilan tekshiradi.
 
-Tekshiruv `card_url()` ichida, ya'ni **uchala ko'rinish** (email
-matni, email HTML, Telegram) avtomatik qamrab olinadi.
+> `VITE_*` qiymatlari ta'rifi bo'yicha brauzerga tushadi — ular
+> **ommaviy**. Sir hech qachon `VITE_` prefiksi bilan berilmasin.
+
+### Sinov
+
+`_tests/ommaviy_url_test.py` — 96 tekshiruv (`dev`/`staging`/
+`production` xulqi, eski nom va ziddiyat, uchala kanalning ayni
+havolasi, frontend manbasi va qurilma qo'rovuli).
 
 ---
 

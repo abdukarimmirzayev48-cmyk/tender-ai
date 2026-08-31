@@ -35,9 +35,15 @@ interface FormState {
   telegram_enabled: boolean
 }
 
+// BOSHLANG'ICH holat. `base_url` BO'SH — `http://localhost:5173`
+// qotirilgan edi va u ikki yo'l bilan ISHLAB CHIQARISHGA o'tardi:
+// qurilmaga singib qolardi (o'lchangan: `dist/assets/index-*.js` da
+// uch marta) va foydalanuvchi shaklni saqlaganda BAZAGA yozilardi.
+// Haqiqiy qiymatni SERVER beradi (`api/ommaviy_url.py` — yagona
+// manba); u kelgunicha maydon bo'sh turadi.
 const empty: FormState = {
   enabled: false, email: '', min_score: 70,
-  base_url: 'http://localhost:5173', telegram_enabled: false,
+  base_url: '', telegram_enabled: false,
 }
 
 interface Meta {
@@ -241,8 +247,10 @@ export default function NotifySettings() {
           </div>
 
           <Label text={t('ntf.baseUrl')}>
+            {/* `placeholder` YO'Q: u ham qurilmaga tushadigan qotirilgan
+                mahalliy manzil edi va foydalanuvchiga "shuni yozing"
+                deb ko'rsatardi. Server bergan qiymat maydonda turadi. */}
             <Input value={s.base_url} onChange={set('base_url')}
-              placeholder="http://localhost:5173"
               title={t('ntf.baseUrlTitle')} />
           </Label>
 
@@ -481,7 +489,7 @@ function blanks(o: NotifySettingsData): Partial<FormState> {
     enabled: !!o?.enabled,
     email: o?.email ?? '',
     min_score: o?.min_score ?? 70,
-    base_url: o?.base_url ?? 'http://localhost:5173',
+    base_url: o?.base_url ?? '',
     telegram_enabled: !!o?.telegram_enabled,
   }
 }

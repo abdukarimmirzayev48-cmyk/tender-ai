@@ -75,7 +75,7 @@ fi
 
 echo
 log "TAYYOR. Keyingi qadamlar:"
-echo "  1. /etc/tenderai/${MUHIT}.env ni TOLDIRING (PUBLIC_BASE_URL, XT_DB_DSN, ...)"
+echo "  1. /etc/tenderai/${MUHIT}.env ni TOLDIRING (APP_PUBLIC_URL, XT_DB_DSN, ...)"
 echo "  2. Bazani va tai_app rolini tayyorlang (docs/deploy.md §6)"
 echo "  3. Caddyfile dagi domenlarni almashtiring va: systemctl reload caddy"
 echo "  4. Kodni push qiling va: deploy/bin/deploy.sh ${MUHIT} <ref>"

@@ -42,8 +42,8 @@ load_dotenv()  # .env ni import paytida yuklaymiz (pool DSN'ni ko'rishi uchun)
 
 from api import (ai, ai_chat, ai_docs, ai_gonogo, ai_match, auth, jurnal,  # noqa: E402
                  catalog_auto, compliance, db, erp_status, erp_stock, i18n, importer,
-                 kodlash, matching, notify, pricing, queries, stock, telegram,
-                 translit)
+                 kodlash, matching, notify, ommaviy_url, pricing, queries,
+                 stock, telegram, translit)
 
 _log = logging.getLogger(__name__)
 
@@ -326,6 +326,15 @@ async def lifespan(app: FastAPI):
         "ishga tushdi", extra={"muhit": os.environ.get("APP_ENV", "dev"),
                                "log_format": fmt,
                                "docs": API_DOCS})
+    # OMMAVIY MANZIL — BAZADAN OLDIN. Bu SOF sozlama tekshiruvi:
+    # noto'g'ri bo'lsa xizmat ko'tarilmasligi kerak va buni aniqlash
+    # uchun bazaga ulanish shart emas. Xato USHLANMAYDI — `lifespan`
+    # dan chiqqan istisno uvicorn'ni to'xtatadi, systemd qayta
+    # urinadi va jurnalda SABAB turadi. Ilgari bu tekshiruv faqat
+    # yuborish paytida edi: `APP_ENV=production` da manzil
+    # berilmagan bo'lsa ham xizmat yashil ko'rinardi va nosozlik
+    # soatlar keyin, ETL jurnalida chiqardi.
+    ommaviy_url.ishga_tushishda_tekshir()
     db.init_pool()
     # Embedding modelini FON IPIDA isitamiz: yuklanish ~17 s, keyingi
     # so'rovlar 19-54 ms. Isitmasak birinchi chat savoli 17 soniya
