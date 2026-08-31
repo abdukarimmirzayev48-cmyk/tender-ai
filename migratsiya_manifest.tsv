@@ -79,3 +79,4 @@
 600	0060_kod_tahlil_2	schema_patch_kod_tahlil_2.sql
 610	0061_xizmat	schema_patch_xizmat.sql
 620	0062_routing_kelishuv	schema_patch_routing_kelishuv.sql
+630	0063_req_qamrov	schema_patch_req_qamrov.sql

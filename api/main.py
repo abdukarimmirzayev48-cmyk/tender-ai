@@ -2377,6 +2377,47 @@ def tender_qualification(tender_id: int, request: Request):
 # tomonda turadi, ERP esa `erp.v_tender_status` orqali o'z holatini
 # aytadi.
 # ---------------------------------------------------------------------------
+@app.get("/requirements/coverage")
+def requirements_coverage(request: Request):
+    """Talab qayta ishlash qamrovi — TUSHUNTIRILADIGAN.
+
+    IKKI FOIZ ATAYLAB AJRATILGAN va ular BOSHQA savolga javob
+    beradi:
+
+      `ishlanganda_topildi_foiz` — ISHLANGAN tenderlarning qanchasida
+                                   talab topilgan (SIFAT)
+      `ishlangan_foiz`           — YAROQLILARNING qanchasi umuman
+                                   ishlangan (O'TKAZUVCHANLIK)
+
+    Sodda `talabi bor / hamma tender` metrikasi ikkalasini
+    ARALASHTIRADI va "talab yo'q" degan yolg'on xulosaga olib
+    boradi. O'lchandi (2026-08-31): sifat 100.0, o'tkazuvchanlik
+    32.2 — ya'ni past raqam ajratish SIFATI emas, ISHLANMAGANI.
+
+    `navbatda` MAXRAJGA KIRMAYDI: ular hali savol berilmagan
+    tenderlar va ularni "talabsiz" deb sanash noma'lumni
+    salbiy natijaga aylantirardi.
+
+    `hisobga_olinmagan` NOL bo'lishi SHART — nol bo'lmasa
+    tasnifdan tashqarida qolgan tender bor.
+    """
+    cid = company_id_of(request)
+    if not db.scalar("SELECT to_regclass('public.v_requirement_qamrov') IS NOT NULL"):
+        return {"tayyor": False,
+                "sabab": "schema_patch_req_qamrov.sql qo'llanmagan"}
+    umumiy = db.query_one(
+        "SELECT * FROM v_requirement_qamrov WHERE company_id = %(c)s",
+        {"c": cid}) or {}
+    usul = db.query(
+        "SELECT usul, yaroqli, urinildi, topildi, topilmadi, matn_yoq, xato "
+        "  FROM v_requirement_qamrov_usul WHERE company_id = %(c)s "
+        " ORDER BY usul", {"c": cid})
+    return {"tayyor": True, "umumiy": umumiy, "usul": usul,
+            # NAZORAT chaqiruvchiga ochiq beriladi — u jimgina
+            # o'tib ketmasin.
+            "yarashadi": (umumiy.get("hisobga_olinmagan") == 0)}
+
+
 @app.get("/routing/agreement")
 def routing_agreement(request: Request):
     """AI <-> INSON kelishuvi — halol maxraj bilan.
