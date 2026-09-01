@@ -192,6 +192,12 @@ def _namuna(**ozgartir):
         "review_status": "pending_review", "mashina_holat": "ajratilgan",
         "reviewed_by": None, "reviewed_at": None, "review_action": None,
         "corrected_value": None, "previous_value": None,
+        # 11-vazifada (aktor kimligi) QO'SHILGAN. Bu yerga qo'shilmagan
+        # edi va MUSBAT holatlar (`QABUL: approved ...`) shu sababdan
+        # `tender_requirement_inson_ishonch_chk` da yiqilardi.
+        # Yiqilish OFFLINE rejimda ko'rinmasdi — `run_tests.py` bazali
+        # tekshiruvlarni o'tkazib yuboradi.
+        "reviewed_actor_id": None, "reviewed_ishonch": None,
     }
     q.update(ozgartir)
     return q
@@ -202,7 +208,8 @@ INSERT INTO tender_requirement
   (company_id, tender_id, lot_id, source, method, position_no, name, attrs,
    qty, unit, delivery_days, is_mandatory, confidence, raw_snippet,
    file_ref, char_start, char_end, model, review_status, mashina_holat,
-   reviewed_by, reviewed_at, review_action, corrected_value, previous_value)
+   reviewed_by, reviewed_at, review_action, corrected_value, previous_value,
+   reviewed_actor_id, reviewed_ishonch)
 VALUES
   (%(company_id)s, %(tender_id)s, %(lot_id)s, %(source)s, %(method)s,
    %(position_no)s, %(name)s, %(attrs)s::jsonb, %(qty)s, %(unit)s,
@@ -210,7 +217,8 @@ VALUES
    %(file_ref)s, %(char_start)s, %(char_end)s, %(model)s,
    %(review_status)s, %(mashina_holat)s,
    %(reviewed_by)s, %(reviewed_at)s, %(review_action)s,
-   %(corrected_value)s, %(previous_value)s)
+   %(corrected_value)s, %(previous_value)s,
+   %(reviewed_actor_id)s, %(reviewed_ishonch)s)
 RETURNING id
 """
 
@@ -316,15 +324,28 @@ def test_baza_soxtani_rad_etadi(conn, cid, tid) -> None:
           qabul("p", review_status="extracted", method="reyestr",
                 mashina_holat="manba", source="api", confidence=1.00,
                 position_no=202))
+    # `reviewed_ishonch` SHART: 11-vazifada qo'shilgan
+    # (`tender_requirement_inson_ishonch_chk`). "Kim" yetarli emas —
+    # "bu qanchalik ishonchli" ham yozilishi kerak.
     check("QABUL: approved + to'liq inson dalili",
           qabul("q", review_status="approved", reviewed_by=cid,
                 reviewed_at="2026-08-30", review_action="approve",
+                reviewed_ishonch="kompaniya_sessiyasi",
                 position_no=203))
     check("QABUL: corrected + ikkala qiymat",
           qabul("r", review_status="corrected", reviewed_by=cid,
                 reviewed_at="2026-08-30", review_action="correct",
                 corrected_value="24 oy", previous_value="12 oy",
+                reviewed_ishonch="kompaniya_sessiyasi",
                 position_no=204))
+    # SALBIY TOMONI HAM: ishonchsiz tasdiq RAD ETILSIN. Musbat holat
+    # tuzatilganda bu tekshiruv ham qo'shildi — aks holda cheklov
+    # "hech narsani rad etmaydi" holatida ham sinovdan o'tardi.
+    check("RAD: approved + ishonch NULL",
+          urin("s", review_status="approved", reviewed_by=cid,
+               reviewed_at="2026-08-30", review_action="approve",
+               position_no=205),
+          "'kim' yetarli emas — 'qanchalik ishonchli' ham kerak")
 
 
 # =====================================================================
