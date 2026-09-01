@@ -145,6 +145,31 @@ def test_bazaviy_fayl():
     for u, d in b["usullar"].items():
         for m in ("recall_at_k", "precision_at_k", "mrr", "ndcg_at_k"):
             check(f"{u}: '{m}' hisoblangan", d.get(m) is not None, str(d.get(m)))
+    # T-2: QAYSI QATLAM O'LCHANMAGANI ANIQ YOZILGAN bo'lsin.
+    #
+    # Reyestrda T-2 "RAG qatlamlari O'LCHANMAGAN" deb yozilgan edi
+    # va bu ANIQ EMAS: qidiruv va iqtibos O'LCHANADI (modelsiz),
+    # faqat javob/tool/gallyutsinatsiya o'lchanmaydi. Bu farq
+    # yo'qolsa, "hech narsa o'lchanmagan" degan yolg'on xulosa
+    # qaytardi.
+    matn = " ".join(b["cheklovlar"])
+    check("javob/tool/gallyutsinatsiya O'LCHANMAGANI yozilgan",
+          "O'LCHANMADI" in matn and "model chaqiruvi" in matn,
+          matn[:120])
+    # NAMUNA HAJMI OSHKOR: 7 javobli holatdagi 0.705 recall ni
+    # statistik da'vo deb o'qib bo'lmaydi.
+    check("namuna hajmi oshkor qilingan",
+          isinstance(b.get("javobli_holat"), int) and b["javobli_holat"] > 0,
+          str(b.get("javobli_holat")))
+    check("namuna KICHIK ekani yozilgan", "NAMUNA KICHIK" in matn)
+    # O'LCHANGAN qatlamlar HAM aniq: "hammasi o'lchanmagan" degan
+    # teskari yolg'on ham chiqmasin.
+    check("qidiruv metrikalari HAQIQATAN bor",
+          all(m in b["usullar"]["gibrid"]
+              for m in ("recall_at_k", "precision_at_k", "mrr", "ndcg_at_k")),
+          str(sorted(b["usullar"]["gibrid"].keys()))[:100])
+    check("iqtibos o'lchovi bor", "citation_hit_rate" in b.get("iqtibos", {}))
+
     check("CHEKLOVLAR ro'yxati BO'SH EMAS", len(b["cheklovlar"]) >= 3,
           "past metrika va cheklovlar YASHIRILMAYDI")
     # O'LCHANMAGAN QATLAMLAR ANIQ AYTILGAN.
