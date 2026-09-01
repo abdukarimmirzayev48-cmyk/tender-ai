@@ -11,12 +11,12 @@ narsalarni bir joyga yig'adi. Tuzatilganlari kirmagan.
 |---|---|---|
 | Bloker | 2 | 1 (B-2) |
 | Ma'lumot butunligi | 0 | 3 (M-1, M-2, M-3) |
-| Qamrov qarzi | 2 | 1 (Q-1) |
-| Operatsiya | 5 | — |
+| Qamrov qarzi | 1 | 2 (Q-1, Q-2) |
+| Operatsiya | 4 | 1 (O-4) |
 | Sinov jarayoni | 0 | 1 (S-1) |
 | Tugallanmagan imkoniyat | 2 | — |
 | Kichik | 5 | — |
-| **Jami** | **16** | **6** |
+| **Jami** | **14** | **8** |
 
 **Oxirgi yangilanish: 2026-09-01.** Yopilganlar §9 da.
 
@@ -147,7 +147,10 @@ Ishlangan tenderlarning **100%** ida talab topilgan — ya'ni
 `reyestr` yo'li bepul va modelsiz, ya'ni yurgizish arzon.
 **Manba:** 18-vazifa.
 
-### Q-2. Embedding qamrovi 55.8%
+### ~~Q-2. Embedding qamrovi 55.8%~~ — YOPILDI (davom etmoqda)
+
+> Arzon yo'l modelga bog'lanib qolgan edi (§9.8).
+> Quyidagi tavsif TARIXIY.
 
 ```
 doc_chunk jami        188 561
@@ -188,7 +191,10 @@ Tashqi nusxa yo'q. Disk yo'qolsa zaxira ham yo'qoladi.
 `systemd` xizmatni qayta ko'taradi, lekin **buni hech kim
 bilmaydi**. `/ready` bor, uni so'raydigan narsa yo'q.
 
-### O-4. `pip-audit` yurgizilmagan
+### ~~O-4. `pip-audit` yurgizilmagan~~ — YOPILDI
+
+> 8 zaiflik topildi va tuzatildi (§9.9).
+> Quyidagi tavsif TARIXIY.
 
 Bog'liqliklardagi ma'lum zaifliklar **tekshirilmagan**.
 12-vazifada aytilgan, bajarilmagan.
@@ -417,3 +423,54 @@ sababi bilan; `v_audit_jurnal_haqiqiy` esa faqat haqiqiy amallarni
 beradi (3 → 1).
 
 Takrorlanmaydi: `huquq_sinov` amali **kodda hech qayerda yo'q**.
+
+### 9.8 Q-2 — xeshdan ommaviy nusxalash (`48df49f`)
+
+Navbatdagi **81 081** bo'lakning **52% i (42 325)** allaqachon
+vektorlangan matnning **nusxasi** edi. Nusxalash mantig'i bor edi,
+lekin **partiya ichida** — ya'ni arzon ish modelning 2.3 bo'lak/s
+tezligiga bog'lanib turardi.
+
+| Yo'l | Ish | Vaqt |
+|---|---|---|
+| partiya | 2 000 bo'lak | 5.4 daqiqa |
+| **ommaviy SQL** | **42 052 bo'lak** | **3.4 daqiqa** |
+
+~33 marta tez. Quvur endi model navbatidan **oldin** `--xeshdan`
+ni yurgizadi.
+
+| | Boshlanish | Hozir |
+|---|---|---|
+| umumiy | 57.3% | **84.7%** |
+| OCHIQ tenderlar | 33.1% | **77.2%** |
+| navbat | 81 081 | 29 131 |
+
+Qolgani **modelni talab qiladi** (nusxa imkoniyati tugadi) va
+fonda yurmoqda. `--qamrov` endi operatsion (ochiq) va tarixiy
+qamrovni **alohida** beradi — Q-1 dagi ayni saboq.
+
+### 9.9 O-4 — bog'liqliklar auditi (`0508c4b`)
+
+`pip-audit` **91 ta o'rnatilgan paket** ustida yurgizildi
+(e'lon qilingan 12 ta emas — zaiflik ko'pincha tranzitiv
+bog'liqlikda).
+
+```
+Found 8 known vulnerabilities in 2 packages
+  pypdf 6.14.2   PYSEC-2026-3655, 3656   -> 6.15.0   YUQORI
+  pip   25.3     6 ta zaiflik             -> 26.2     PAST
+```
+
+**`pypdf` bizda to'g'ridan-to'g'ri yetib boriladi:** ikkala
+zaiflik ham maxsus yasalgan PDF matn ajratilganda xotira va
+protsessorni tugatadi, `etl_doc_text.py` esa tashqi manbadan
+yuklangan PDF larni aynan shunday ajratadi — tender e'lon qila
+oladigan har kim ETL ni to'xtatishi mumkin edi.
+
+Tuzatildi (pypdf → 6.16.2, pip → 26.2.1); qayta audit
+**`No known vulnerabilities found`**.
+
+**Cheklov ochiq yozildi:** sinov `pip-audit` ni yurgizmaydi
+(tarmoq kerak) — u faqat **topilgan zaiflik qaytmasligini**
+qo'riqlaydi. Yangi zaiflikni faqat haqiqiy audit ko'rsatadi va
+uni muntazam yurgizadigan jadval **yo'q** (B-1).
