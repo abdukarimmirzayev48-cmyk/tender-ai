@@ -347,6 +347,41 @@ sudo -u tenderai /opt/tenderai/production/current/.venv/bin/python \
 
 ---
 
+## 12b. TASHQI NUSXA — bitta disk yetarli emas (O-2)
+
+`backup.sh` zaxirani **mahalliy** diskka yozadi. Disk yo'qolsa
+(yoki shifrlovchi dastur tegsa) **zaxira ham u bilan ketadi**.
+
+`BACKUP_REMOTE_CMD` — **buyruq shabloni**, manzil emas:
+
+```bash
+BACKUP_REMOTE_CMD='rclone copy {fayl} uzoq:tenderai/'
+BACKUP_REMOTE_CMD='aws s3 cp {fayl} s3://chelak/tenderai/'
+BACKUP_REMOTE_CMD='rsync -a {fayl} zaxira@host:/srv/tenderai/'
+```
+
+**Nega shablon, manzil emas:** nusxalash usuli har joyda boshqacha.
+Manzilga qarab usulni taxmin qilish **noto'g'ri buyruqni jimgina
+yurgizardi**.
+
+| Holat | Xulq |
+|---|---|
+| Sozlanmagan | **ogohlantirish** yoziladi, zaxira davom etadi |
+| Sozlangan, muvaffaqiyatli | dump **va** `.sha256` yuboriladi |
+| Sozlangan, **yiqildi** | skript **exit 1** — "zaxira bor" yolg'on xulosa bo'lmasin |
+
+**Tartib muhim:** tashqi nusxa **tozalashdan oldin**. Aks holda
+mahalliy fayl o'chirilib, uzoqqa hech narsa ketmagan bo'lishi
+mumkin edi.
+
+Uchala yo'l ham **mashq qilib ko'rildi** (2026-09-01).
+
+> **Halol cheklov:** tashqi nusxaning tiklanishi hali sinalmagan.
+> `restore-test.sh` **mahalliy** fayldan tiklaydi; uzoqdagi nusxa
+> o'qilishini alohida tekshirish kerak.
+
+---
+
 ## 13. MASHQ — skriptlar HAQIQATAN yurgizildi (B-1)
 
 **O'lchov: 2026-09-01.** Joylashtirish skriptlari shu paytgacha

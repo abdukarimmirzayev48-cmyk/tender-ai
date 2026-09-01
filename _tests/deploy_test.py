@@ -58,6 +58,10 @@ def oqi(*p):
     return io.open(os.path.join(D, *p), encoding="utf-8").read()
 
 
+def _oqi_ildiz(yol):
+    return io.open(os.path.join(ROOT, yol), encoding="utf-8").read()
+
+
 # =====================================================================
 def test_tuzilma():
     bolim("1. Fayllar joyida")
@@ -367,6 +371,56 @@ def test_url_qorovuli():
         importlib.reload(n2)
 
 
+def test_tashqi_nusxa():
+    """Zaxiraning TASHQI nusxasi (O-2)."""
+    bolim("14. TASHQI NUSXA — bitta disk yetarli emas")
+    src = oqi("bin", "backup.sh")
+
+    check("`BACKUP_REMOTE_CMD` qo'llab-quvvatlanadi",
+          "BACKUP_REMOTE_CMD" in src)
+    check("`{fayl}` o'rniga qo'yiladi", "{fayl}" in src)
+    # `.sha256` HAM ketishi kerak: butunlikni UZOQDA ham tekshirish
+    # imkoni bo'lmasa, tashqi nusxa "bor" bo'ladi-yu "ishonchli"
+    # bo'lmaydi.
+    check("`.sha256` ham yuboriladi", '"${FAYL}.sha256"' in src)
+
+    # SOZLANMAGANI JIM QOLMASIN.
+    check("sozlanmaganda OGOHLANTIRISH yoziladi",
+          "BACKUP_REMOTE_CMD sozlanmagan" in src)
+    # YIQILSA TO'XTASIN — "zaxira bor" yolg'on xulosa bo'lmasin.
+    blok = src[src.index("if [ -n \"${BACKUP_REMOTE_CMD"):]
+    blok = blok[:blok.index("# --- ESKILARINI")]
+    check("nusxa yiqilsa skript TO'XTAYDI", "exit 1" in blok, blok[-120:])
+
+    # TARTIB: tashqi nusxa TOZALASHDAN OLDIN. Aks holda mahalliy
+    # fayl o'chirilib, uzoqqa hech narsa ketmagan bo'lishi mumkin.
+    check("tashqi nusxa TOZALASHDAN OLDIN",
+          src.index("BACKUP_REMOTE_CMD") < src.index("ESKILARINI TOZALASH"))
+
+    for muhit in ("production", "staging"):
+        e = oqi("env", f"{muhit}.env.example")
+        check(f"{muhit}: `BACKUP_REMOTE_CMD` namunada bor",
+              "BACKUP_REMOTE_CMD" in e)
+        # Namunada QIYMAT BO'LMASIN: noto'g'ri manzilga jimgina
+        # yuborishdan ko'ra sozlanmagani yaxshi.
+        import re as _re
+        m = _re.search(r"^BACKUP_REMOTE_CMD=(.*)$", e, _re.M)
+        check(f"{muhit}: namunada qiymat BO'SH", bool(m) and not m.group(1).strip(),
+              m.group(1) if m else "topilmadi")
+
+    # HALOL CHEKLOV: tashqi nusxaning TIKLANISHI sinalmagan.
+    rt = oqi("bin", "restore-test.sh")
+    check("tiklash mashqi MAHALLIY fayldan (cheklov yozilgan)",
+          "BACKUP_REMOTE_CMD" not in rt,
+          "uzoqdagi nusxa tiklanishi hali SINALMAGAN")
+    # BO'SHLIQ NORMALLASHTIRILADI: hujjatda ibora qatorlarga
+    # bo'linib ketgan edi va tekshiruv soxta yiqilardi.
+    d = " ".join(_oqi_ildiz("docs/deploy.md").split()).lower()
+    check("cheklov hujjatda yozilgan",
+          "tiklanishi hali sinalmagan" in d,
+          "uzoqdagi nusxa tiklanishi sinalmagani YOZILISHI shart")
+
+
 def test_muhit_fayli_shellda():
     """Muhit fayli SHELL bilan o'qilganda BUZILMASIN (B-1)."""
     bolim("13. MUHIT FAYLI — ikki parser, bitta fayl")
@@ -497,6 +551,7 @@ def main():
     test_jurnal()
     test_url_qorovuli()
     test_muhit_fayli_shellda()
+    test_tashqi_nusxa()
     test_hujjat()
 
     otdi = sum(1 for _n, ok, _d in _natija if ok)

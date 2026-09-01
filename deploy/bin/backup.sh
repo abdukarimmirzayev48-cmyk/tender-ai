@@ -82,7 +82,44 @@ fi
 sha256sum "$FAYL" > "${FAYL}.sha256"
 log "sha256 yozildi"
 
+# --- TASHQI NUSXA -----------------------------------------------------------
+# ZAXIRA BITTA DISKDA — ZAXIRA EMAS. Disk yo'qolsa (yoki shifrlovchi
+# dastur tegsa) zaxira ham u bilan ketadi.
+#
+# NEGA BUYRUQ SHABLONI, "manzil" EMAS: nusxalash usuli har joyda
+# boshqacha (rsync, rclone, aws s3, scp, restic). Manzilga qarab
+# usulni TAXMIN QILISH noto'g'ri buyruqni jimgina yurgizardi.
+# Operator NIMA qilishni ANIQ yozadi.
+#
+#   BACKUP_REMOTE_CMD='rclone copy {fayl} uzoq:tenderai/'
+#   BACKUP_REMOTE_CMD='aws s3 cp {fayl} s3://chelak/tenderai/'
+#   BACKUP_REMOTE_CMD='rsync -a {fayl} zaxira@host:/srv/tenderai/'
+#
+# `{fayl}` dump yo'liga almashadi. `.sha256` ham SHU buyruq bilan
+# yuboriladi — butunlikni uzoqda ham tekshirish uchun.
+#
+# SOZLANMAGANI JIM QOLMAYDI: ogohlantirish YOZILADI. "Zaxira bor"
+# degan xulosa "zaxira XAVFSIZ" degani emas.
+if [ -n "${BACKUP_REMOTE_CMD:-}" ]; then
+    for f in "$FAYL" "${FAYL}.sha256"; do
+        BUYRUQ="${BACKUP_REMOTE_CMD//\{fayl\}/$f}"
+        log "tashqi nusxa: $BUYRUQ"
+        # XATO YUTILMAYDI. Tashqi nusxa yiqilsa — zaxira HALI HAM
+        # bitta diskda, ya'ni himoya yo'q. Buni bilib turish shart.
+        if ! eval "$BUYRUQ"; then
+            log "XATO: tashqi nusxa YIQILDI — zaxira faqat mahalliy diskda"
+            exit 1
+        fi
+    done
+    log "tashqi nusxa OK"
+else
+    log "OGOH: BACKUP_REMOTE_CMD sozlanmagan — zaxira FAQAT mahalliy diskda"
+fi
+
 # --- ESKILARINI TOZALASH ----------------------------------------------------
+# TARTIB MUHIM: tashqi nusxa YUQORIDA, tozalash PASTDA. Aks holda
+# mahalliy fayl o'chirilib, uzoqqa esa hech narsa ketmagan bo'lishi
+# mumkin edi.
 # Faqat SHU muhitning fayllari va faqat kutilgan naqsh boyicha.
 find "$KATALOG" -maxdepth 1 -name "tenderai-${MUHIT}-*.dump*" \
      -mtime "+${KUN}" -print -delete | while read -r f; do
