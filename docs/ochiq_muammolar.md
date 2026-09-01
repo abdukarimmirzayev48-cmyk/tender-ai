@@ -10,13 +10,13 @@ narsalarni bir joyga yig'adi. Tuzatilganlari kirmagan.
 | Daraja | Ochiq | Yopilgan |
 |---|---|---|
 | Bloker | 2 | 1 (B-2) |
-| Ma'lumot butunligi | 2 | 1 (M-1) |
-| Qamrov qarzi | 3 | — |
+| Ma'lumot butunligi | 0 | 3 (M-1, M-2, M-3) |
+| Qamrov qarzi | 2 | 1 (Q-1) |
 | Operatsiya | 5 | — |
 | Sinov jarayoni | 0 | 1 (S-1) |
 | Tugallanmagan imkoniyat | 2 | — |
 | Kichik | 5 | — |
-| **Jami** | **19** | **3** |
+| **Jami** | **16** | **6** |
 
 **Oxirgi yangilanish: 2026-09-01.** Yopilganlar §9 da.
 
@@ -93,7 +93,10 @@ Bu loyihaning takrorlanuvchi nuqson sinfi: **dalilsiz yorliq**.
 `doc_qamrov_test` buni ushlaydi (79/80) — **lekin faqat `--online`
 rejimda** (S-1 ga qarang).
 
-### M-2. 30 ta inson qarorining AKTORI noma'lum
+### ~~M-2. 30 ta inson qarorining AKTORI noma'lum~~ — YOPILDI, DA'VO NOTO'G'RI EDI
+
+> Ular noma'lum emas, `kuzatuvdan_oldin` deb ANIQ belgilangan (§9.6).
+> Quyidagi tavsif TARIXIY.
 
 ```
 tender_routing, inson_qaror IS NOT NULL   : 30
@@ -107,7 +110,10 @@ aktor kuzatuvi (11-vazifa) joriy etilishidan OLDIN yozilgan.
 **Ta'siri:** audit izi to'liq emas; "kim tasdiqladi" savoliga
 javob yo'q. Orqaga qarab to'ldirib bo'lmaydi — ma'lumot yo'q.
 
-### M-3. `audit_jurnal` da sinov yozuvi qolgan
+### ~~M-3. `audit_jurnal` da sinov yozuvi qolgan~~ — YOPILDI
+
+> Tizimning o'z yo'li bilan tuzatildi (§9.7).
+> Quyidagi tavsif TARIXIY.
 
 `id=37`, `amal='huquq_sinov'`, `company_id=2`. 12-vazifadagi
 huquq tekshiruvi paytida yozilgan.
@@ -122,7 +128,10 @@ kutilmoqda. Tavsiya — qoldirish (jami 7 ta yozuvdan biri).
 
 ## 3. QAMROV QARZI
 
-### Q-1. 2365 tender talab ajratishdan o'tmagan (65.6%)
+### ~~Q-1. 2365 tender talab ajratishdan o'tmagan (65.6%)~~ — YOPILDI
+
+> Ochiq tenderlar bo'yicha qamrov **100%** (§9.5).
+> Quyidagi tavsif TARIXIY.
 
 ```
 tender                    3605
@@ -362,3 +371,49 @@ ko'rsatmagan** — chunki u yurmasdi.
 yurgizilganda 179/179 o'tdi. Sabab aniqlanmagan — tashqi
 bog'liqlikdagi beqarorlik. Takrorlansa, endi manba javobi xato
 matnida bo'ladi (§9.2).
+
+### 9.5 Q-1 — operatsion qamrov 100% (`2fcb6fc`)
+
+`reyestr` yo'li navbatdagi **627** ochiq tender uchun yurgizildi:
+**4 sekund, 1 199 talab, 0 xato, bepul**. Natija kutilgandek
+chiqmadi — `ishlangan_foiz` atigi 32.2 → 34.5.
+
+**Sabab o'lchandi:** qolgan **2 365 tenderning hammasi YOPIQ**
+(expired 2094, close 164, cancel 81, qolgani 26; **ochiq 0**).
+Ya'ni "65.6% ishlanmagan" operatsion bo'shliq emas, **tarixiy
+yozuvlar** edi.
+
+**Ildiz sabab:** `run_etl.py` faqat `--method naqsh` ni yurgizardi.
+`reyestr` — bepul, hujjatsiz ishlaydigan, 1157/1157 natija
+beradigan yo'l — quvurda **umuman yo'q** edi. Endi ikkalasi ham
+yuradi, `reyestr` birinchi.
+
+Migratsiya 0065: `ochiq_ishlangan_foiz` qo'shildi (**100.0**),
+eski ustunlar o'zgarmadi.
+
+### 9.6 M-2 — aktor izchilligi bazada (`aac3097`)
+
+**Da'vo noto'g'ri edi.** 30 qator `qaror_ishonch='kuzatuvdan_oldin'`
+deb **aniq belgilangan** — 11-vazifada ataylab qo'yilgan yorliq.
+Tizim noma'lumni noma'lum deb saqlagan.
+
+**Asl bo'shliq:** `ishonch` ↔ `actor_id` izchillik qoidasi
+`audit_jurnal` da CHECK edi, **qaror jadvallarida faqat kodda**.
+Migratsiya 0066 uni uchala jadvalga ham qo'ydi. Buzuq qator 0 edi
+va shunday qoldi — endi baza ham to'xtatadi.
+
+### 9.7 M-3 — audit artefakti belgilandi (`e864e7e`)
+
+`company_id=2` da 2 qator: biri **haqiqiy** (id=62, haqiqiy tender,
+IP, brauzer), biri **sinov artefakti** (id=37). Qolgan 16 qator
+`company_id=200` — sinov ijarachisi, CASCADE bilan ketadi.
+
+Triggerning **o'z xato matni** yo'lni ko'rsatdi: *"Tuzatish kerak
+bo'lsa YANGI qator qo'shing (`amal='tuzatish'`)"*. Artefakt
+o'chirilmadi — ustiga tuzatish yozuvi qo'shildi (storno naqshi).
+
+`tarix()` qatorni **ko'rsatadi**, lekin `tuzatilgan` bayrog'i va
+sababi bilan; `v_audit_jurnal_haqiqiy` esa faqat haqiqiy amallarni
+beradi (3 → 1).
+
+Takrorlanmaydi: `huquq_sinov` amali **kodda hech qayerda yo'q**.
