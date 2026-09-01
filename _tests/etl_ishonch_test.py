@@ -140,6 +140,40 @@ def test_tasnif() -> None:
         e.response = SoxtaJavob(kod)
         check(f"HTTP {kod} -> QAYTA URINILMAYDI", not ish.tasnifla(e).qayta_urinsa)
 
+    # MANBA JAVOBI XATO MATNIDA SAQLANADI (B-2, 2026-09-01).
+    #
+    # O'LCHANGAN: manba `ref_selection_public` uchun HTTP 400
+    # qaytardi va butun `etl_coverage_test` yiqildi. Xato matni
+    # FAQAT `HTTP 400 — doimiy` edi — SABAB haqida hech narsa yo'q.
+    # Keyingi urinishda o'sha chaqiruv MUAMMOSIZ ishladi (149 ta
+    # yozuv), ya'ni xato O'TKINCHI edi. Lekin buni isbotlash uchun
+    # ham, sababni topish uchun ham DALIL QOLMAGANDI.
+    e = requests.exceptions.HTTPError()
+    e.response = SoxtaJavob(
+        400, '{"error":{"code":-32602,"message":"Invalid params"}}')
+    xabar = str(ish.tasnifla(e))
+    check("doimiy xatoda manba javobi SAQLANADI",
+          "Invalid params" in xabar, xabar)
+    e2 = requests.exceptions.HTTPError()
+    e2.response = SoxtaJavob(503, "<html>\n  <h1>502 Bad Gateway</h1>\n</html>")
+    xabar2 = str(ish.tasnifla(e2))
+    check("qayta uriniladigan xatoda ham javob saqlanadi",
+          "Bad Gateway" in xabar2, xabar2)
+    check("javob izi BITTA qatorda (jurnal buzilmasin)",
+          "\n" not in xabar2, repr(xabar2))
+    # Manba xato paytida BUTUN HTML sahifa qaytarishi kuzatilgan —
+    # u jurnalni bosib ketmasin.
+    e3 = requests.exceptions.HTTPError()
+    e3.response = SoxtaJavob(400, "x" * 5000)
+    check("javob izi QISQARTIRILADI",
+          len(str(ish.tasnifla(e3))) < ish.JAVOB_IZI_MAX + 80,
+          f"{len(str(ish.tasnifla(e3)))} belgi")
+    # Tanasiz javob xato matnini BUZMASIN.
+    e4 = requests.exceptions.HTTPError()
+    e4.response = SoxtaJavob(404, "")
+    check("bo'sh tanada ortiqcha ajratgich yo'q",
+          "|" not in str(ish.tasnifla(e4)), str(ish.tasnifla(e4)))
+
     # Notanish xato DOIMIY deb qaraladi (oq ro'yxat siyosati).
     check("notanish istisno -> QAYTA URINILMAYDI",
           not ish.tasnifla(KeyError("maydon")).qayta_urinsa,

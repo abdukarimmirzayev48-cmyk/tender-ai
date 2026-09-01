@@ -178,6 +178,38 @@ def _retry_after(resp: Any) -> Optional[float]:
     return max(0.0, min(n, 300.0))
 
 
+#: Javob tanasidan jurnalga olinadigan eng ko'p belgi.
+#: Qisqa — chunki manba xato paytida butun HTML sahifa qaytarishi
+#: kuzatilgan va u jurnalni bosib ketardi.
+JAVOB_IZI_MAX = 220
+
+
+def _javob_izi(resp: Any) -> str:
+    """Xato javobining TANASI — qisqartirilgan, bitta qatorda.
+
+    NEGA KERAK (o'lchangan 2026-09-01). Manba `ref_selection_public`
+    uchun HTTP 400 qaytardi va butun `etl_coverage_test` yiqildi.
+    Xato matni FAQAT `HTTP 400 — doimiy` edi: SABAB haqida hech
+    narsa yo'q. Keyingi urinishda o'sha chaqiruv MUAMMOSIZ ishladi,
+    ya'ni xato O'TKINCHI edi — lekin buni ISBOTLASH uchun ham,
+    sababni topish uchun ham dalil qolmagandi.
+
+    Endi manba nima deganini KO'RAMIZ: "rate limit", "invalid ref"
+    va WAF sahifasi bir-biridan farq qiladi va ular BOSHQA javob
+    talab qiladi.
+    """
+    if resp is None:
+        return ""
+    try:
+        matn = (resp.text or "").strip()
+    except Exception:                                    # noqa: BLE001
+        return ""
+    if not matn:
+        return ""
+    matn = " ".join(matn.split())[:JAVOB_IZI_MAX]
+    return f" | manba: {matn}"
+
+
 def tasnifla(exc: BaseException) -> ManbaXato:
     """Istisnoni `ManbaXato` ga aylantiradi: qayta urinsa bo'ladimi?
 
@@ -200,10 +232,12 @@ def tasnifla(exc: BaseException) -> ManbaXato:
         if isinstance(exc, requests.exceptions.HTTPError):
             resp = getattr(exc, "response", None)
             kod = getattr(resp, "status_code", None)
+            tana = _javob_izi(resp)
             if kod in QAYTA_URINILADIGAN_KODLAR:
-                return ManbaXato(f"HTTP {kod}", qayta_urinsa=True,
+                return ManbaXato(f"HTTP {kod}{tana}", qayta_urinsa=True,
                                  kutish=_retry_after(resp), kod=kod)
-            return ManbaXato(f"HTTP {kod} — doimiy", qayta_urinsa=False, kod=kod)
+            return ManbaXato(f"HTTP {kod} — doimiy{tana}",
+                             qayta_urinsa=False, kod=kod)
 
     # Buzuq JSON. Manba xato paytida HTML sahifa qaytarishi kuzatilgan
     # (proksi/balanser), shuning uchun bu O'TKINCHI deb qaraladi —

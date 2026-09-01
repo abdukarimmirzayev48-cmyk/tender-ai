@@ -162,24 +162,43 @@ def test_id_collisions(conn, tarmoqsiz: bool) -> None:
           f"xt=[{xt_lo}..{xt_hi}] uzex=[{uz_lo}..{uz_hi}]")
 
     if tarmoqsiz:
-        print("        (--offline: manba darajasidagi tekshiruv o'tkazib yuborildi)")
+        print("        (--tarmoqsiz: manba darajasidagi tekshiruv "
+              "o'tkazib yuborildi)")
         return
 
-    # Manba darajasi: xt-xarid ikki reyestri
-    t_ids = {r["id"] for r in etl_tenders.fetch_all_tenders(["open"], "ref_tender_public")}
-    s_ids = {r["id"] for r in etl_tenders.fetch_all_tenders(["open"], "ref_selection_public")}
-    inter = t_ids & s_ids
-    check("xt-xarid: ref_tender_public vs ref_selection_public kesishmaydi",
-          not inter,
-          f"tender={len(t_ids)}, selection={len(s_ids)}, umumiy={len(inter)}")
+    # TASHQI UZILISH BUTUN TO'PLAMNI YIQITMASIN (B-2, 2026-09-01).
+    #
+    # O'LCHANGAN: manba `ref_selection_public` uchun HTTP 400
+    # qaytardi va istisno `main()` gacha ko'tarilib, QOLGAN 50 dan
+    # ortiq tekshiruv UMUMAN bajarilmadi — to'plam xulosa qatorisiz
+    # o'ldi. Bitta tashqi uzilish butun natijani YO'Q qildi.
+    #
+    # Endi u YIQILGAN TEKSHIRUV bo'lib qoladi: manba nosozligi
+    # KO'RINADI (yashirilmaydi), lekin qolgan tekshiruvlar yuradi.
+    try:
+        t_ids = {r["id"] for r in
+                 etl_tenders.fetch_all_tenders(["open"], "ref_tender_public")}
+        s_ids = {r["id"] for r in
+                 etl_tenders.fetch_all_tenders(["open"], "ref_selection_public")}
+        inter = t_ids & s_ids
+        check("xt-xarid: ref_tender_public vs ref_selection_public kesishmaydi",
+              not inter,
+              f"tender={len(t_ids)}, selection={len(s_ids)}, umumiy={len(inter)}")
+    except Exception as e:                                # noqa: BLE001
+        check("xt-xarid: manba reyestrlari o'qildi", False,
+              f"{type(e).__name__}: {str(e)[:150]}")
 
     # Manba darajasi: uzex ikki TypeId (faqat ro'yxat, GetTrade chaqirilmaydi)
-    u2 = {int(r["id"]) for r in etl_uzex.fetch_list(2)}
-    u1 = {int(r["id"]) for r in etl_uzex.fetch_list(1)}
-    inter_u = u1 & u2
-    check("uzex: TypeId=1 vs TypeId=2 kesishmaydi",
-          not inter_u,
-          f"TypeId2={len(u2)}, TypeId1={len(u1)}, umumiy={len(inter_u)}")
+    try:
+        u2 = {int(r["id"]) for r in etl_uzex.fetch_list(2)}
+        u1 = {int(r["id"]) for r in etl_uzex.fetch_list(1)}
+        inter_u = u1 & u2
+        check("uzex: TypeId=1 vs TypeId=2 kesishmaydi",
+              not inter_u,
+              f"TypeId2={len(u2)}, TypeId1={len(u1)}, umumiy={len(inter_u)}")
+    except Exception as e:                                # noqa: BLE001
+        check("uzex: manba ro'yxatlari o'qildi", False,
+              f"{type(e).__name__}: {str(e)[:150]}")
 
 
 # ---------------------------------------------------------------------------
