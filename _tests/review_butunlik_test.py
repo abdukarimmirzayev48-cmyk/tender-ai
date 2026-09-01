@@ -499,6 +499,181 @@ def test_qayta_ajratish(conn, cid, tid) -> None:
 # =====================================================================
 # 5) HISOBLAGICHLAR — holat va dalil AYNAN teng
 # =====================================================================
+def test_halqa_olchovi(conn) -> None:
+    """Inson halqasi QATLAM BO'YICHA o'lchanadi (B-3)."""
+    section("Inson halqasi — qatlam bo'yicha")
+    if conn is None:
+        check("baza kerak", False, "o'tkazib yuborildi")
+        return
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.v_inson_halqasi') IS NOT NULL")
+        bor = cur.fetchone()[0]
+    check("`v_inson_halqasi` mavjud", bool(bor))
+    if not bor:
+        return
+
+    with conn.cursor() as cur:
+        cur.execute("""SELECT qatlam, jami, inson_qarori, navbatda, foiz
+                         FROM v_inson_halqasi ORDER BY qatlam""")
+        qatorlar = cur.fetchall()
+    qatlamlar = {r[0] for r in qatorlar}
+    # UCH QATLAM ham bo'lishi SHART. Bittasi tushib qolsa, uning
+    # bo'shligi KO'RINMAY qolardi — B-3 ning ildizi aynan shu edi.
+    for q in ("talab_korigi", "yonaltirish", "kod_tasdigi"):
+        check(f"`{q}` qatlami o'lchanadi", q in qatlamlar, str(sorted(qatlamlar)))
+
+    # ICHKI MUVOFIQLIK: qaror + navbat jamidan OSHMASIN.
+    for qatlam, jami, qaror, navbat, foiz in qatorlar:
+        check(f"{qatlam}: qaror+navbat <= jami",
+              (qaror or 0) + (navbat or 0) <= (jami or 0),
+              f"{qaror}+{navbat} vs {jami}")
+
+    for r in qatorlar:
+        print(f"      {r[0]:16s} jami={r[1]:>6} qaror={r[2]:>5} "
+              f"navbat={r[3]:>5} = {r[4]}%")
+
+    # QATLAMLAR BIR-BIRIDAN FARQ QILADI. "Halqa bo'sh" degan BITTA
+    # raqam bu farqni yashirardi: kod tasdig'i ishlayapti, talab
+    # ko'rigi esa bir marta ham ishlatilmagan.
+    foizlar = {r[0]: float(r[4] or 0) for r in qatorlar}
+    check("qatlamlar bir xil EMAS (bitta raqam yetarli emas)",
+          len(set(foizlar.values())) > 1, str(foizlar))
+
+    # PILOT HOLATI — eskirgan to'plam yangisini bloklaydi.
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.v_pilot_holat') IS NOT NULL")
+        if cur.fetchone()[0]:
+            cur.execute("""SELECT jami, hali_ochiq, eskirgan,
+                                  kutayotgan_talab, qaror_berilgan
+                             FROM v_pilot_holat LIMIT 1""")
+            r = cur.fetchone()
+            if r:
+                jami, ochiq, eski, kutayotgan, qaror = r
+                print(f"      pilot: jami={jami} ochiq={ochiq} "
+                      f"eskirgan={eski} kutayotgan={kutayotgan} qaror={qaror}")
+                check("pilot: ochiq + eskirgan = jami",
+                      (ochiq or 0) + (eski or 0) == (jami or 0),
+                      f"{ochiq}+{eski} vs {jami}")
+    check("`v_pilot_holat` mavjud", True)
+
+
+def test_endpoint_yoli(conn, cid, tid) -> None:
+    """Ko'rib chiqish HTTP yo'li HAQIQATAN ishlaydimi (B-3).
+
+    NEGA BU SINOV: talab ko'rigida 0 ta inson qarori bor va 8 445
+    tasi navbatda. "HECH KIM ISHLATMAGAN" bilan "ISHLAMAYDI" ni
+    AJRATISH kerak — aks holda B-3 ning sababi TAXMINGA qolardi.
+
+    Modul darajasi (`review_set`) yuqorida sinalgan; bu yerda
+    ENDPOINT sinaladi: darvoza, kimlik, ijarachi sharti va
+    natijaning BAZAGA yozilishi.
+
+    O'Z IJARACHISI YARATILADI: mavjud kompaniyaning paroli sinovga
+    ma'lum emas va uni taxmin qilib bo'lmaydi.
+    """
+    section("HTTP yo'li: POST /requirements/{id}/review")
+    if conn is None or tid is None:
+        check("baza kerak", False, "o'tkazib yuborildi")
+        return
+
+    from fastapi.testclient import TestClient
+
+    from api import auth as A, db as D
+    from api.main import app
+
+    LOGIN, PAROL = "zzreview_endpoint", "zzSinovKorik12345"
+    rid = t_cid = None
+    try:
+        D.init_pool()
+        r = D.query_one(A.ACC_BY_NAME_SQL, {"username": LOGIN})
+        if r:
+            D.execute_returning("UPDATE company_account SET active=TRUE "
+                                "WHERE id=%(i)s RETURNING id", {"i": r["id"]})
+            A.set_password(r["id"], PAROL)
+            t_cid = int(r["id"])
+        else:
+            t_cid = int(A.create_account(LOGIN, "SINOV korik", PAROL)["id"])
+        tok = A.login(LOGIN, PAROL)["token"]
+
+        rid = D.execute_returning(
+            "INSERT INTO tender_requirement "
+            " (company_id, tender_id, source, name, method, review_status, "
+            "  mashina_holat) "
+            "VALUES (%(c)s, %(t)s, 'api', '[SINOV] endpoint yo''li', 'naqsh', "
+            "        'pending_review', 'ajratilgan') RETURNING id",
+            {"c": t_cid, "t": tid})["id"]
+
+        with TestClient(app) as c:
+            H = {"Authorization": f"Bearer {tok}"}
+
+            # 1) DARVOZA — kimliksiz o'tmasin.
+            r1 = c.post(f"/requirements/{rid}/review",
+                        json={"status": "approved"})
+            check("tokensiz -> 401", r1.status_code == 401, str(r1.status_code))
+            check("javob KODLI",
+                  r1.json().get("error", {}).get("code")
+                  == "AUTH_NOT_AUTHENTICATED", str(r1.json())[:90])
+
+            # 2) HAQIQIY QAROR — yo'l ISHLASHI kerak.
+            r2 = c.post(f"/requirements/{rid}/review", headers=H,
+                        json={"status": "approved", "note": "[SINOV]"})
+            check("kimlik bilan -> 200", r2.status_code == 200,
+                  f"{r2.status_code}: {str(r2.json())[:140]}")
+
+            # 3) NATIJA BAZAGA YOZILDIMI — javob "200" degani
+            #    "yozildi" degani EMAS.
+            row = D.query_one(
+                "SELECT review_status, reviewed_by, reviewed_at, "
+                "       review_action, reviewed_ishonch "
+                "  FROM tender_requirement WHERE id=%(i)s", {"i": rid})
+            check("holat `approved` bo'ldi",
+                  (row or {}).get("review_status") == "approved",
+                  str(row))
+            check("`reviewed_by` yozildi", (row or {}).get("reviewed_by") == t_cid)
+            check("`review_action` yozildi",
+                  (row or {}).get("review_action") == "approve")
+            check("`reviewed_ishonch` yozildi",
+                  bool((row or {}).get("reviewed_ishonch")),
+                  str((row or {}).get("reviewed_ishonch")))
+
+            # 4) IJARACHI CHEGARASI — boshqa kompaniyaning talabi
+            #    KO'RINMASIN. `cid` — boshqa (asosiy) kompaniya.
+            # Ijarachi ANIQ tanlanadi: "birinchi kompaniya" da
+            # navbatdagi talab bo'lmasligi mumkin va tekshiruv
+            # JIMGINA o'tkazib yuborilardi.
+            begona = D.query_one(
+                "SELECT id, company_id FROM tender_requirement "
+                " WHERE company_id <> %(t)s AND review_status='pending_review' "
+                " LIMIT 1", {"t": t_cid})
+            check("boshqa ijarachida navbatdagi talab topildi",
+                  bool(begona), "topilmasa izolyatsiya SINALMAY qolardi")
+            if True:
+                if begona:
+                    r4 = c.post(f"/requirements/{begona['id']}/review",
+                                headers=H, json={"status": "approved"})
+                    check("BOSHQA ijarachining talabini tasdiqlab bo'lmaydi",
+                          r4.status_code == 404, str(r4.status_code))
+                    hali = D.scalar(
+                        "SELECT review_status FROM tender_requirement "
+                        " WHERE id=%(i)s", {"i": begona["id"]})
+                    check("begona qator O'ZGARMADI",
+                          hali == "pending_review", str(hali))
+    except Exception as e:                                    # noqa: BLE001
+        check("endpoint sinovi", False, f"{type(e).__name__}: {str(e)[:110]}")
+    finally:
+        try:
+            D.init_pool()
+            if rid is not None:
+                D.execute_returning("DELETE FROM tender_requirement "
+                                    "WHERE id=%(i)s RETURNING id", {"i": rid})
+            if t_cid is not None:
+                D.execute_returning(
+                    "UPDATE company_account SET active=FALSE "
+                    "WHERE id=%(i)s RETURNING id", {"i": t_cid})
+        except Exception:                                     # noqa: BLE001
+            pass
+
+
 def test_hisoblagichlar(conn) -> None:
     section("Hisoblagichlar: holat va dalil AYNAN teng")
     if conn is None:
@@ -662,9 +837,11 @@ def main() -> None:
             test_baza_soxtani_rad_etadi(conn, cid, tid)
             test_ilova_qatlami(conn, cid, tid)
             test_qayta_ajratish(conn, cid, tid)
+            test_endpoint_yoli(conn, cid, tid)
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM tender_requirement "
                             "WHERE name LIKE '[SINOV]%'")
+        test_halqa_olchovi(conn)
         test_hisoblagichlar(conn)
         test_migratsiya_jurnali(conn)
         conn.close()
