@@ -344,3 +344,86 @@ sudo -u tenderai /opt/tenderai/production/current/.venv/bin/python \
 5. **Monitoring/ogohlantirish yo'q.** `systemd` xizmatni qayta
    ko'taradi, lekin buni **hech kim bilmaydi**. `OnFailure=` bilan
    xabar yuborish keyingi qadam.
+
+---
+
+## 13. MASHQ — skriptlar HAQIQATAN yurgizildi (B-1)
+
+**O'lchov: 2026-09-01.** Joylashtirish skriptlari shu paytgacha
+**hech qachon, hech qayerda bajarilmagan** edi — ular faqat
+`deploy_test` da **matn** sifatida tekshirilardi. Mashq
+o'tkazildi va u **birinchi qadamdayoq haqiqiy nuqson topdi**.
+
+### 13.1 Topilgan nuqson: bitta fayl, ikki parser
+
+`XT_DB_DSN` muhit namunasida **tirnoqsiz** edi:
+
+```
+XT_DB_DSN=dbname=tenderai_production user=tai_service password=REPLACE host=127.0.0.1 port=5432
+```
+
+| O'quvchi | Natija |
+|---|---|
+| systemd `EnvironmentFile=` | butun qatorni oladi — **to'g'ri** |
+| shell `. envfile` | birinchi bo'shliqda **kesadi** |
+
+Ya'ni API xizmati to'g'ri DSN olardi, `backup.sh` /
+`restore-test.sh` / `deploy.sh` esa `dbname=tenderai_production`
+ni — **user, parol va host yo'qolgan holda**. Qolgani
+(`user=...`, `password=...`) shellda **o'zgaruvchi tayinlash**
+bo'lib ketardi, ya'ni **xato ham bermasdi**.
+
+Tuzatildi: qiymatlar tirnoqqa olindi. `deploy_test` buni
+`shlex` bilan (POSIX so'z ajratish qoidasi) qo'riqlaydi.
+
+### 13.2 Topilgan nuqson: `XT_DB_DSN_OWNER` namunada YO'Q edi
+
+`deploy.sh` va `restore-test.sh` uni **talab qiladi** (`:?`) va
+`docs/deploy.md` §3 uni **majburiy** deb yozadi — lekin
+namunada u yo'q edi. Namunaga qarab tayyorlangan server
+birinchi joylashtirishda to'xtardi. Qo'shildi.
+
+### 13.3 O'lchangan raqamlar
+
+Mashq **haqiqiy 1.5 GB baza** ustida yurgizildi:
+
+| Amal | Natija |
+|---|---|
+| `backup.sh` | **5 daq 28 s** · dump **440 MB** · 74 jadval · SHA-256 yozildi |
+| `restore-test.sh` | **RTO = 405 s (6 daq 45 s)** |
+| Tiklashdan keyin tekshiruv | jadval 53 · tender 3 608 · bo'lak 189 787 · migratsiya 67 · pgvector **bor** |
+| Vaqtinchalik baza | **tashlandi** (nom qo'riqchisi ishladi) |
+
+> **RTO endi o'lchangan raqam** — O-1 shu bilan yopildi. Taxminiy
+> qiymat hech qachon yozilmagan edi va bu to'g'ri edi.
+
+### 13.4 Qanday mashq qilinadi
+
+Skriptlar muhit faylini `/etc/tenderai/<muhit>.env` dan o'qiydi.
+Mashq uchun yo'l **almashtiriladi**:
+
+```bash
+export TENDERAI_ENVFILE=/tmp/mashq.env
+export PATH="/usr/lib/postgresql/18/bin:$PATH"   # Windows'da PostgreSQL/18/bin
+bash deploy/bin/backup.sh mashq
+bash deploy/bin/restore-test.sh mashq
+```
+
+`mashq.env` da `XT_DB_DSN`, `XT_DB_DSN_OWNER`, `BACKUP_DIR`
+bo'lishi yetadi. `restore-test.sh` **vaqtinchalik** bazaga
+tiklaydi va nomi asosiy baza bilan bir xil bo'lsa **to'xtaydi**.
+
+### 13.5 HALI MASHQ QILINMAGANI
+
+Rostini aytish kerak — quyidagilar **hali ham bajarilmagan**:
+
+| Qism | Nega |
+|---|---|
+| `deploy.sh` to'liq | `systemd`, `sudo`, `git archive` reliz repozitoriysi kerak |
+| `rollback.sh` | `current` simvolik havolasi va systemd kerak |
+| `health-check.sh` | ishlab turgan xizmat va reverse-proxy kerak |
+| Caddy / HTTPS | domen va sertifikat kerak |
+| systemd taymerlar | Linux kerak |
+
+Ya'ni **B-1 yopilmadi, qisqardi**: zaxira va tiklash yo'li
+sinaldi, qolgan qism hali noma'lum.

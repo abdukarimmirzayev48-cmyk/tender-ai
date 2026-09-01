@@ -367,6 +367,96 @@ def test_url_qorovuli():
         importlib.reload(n2)
 
 
+def test_muhit_fayli_shellda():
+    """Muhit fayli SHELL bilan o'qilganda BUZILMASIN (B-1)."""
+    bolim("13. MUHIT FAYLI — ikki parser, bitta fayl")
+
+    # O'LCHANGAN NUQSON (2026-09-01). `XT_DB_DSN` TIRNOQSIZ edi va
+    # bitta fayl IKKI XIL o'qilardi:
+    #
+    #   systemd `EnvironmentFile=`   butun qatorni oladi  -> TO'G'RI
+    #   shell `. envfile`            birinchi bo'shliqda  -> BUZILADI
+    #                                kesadi
+    #
+    # Ya'ni API xizmati to'g'ri DSN olardi, `backup.sh` /
+    # `restore-test.sh` / `deploy.sh` esa `dbname=...` ni — user,
+    # parol va host YO'QOLGAN holda. Qolgani shellda O'ZGARUVCHI
+    # TAYINLASH bo'lib ketardi, ya'ni XATO HAM BERMASDI.
+    #
+    # Bu skriptlar hech qachon yurgizilmagani uchun payqalmagan.
+    # SHELL XULQI `shlex` BILAN TAQLID QILINADI, `bash` CHAQIRILMAYDI.
+    #
+    # SABAB O'LCHANDI: Windows'da `subprocess` ["bash", ...] ni WSL
+    # bash iga yuboradi (`C:\Windows\System32\bash.exe`), Git Bash
+    # ga emas — va u yiqiladi. Ya'ni sinov MUHITGA bog'liq bo'lib
+    # qolardi va CI da jimgina o'tib ketishi mumkin edi.
+    #
+    # `shlex` POSIX so'z ajratish qoidasini AYNAN bajaradi: agar
+    # `VAR=qiymat` o'ng tomoni bir nechta so'zga bo'linsa, shell
+    # faqat BIRINCHISINI tayinlaydi — qolgani yo'qoladi.
+    import shlex
+
+    def shellda(matn):
+        """Muhit faylini SHELL qanday o'qisa, shunday o'qiydi."""
+        out = {}
+        for qator in matn.split(chr(10)):
+            q = qator.strip()
+            if not q or q.startswith("#") or "=" not in q:
+                continue
+            nom, _, xom = q.partition("=")
+            if not nom.replace("_", "").isalnum():
+                continue
+            try:
+                bolaklar = shlex.split(xom, posix=True)
+            except ValueError:
+                bolaklar = [xom]
+            # Shell BIRINCHI so'zni tayinlaydi; qolgani boshqa
+            # tayinlash yoki buyruq bo'lib ketadi.
+            out[nom] = bolaklar[0] if bolaklar else ""
+        return out
+
+    for muhit in ("production", "staging"):
+        d = shellda(oqi("env", f"{muhit}.env.example"))
+        dsn = d.get("XT_DB_DSN", "")
+        egasi = d.get("XT_DB_DSN_OWNER", "")
+        url = d.get("APP_PUBLIC_URL", "")
+        # DSN da user/parol/host BO'LISHI shart — kesilgan bo'lsa
+        # faqat `dbname=...` qoladi.
+        for qism in ("user=", "password=", "host="):
+            check(f"{muhit}: shellda `{qism}` YO'QOLMADI", qism in dsn,
+                  f"olingan: {dsn[:60]!r}")
+        check(f"{muhit}: `XT_DB_DSN_OWNER` bor va to'liq",
+              "user=" in egasi and "host=" in egasi,
+              f"olingan: {egasi[:60]!r}")
+        check(f"{muhit}: `APP_PUBLIC_URL` o'qildi", url.startswith("https://"),
+              f"olingan: {url[:40]!r}")
+
+    # TAQLIDNING O'ZI SINALADI. Aks holda `shellda()` har doim
+    # to'liq qiymat qaytarsa ham sinov yashil bo'lardi.
+    soxta = shellda('A=dbname=x user=y host=z' + chr(10)
+                    + 'B="dbname=x user=y host=z"')
+    check("taqlid TIRNOQSIZ qiymatni KESADI", soxta["A"] == "dbname=x",
+          soxta["A"])
+    check("taqlid TIRNOQLI qiymatni BUTUN qoldiradi",
+          soxta["B"] == "dbname=x user=y host=z", soxta["B"])
+
+    # `deploy.sh` va `restore-test.sh` AYNAN shu faylni SOURCE
+    # qiladi — ya'ni yuqoridagi buzilish ularga TO'G'RIDAN-TO'G'RI
+    # tegishli.
+    for skript in ("deploy.sh", "restore-test.sh", "backup.sh"):
+        src = oqi("bin", skript)
+        check(f"`{skript}` muhit faylini source qiladi",
+              '. "$ENVFILE"' in src)
+
+    # MASHQ QILISH MUMKINMI: yo'l qotirilgan bo'lsa skriptni
+    # serverdan tashqarida umuman yurgizib bo'lmaydi — aynan
+    # shuning uchun ular hech qachon bajarilmagan edi.
+    for skript in ("backup.sh", "restore-test.sh"):
+        src = oqi("bin", skript)
+        check(f"`{skript}` muhit yo'li ALMASHTIRILADI (mashq uchun)",
+              "TENDERAI_ENVFILE" in src)
+
+
 def test_hujjat():
     bolim("12. Joylashtirish hujjati")
     p = os.path.join(ROOT, "docs", "deploy.md")
@@ -406,6 +496,7 @@ def main():
     test_sogliq()
     test_jurnal()
     test_url_qorovuli()
+    test_muhit_fayli_shellda()
     test_hujjat()
 
     otdi = sum(1 for _n, ok, _d in _natija if ok)

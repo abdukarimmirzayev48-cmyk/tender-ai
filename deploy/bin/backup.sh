@@ -19,7 +19,20 @@
 set -euo pipefail
 
 MUHIT="${1:?foydalanish: backup.sh <staging|production>}"
-ENVFILE="/etc/tenderai/${MUHIT}.env"
+# MUHIT FAYLI YO'LI ALMASHTIRILISHI MUMKIN — `TENDERAI_ENVFILE`.
+#
+# NEGA (o'lchangan 2026-09-01, B-1): yo'l `/etc/tenderai/` ga
+# QOTIRILGAN edi va u FAQAT tayyorlangan serverda mavjud. Natijada
+# skriptlar HECH QACHON, HECH QAYERDA yurgizilmagan — ular faqat
+# `deploy_test` da MATN sifatida tekshirilardi (114 tekshiruv,
+# hammasi statik).
+#
+# "Yozilgan, lekin bir marta ham bajarilmagan skript" —
+# joylashtirish kunidagi eng qimmat noma'lum. Endi mashq qilish
+# mumkin: yo'l berilsa o'sha ishlatiladi.
+#
+# Standart qiymat O'ZGARMADI — serverdagi xulq bir xil qoladi.
+ENVFILE="${TENDERAI_ENVFILE:-/etc/tenderai/${MUHIT}.env}"
 [ -f "$ENVFILE" ] || { echo "muhit fayli yoq: $ENVFILE"; exit 2; }
 
 set -a
