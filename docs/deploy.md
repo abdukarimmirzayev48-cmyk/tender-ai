@@ -508,17 +508,93 @@ bash deploy/bin/restore-test.sh mashq
 bo'lishi yetadi. `restore-test.sh` **vaqtinchalik** bazaga
 tiklaydi va nomi asosiy baza bilan bir xil bo'lsa **to'xtaydi**.
 
-### 13.5 HALI MASHQ QILINMAGANI
+### 13.5 MASHQ HOLATI (2026-09-02 da yangilandi)
 
-Rostini aytish kerak — quyidagilar **hali ham bajarilmagan**:
-
-| Qism | Nega |
+| Qism | Holat |
 |---|---|
-| `deploy.sh` to'liq | `systemd`, `sudo`, `git archive` reliz repozitoriysi kerak |
-| `rollback.sh` | `current` simvolik havolasi va systemd kerak |
-| `health-check.sh` | ishlab turgan xizmat va reverse-proxy kerak |
-| Caddy / HTTPS | domen va sertifikat kerak |
-| systemd taymerlar | Linux kerak |
+| `backup.sh` | **MASHQ QILINDI** (§13.4) — 5 daq 28 s, 440 MB |
+| `restore-test.sh` | **MASHQ QILINDI** — RTO 405 s |
+| `health-check.sh` | **MASHQ QILINDI** — 4 ssenariy, quyida |
+| `rollback.sh` | **MASHQ QILINDI** — 6 ssenariy, quyida |
+| `deploy.sh` darvozasi | **MASHQ QILINDI** — 3 ssenariy |
+| `deploy.sh` to'liq | HALI EMAS — `venv`, `npm ci`, migratsiya, `systemd` kerak |
+| Caddy / HTTPS | HALI EMAS — domen va sertifikat kerak |
+| systemd taymerlar | HALI EMAS — Linux kerak |
 
-Ya'ni **B-1 yopilmadi, qisqardi**: zaxira va tiklash yo'li
-sinaldi, qolgan qism hali noma'lum.
+#### Mashq qanday qilindi
+
+Skriptlar **o'zgartirilmagan holda** yurgizildi. Uchta narsa
+almashtirildi va uchalasi ham SKRIPTDAN TASHQARIDA:
+
+| Almashtirildi | Nima bilan | Nega |
+|---|---|---|
+| `/opt/tenderai/<muhit>` | `TENDERAI_ILDIZ` | yo'l qotirilgan bo'lsa mashq umuman mumkin emas |
+| `sudo systemctl` | PATH dagi shim, chaqiruvlar YOZILADI | mashqda haqiqiy xizmat yo'q |
+| `ln -s` (Windows) | NTFS junction shimi | MSYS `ln -s` imtiyozsiz JIMGINA katalog NUSXASI qoldiradi |
+
+Oxirgisi muhim: shimsiz `current` simvolik havola bo'lmasdi va
+**atomar almashtirish mashqi SOXTA** bo'lardi — skript "qaytardim"
+deb yozardi, aslida hech narsa almashmasdi.
+
+#### Topilgan nuqsonlar
+
+Beshtasi ham `grep` bilan KO'RINMASDI. Ular faqat skript
+YURGIZILGANDA chiqdi:
+
+| # | Nuqson | Oqibati |
+|---|---|---|
+| 1 | tiriklik sikli 210 s gacha, birlikda `TimeoutStartSec=120` | xizmat yiqilganda tekshiruvning O'ZI o'ldirilardi; sabab yo'qolardi |
+| 2 | `psql` byudjetsiz | baza qora tuynuk bo'lsa xuddi shu holat |
+| 3 | uzilishda javob kodi `000000` | operator jurnalda BUZUQ kod ko'rardi |
+| 4 | `--royxat` da `*` belgisi yo'qolardi | uzilish paytida QAYSI reliz tirikligi noma'lum |
+| 5 | `rollback.sh` avval almashtirib, KEYIN tekshirardi | yarim relizga qaytarish UZILISHNI O'ZI keltirardi |
+
+5-nuqson eng og'iri va u **tasodifan** topildi: `deploy.sh`
+mashqda yiqilib, bo'sh reliz katalogi qoldirdi. O'sha katalog
+`--royxat` da ENG YANGI reliz bo'lib turardi — ya'ni yiqilgan
+joylashtiruvdan keyin tiklanayotgan operatorga aynan eng yaroqsiz
+nishon ko'rsatilardi. Unga qaytarilsa:
+
+```
+current -> bo'sh katalog        xizmat O'LIK
+health-check.sh                 TOPILMADI (127)
+chiqish                         "qo'lda qarang", kod 1
+```
+
+Endi ikkala tomon ham yopildi: `deploy.sh` yiqilsa o'z yarim
+relizini o'chiradi (`trap`), `rollback.sh` esa hedefni
+ALMASHTIRISHDAN OLDIN tekshiradi va `current` ga tegmaydi.
+Operator qamalib qolmasin uchun `--majburiy` chiqish yo'li bor.
+
+#### Vaqt byudjeti
+
+`health-check.sh` endi MUDDAT bilan cheklangan (takror soni bilan
+emas — `curl` bloklansa "30 ta urinish" istalgancha cho'ziladi):
+
+```
+tiriklik   HEALTH_WAIT_SEC        45 s
+tayyorlik  --max-time             10 s
+ETL        --max-time             15 s
+baza       PGCONNECT_TIMEOUT       5 s
+-------------------------------------
+jami                              75 s  <  TimeoutStartSec 120 s
+```
+
+O'LCHANDI: xizmat butunlay yo'q bo'lganda **129 s -> 53 s**.
+Arifmetika `_tests/deploy_test.py` 16-bo'limida QULFLANGAN —
+birlikdagi `TimeoutStartSec` kamaytirilsa sinov yiqiladi.
+
+#### Mashq endi TAKRORLANADI
+
+`_tests/deploy_test.py` 16-bo'limi yuqoridagi ssenariylarni
+skriptlarni HAQIQATAN yurgizib tekshiradi (soxta API, soxta
+`systemctl`, vaqtinchalik reliz daraxti). 1-15 bo'limlar
+`"satr" in fayl` shaklida edi va ular beshta nuqsonning HECH
+BIRINI ko'rmagan edi.
+
+Mashq muhiti topilmasa (repozitoriyani ko'radigan `bash` yo'q)
+sinov **YIQILADI**, jimgina o'tmaydi: mashq qilib bo'lmasligi ham
+natija.
+
+Ya'ni **B-1 hali ham yopilmadi**: `deploy.sh` ning qurish qismi,
+Caddy va systemd haqiqiy Linux mashinasini talab qiladi.

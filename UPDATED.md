@@ -1182,9 +1182,16 @@ bo'lib qolishini qo'riqlaydi. To'liq to'plam **25/25**.
 
 To'liq qo'llanma: `docs/deploy.md`.
 
-> **Server hali yo'q.** Hamma narsa repozitoriyada tayyor va sinovdan
-> o'tgan (`_tests/deploy_test.py` 110/110), lekin HAQIQIY mashinada
-> yurgizilmagan. Bu ochiq aytiladi.
+> **Server hali yo'q**, lekin skriptlar endi **MASHQ QILINGAN**
+> (`_tests/deploy_test.py` 193/193). Zaxira, tiklash, sog'liq,
+> orqaga qaytarish va joylashtirish darvozasi HAQIQATAN
+> yurgizildi va **7 nuqson** topildi — beshtasi faqat skript
+> ishga tushirilganda ko'rindi.
+>
+> Hali bajarilmagani: `deploy.sh` ning qurish qismi (`venv`,
+> `npm ci`, migratsiya), Caddy/HTTPS va systemd taymerlar —
+> ular haqiqiy Linux mashinasini talab qiladi. Bu ochiq
+> aytiladi (`docs/deploy.md` §13.5).
 
 ### Arxitektura
 
@@ -1338,26 +1345,34 @@ Ildiz sabab **S-1** edi.
 | Ko'rsatkich | Qiymat |
 |---|---|
 | Sinov to'plamlari | **33**, hammasi o'tadi |
+| `deploy_test` tekshiruvlari | **193** (oldin 164) |
 | Standart rejimda tekshiruvlar | **2 478** (oldin 1 951) |
 | Migratsiyalar | **68** |
 | Xato kodlari | **105** × 3 til |
-| Embedding qamrovi | **84.7%** (ochiq tenderlar **77.2%**) |
+| Embedding qamrovi | **95.9%** (ochiq tenderlar **96.7%**) |
 | Talab qamrovi (ochiq) | **100%** |
 | **RTO** (o'lchangan) | **405 s** |
 | Zaxira | 440 MB / **5 daq 28 s** |
 | Ma'lum zaifliklar | **0** |
 
-### 27.6 Hali ochiq (14 band)
+### 27.6 Hali ochiq (8 band)
 
-Eng muhimlari: **B-1** (server yo'q — O-1/O-2/O-3 unga bog'liq),
-**B-3** (inson halqasi to'ldirilishi kerak), **Q-2** ning qolgan
-29 131 bo'lagi (model vaqti), **T-1/T-2** (saqlangan qidiruv
-ulanishlari, RAG o'lchovi).
+Eng muhimi: **B-1** — `deploy.sh` ning qurish qismi, Caddy/HTTPS
+va systemd taymerlar HAQIQIY Linux mashinasini talab qiladi.
+Tiklash yo'li (zaxira, restore, sog'liq, orqaga qaytarish) endi
+**mashq qilingan**.
+
+Qolganlari: **O-5** (HTTPS majburiy emas), **T-1** (saqlangan
+qidiruvning `last_seen_at` va `categories` qismlari — `notify`
+ulandi), va **K-1..K-5** (kichik bandlar).
+
+Yopilganlar: B-2, B-3, M-1, M-2, M-3, Q-1, Q-2, Q-3, O-1, O-2,
+O-3, O-4, S-1, T-2 — **14 band**.
 
 To'liq ro'yxat: `docs/ochiq_muammolar.md`.
 
 ---
 
-*Oxirgi yangilanish: 2026-09-01. Bu faylni yangilash qoidasi — har commit'dan
+*Oxirgi yangilanish: 2026-09-02. Bu faylni yangilash qoidasi — har commit'dan
 keyin emas, har QATLAM tugagandan keyin, va §18 dagi hisoblagichlarni
 QAYTA O'LCHAB.*

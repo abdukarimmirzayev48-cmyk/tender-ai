@@ -27,20 +27,29 @@ case "$MUHIT" in
     *) echo "Noma'lum muhit: $MUHIT"; exit 2 ;;
 esac
 
-ILDIZ="/opt/tenderai/${MUHIT}"
+# MASHQ UCHUN YOL ALMASHTIRILADI. Sabab `TENDERAI_ENVFILE` dagi
+# bilan AYNI: yol qotirilgan bolsa skriptni serverdan tashqarida
+# UMUMAN yurgizib bolmaydi -- va aynan shuning uchun bu skript
+# hech qachon BAJARILMAGAN edi, faqat OQILGAN edi.
+#
+# Standart qiymat ozgarmaydi. Ozgaruvchini qoya oladigan kishi
+# allaqachon `tenderai` foydalanuvchisi sifatida qobiqda -- yani
+# yangi imtiyoz berilmayapti.
+ILDIZ="${TENDERAI_ILDIZ:-/opt/tenderai/${MUHIT}}"
 RELIZLAR="${ILDIZ}/releases"
 JORIY="${ILDIZ}/current"
-ENVFILE="/etc/tenderai/${MUHIT}.env"
+ENVFILE="${TENDERAI_ENVFILE:-/etc/tenderai/${MUHIT}.env}"
 REPO="${TENDERAI_REPO:-/opt/tenderai/repo.git}"
 
 log()  { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
+xato_izoh() { printf '[%s] %s' "$(date '+%F %T')" "$*" >&2; echo >&2; }
 xato() { printf '[%s] XATO: %s\n' "$(date '+%F %T')" "$*" >&2; exit 1; }
 
 [ -f "$ENVFILE" ] || xato "muhit fayli yo'q: $ENVFILE"
 
 # --- 1) ISHLAB CHIQARISH UCHUN STAGING TASDIQI SHART -------------------------
 if [ "$MUHIT" = "production" ]; then
-    TASDIQ="/opt/tenderai/staging/.verified"
+    TASDIQ="${TENDERAI_STAGING_ILDIZ:-/opt/tenderai/staging}/.verified"
     [ -f "$TASDIQ" ] || xato "staging tasdigi yoq ($TASDIQ). Avval: deploy.sh staging $REF"
     TASDIQLANGAN="$(cat "$TASDIQ")"
     if [ "$TASDIQLANGAN" != "$REF" ]; then
@@ -55,6 +64,25 @@ TOZA_REF="$(printf '%s' "$REF" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-24)"
 YANGI="${RELIZLAR}/${STAMP}-${TOZA_REF}"
 mkdir -p "$YANGI" "${ILDIZ}/var/hf" "${ILDIZ}/var/cache"
 log "reliz: $YANGI"
+
+# YIQILSA YARIM RELIZ QOLMASIN. O'LCHANGAN NUQSON (2026-09-02,
+# B-1 mashqi): `git archive` yiqilgach bo'sh reliz katalogi qolardi
+# va u `rollback.sh --royxat` da ENG YANGI reliz bo'lib turardi --
+# ya'ni yiqilgan joylashtiruvdan keyin tiklanayotgan operatorga
+# aynan eng yaroqsiz nishon KO'RSATILARDI.
+#
+# `trap` faqat ALMASHTIRISHGACHA amal qiladi: `current` yangi
+# relizga o'tgach uni o'chirish tirik xizmatni o'ldirardi.
+TOZALA="$YANGI"
+tozalash() {
+    kod=$?
+    if [ "$kod" -ne 0 ] && [ -n "$TOZALA" ] && [ -d "$TOZALA" ]; then
+        xato_izoh "yiqildi -> yarim reliz olib tashlanmoqda: $TOZALA"
+        rm -rf "$TOZALA"
+    fi
+    exit "$kod"
+}
+trap tozalash EXIT
 
 git --git-dir="$REPO" archive "$REF" | tar -x -C "$YANGI"
 
@@ -119,6 +147,10 @@ log "migratsiya qollanadi"
 # --- 7) ALMASHTIRISH (atomar) ------------------------------------------------
 ESKI="$(readlink -f "$JORIY" 2>/dev/null || true)"
 ln -sfn "$YANGI" "$JORIY"
+# ALMASHTIRILDI: bundan keyin reliz TIRIK, o'chirib bo'lmaydi.
+# Keyingi qadamlar yiqilsa 9-bo'lim ORQAGA QAYTARADI -- bu boshqa
+# va TO'G'RI mexanizm.
+TOZALA=""
 log "current -> $YANGI"
 
 # --- 8) Xizmatlar ------------------------------------------------------------

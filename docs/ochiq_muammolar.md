@@ -11,34 +11,55 @@ narsalarni bir joyga yig'adi. Tuzatilganlari kirmagan.
 |---|---|---|
 | Bloker | 1 | 2 (B-2, B-3) |
 | Ma'lumot butunligi | 0 | 3 (M-1, M-2, M-3) |
-| Qamrov qarzi | 1 | 2 (Q-1, Q-2) |
-| Operatsiya | 3 | 2 (O-1, O-4) |
+| Qamrov qarzi | 0 | 3 (Q-1, Q-2, Q-3) |
+| Operatsiya | 1 (O-5) | 4 (O-1..O-4) |
 | Sinov jarayoni | 0 | 1 (S-1) |
-| Tugallanmagan imkoniyat | 2 | — |
-| Kichik | 5 | — |
-| **Jami** | **12** | **10** |
+| Tugallanmagan imkoniyat | 1 (T-1) | 1 (T-2) |
+| Kichik | 5 (K-1..K-5) | — |
+| **Jami** | **8** | **14** |
 
-> **B-1 YOPILMADI, QISQARDI.** Zaxira va tiklash yo'li mashq
-> qilindi va ikki nuqson topildi (§9.10); `deploy.sh`, Caddy va
-> systemd hali bajarilmagan.
+> **B-1 YOPILMADI, YANA QISQARDI.** `health-check.sh`,
+> `rollback.sh` va `deploy.sh` darvozasi mashq qilindi —
+> **5 nuqson topildi** (§9.12). `deploy.sh` ning qurish qismi,
+> Caddy va systemd hali bajarilmagan (Linux mashinasi kerak).
 
-**Oxirgi yangilanish: 2026-09-01.** Yopilganlar §9 da.
+**Oxirgi yangilanish: 2026-09-02.** Yopilganlar §9 da.
 
 ---
 
 ## 1. BLOKERLAR
 
-### B-1. Server yo'q — QISQARDI (yopilmadi)
+### B-1. Server yo'q — IKKI MARTA QISQARDI (yopilmadi)
 
-> Zaxira/tiklash mashq qilindi, 2 nuqson topildi (§9.10).
-> Qolgan qism hali bajarilmagan.
+> Zaxira/tiklash mashq qilindi, 2 nuqson (§9.10).
+> Sog'liq/qaytarish mashq qilindi, **5 nuqson** (§9.12).
+> `deploy.sh` qurish qismi, Caddy, systemd — hali emas.
 
-Joylashtirish artefaktlari (`systemd`, `Caddy`, `deploy.sh`,
-`backup.sh`, `restore-test.sh`) **yozilgan va sinovdan o'tgan**
-(`deploy_test` 114/114), lekin **hech qachon haqiqiy mashinada
-yurgizilmagan**. Ular repozitoriyada tekshiriladi, serverda emas.
+**MASHQ QILINGANI** (skriptlar HAQIQATAN yurgizildi):
 
-**Ta'siri:** birinchi joylashtirish — sinalmagan yo'l.
+| Skript | Ssenariy | Natija |
+|---|---|---|
+| `backup.sh` | to'liq | 5 daq 28 s · 440 MB |
+| `restore-test.sh` | to'liq | RTO 405 s |
+| `health-check.sh` | 4 | 3 nuqson topildi |
+| `rollback.sh` | 6 | 2 nuqson topildi |
+| `deploy.sh` darvozasi | 3 | ishlaydi |
+
+**QOLGANI** — haqiqiy Linux mashinasi kerak:
+
+| Qism | Nega |
+|---|---|
+| `deploy.sh` qurish qismi | `venv`, `npm ci`, migratsiya, `systemd` |
+| Caddy / HTTPS | domen va sertifikat |
+| systemd taymerlar | `systemd-analyze verify` uchun Linux |
+
+**MUHIM XULOSA.** `deploy_test` ning 1-15 bo'limlari HAMMASI
+`"satr" in fayl_matni` shaklida edi. Ular **beshta nuqsonning
+HECH BIRINI ko'rmagan**. Satr borligi skript ishlashini
+isbotlamaydi. 16-bo'lim endi skriptlarni YURGIZADI.
+
+**Ta'siri:** birinchi joylashtirish hali ham sinalmagan yo'l,
+lekin **tiklash yo'li endi mashq qilingan**.
 **Manba:** 14-vazifa.
 
 ### ~~B-2. Manba `ref_selection_public` HTTP 400 qaytaradi~~ — YOPILDI, DA'VO NOTO'G'RI EDI
@@ -169,7 +190,14 @@ vektori bor           105 174   (55.8%)
 
 **Ta'siri:** RAG qidiruvi hujjatlarning yarmini ko'rmaydi.
 
-### Q-3. Katalog: 749 mahsulot kodsiz (41.7%)
+### ~~Q-3. Katalog: 749 mahsulot kodsiz (41.7%)~~ — AVTOMATIK YO'L TUGADI
+
+> Naqsh yo'li **oxirigacha yurgizildi**; qolgani dalil
+> yetishmasligi, kod nuqsoni emas (`7796fb0`). Aniqlik
+> qo'riqchisi qo'shildi: qamrov uchun aniqlikni pasaytirish
+> endi sinovni yiqitadi. Qolgan qism — **mahsulot qarori**
+> (qo'lda kodlash), muhandislik ishi emas.
+> Quyidagi tavsif TARIXIY.
 
 ```
 mahsulot   1797
@@ -195,11 +223,28 @@ qo'yilmaydi (aniqlik qamrovdan muhim). Navbat
 `restore-test.sh` tiklash vaqtini o'lchaydi, lekin **hech qachon
 yurgizilmagan** (B-1). Taxminiy raqam ataylab yozilmadi.
 
-### O-2. Zaxira faqat mahalliy diskda
+### ~~O-2. Zaxira faqat mahalliy diskda~~ — YOPILDI
+
+> `BACKUP_REMOTE_CMD` qo'shildi va **uch yo'l ham mashq qilindi**
+> (`a092982`). Tashqi nusxa **butashdan OLDIN** olinadi va
+> yiqilsa `backup.sh` **yiqiladi** — "zaxira olindi" degan yolg'on
+> chiqmaydi. Sozlanmagan bo'lsa jurnalda OGOHLANTIRISH.
+> **Cheklov:** uzoqdagi nusxadan TIKLASH hali sinalmagan.
+> Quyidagi tavsif TARIXIY.
 
 Tashqi nusxa yo'q. Disk yo'qolsa zaxira ham yo'qoladi.
 
-### O-3. Monitoring / ogohlantirish yo'q
+### ~~O-3. Monitoring / ogohlantirish yo'q~~ — YOPILDI
+
+> **Ikki qatlam** qo'shildi (`ba0d4ee`): KRASH (`OnFailure=`
+> har xizmatda) va SOG'LIQ (10 daqiqalik taymer). Ular BOSHQA
+> nosozliklarni ushlaydi — xizmat ko'tarilgan, ammo migratsiya
+> qo'llanmagan holat faqat ikkinchisida ko'rinadi.
+> Email yo'li soxta SMTP bilan SINALDI.
+> Sog'liq skriptining O'ZI keyinroq mashq qilindi va **3 nuqson**
+> chiqdi (§9.12) — ya'ni ogohlantirish qatlami qo'shilganda u
+> hali ishlamasdi.
+> Quyidagi tavsif TARIXIY.
 
 `systemd` xizmatni qayta ko'taradi, lekin **buni hech kim
 bilmaydi**. `/ready` bor, uni so'raydigan narsa yo'q.
@@ -253,7 +298,16 @@ rejimni alohida yurgizish.
 
 ## 6. TUGALLANMAGAN IMKONIYATLAR
 
-### T-1. Saqlangan qidiruv — uch qism ulanmagan
+### T-1. Saqlangan qidiruv — QISQARDI (uchdan biri ulandi)
+
+> `notify` **ULANDI** (`a4d3f1d`): kalit so'zi mos qidiruv
+> tenderni **0 -> 80** ballga ko'taradi va xabar qaysi qidiruv
+> ekanini aytadi. Skorlash **ayni** `matching.score_tender()` —
+> ikkinchi mantiq yozilmadi.
+> **Qolgani ochiq:** `last_seen_at`, `categories`, va
+> interfeysda `notify` tugmasi (bayroq ishlaydi, lekin shakl uni
+> yubormaydi — foydalanuvchi o'chira olmaydi).
+> Quyidagi jadval TARIXIY.
 
 `saved_search` da **0 ta** qator. CRUD, ijarachi ajratilishi va
 interfeys **ishlaydi** (`saved_search_test` 57/57), lekin:
@@ -267,7 +321,31 @@ interfeys **ishlaydi** (`saved_search_test` 57/57), lekin:
 Batafsil: `docs/saved_search.md`.
 **Manba:** 21-vazifa.
 
-### T-2. RAG qatlamlari O'LCHANMAGAN
+### ~~T-2. RAG qatlamlari O'LCHANMAGAN~~ — DA'VO NOTO'G'RI EDI
+
+> **Bu da'vo aniq emas edi** (`62c4c30`). Qidiruv va iqtibos
+> **O'LCHANADI** va u modelsiz, pulsiz:
+>
+> | Qatlam | Holat |
+> |---|---|
+> | A. Qidiruv sifati | Recall@K, Precision@K, MRR, nDCG |
+> | B. Iqtibos to'g'riligi | citation_hit_rate |
+> | C. Javob to'g'riligi | O'LCHANMAYDI — model kerak |
+> | D. Tool tanlash | O'LCHANMAYDI — model kerak |
+> | E. Gallyutsinatsiya | O'LCHANMAYDI — model kerak |
+>
+> "Hech narsa o'lchanmagan" NOTO'G'RI, "hammasi o'lchangan" ham
+> NOTO'G'RI. A qatlami javob sifatining **yuqori chegarasi**:
+> qidiruv topmagan narsani model ham ayta olmaydi.
+>
+> Korpus **57% o'sgach** (105k -> 170k bo'lak) qayta o'lchandi:
+> gibrid recall@8 **0.705**, mrr **0.699**, iqtibos **1.000** —
+> bazaviy bilan **aynan bir xil**.
+>
+> **NAMUNA KICHIK: 7 javobli holat.** 0.705 ni statistik da'vo
+> deb o'qib bo'lmaydi va sinov endi buni TALAB qiladi.
+> C/D/E `AI_PAID_ENABLED` ostida qoladi — bu ATAYLAB.
+> Quyidagi tavsif TARIXIY.
 
 Sifat o'lchovi pullik AI chaqiruvini talab qiladi, u esa
 `AI_PAID_ENABLED` bilan bloklangan (ataylab). Ya'ni RAG
@@ -535,3 +613,68 @@ ijarachi izolyatsiyasi. **Yo'l ishlaydi.**
 Qurildi: `v_inson_halqasi`, `v_pilot_holat` (migratsiya 0068).
 Ular halqani **to'ldirmaydi** — faqat bo'shliqni ko'rinadigan
 qiladi.
+
+### 9.12 B-1 yana qisqardi — tiklash yo'li MASHQ QILINDI (2026-09-02)
+
+**Mashq usuli.** Skriptlar **o'zgartirilmagan** holda yurgizildi;
+uchta narsa skriptdan TASHQARIDA almashtirildi: ildiz yo'li
+(`TENDERAI_ILDIZ`), `sudo systemctl` (PATH shimi, chaqiruvlar
+yoziladi), va Windows'da `ln -s` (NTFS junction shimi).
+
+Oxirgisisiz mashq **SOXTA** bo'lardi: MSYS `ln -s` imtiyozsiz
+jimgina katalog NUSXASI qoldiradi, ya'ni `current` simvolik
+havola bo'lmasdi va "atomar almashtirish" hech narsa
+almashtirmasdi — skript esa "QAYTARILDI" deb yozardi.
+
+**Topilgan 5 nuqson** (hech biri `grep` bilan ko'rinmasdi):
+
+| # | Nuqson | Oqibati |
+|---|---|---|
+| 1 | tiriklik sikli 210 s, birlikda `TimeoutStartSec=120` | xizmat yiqilganda tekshiruvning O'ZI o'ldirilardi |
+| 2 | `psql` byudjetsiz | baza qora tuynuk bo'lsa xuddi shu holat |
+| 3 | uzilishda javob kodi `000000` | jurnalda BUZUQ kod |
+| 4 | `--royxat` da `*` yo'qolardi | qaysi reliz tirikligi noma'lum |
+| 5 | `rollback.sh` avval almashtirib, KEYIN tekshirardi | tiklash vositasi UZILISH keltirardi |
+
+**1-nuqson** klassik "noto'g'ri narsani o'lchash": `TimeoutStartSec`
+skriptning SABRINI cheklaydi, xizmat sog'lig'ini emas. Sekin ammo
+sog'lom xizmat ham chegaradan oshib SOXTA OGOHLANTIRISH berardi.
+Byudjet endi MUDDAT bilan (takror soni bilan emas — `curl`
+bloklansa "30 ta urinish" istalgancha cho'ziladi):
+
+```
+45 + 10 + 15 + 5 = 75 s  <  TimeoutStartSec 120 s
+```
+
+O'LCHANDI: xizmat butunlay yo'q bo'lganda **129 s -> 53 s**.
+
+**4-nuqson** ota-katalog simvolik havola bo'lsa chiqadi
+(`/opt -> /srv`, oddiy server tartibi): `$HOZIRGI` `readlink -f`
+dan keladi va yechilgan, `${RELIZLAR}/${r}` esa yechilmagan
+`$ILDIZ` dan quriladi. Mashqda AYNAN shu qayta tiklandi:
+taqqoslash `YO-Q` berdi, ikkala tomon yechilgach `HA`.
+
+**5-nuqson** tasodifan topildi. `deploy.sh` mashqda yiqilib **bo'sh
+reliz katalogi** qoldirdi va u `--royxat` da ENG YANGI reliz bo'lib
+turdi — yiqilgan joylashtiruvdan keyin tiklanayotgan operatorga
+aynan eng yaroqsiz nishon ko'rsatilardi. Unga qaytarilsa `current`
+bo'sh katalogga ko'rsatardi, xizmat o'lardi, `health-check.sh`
+topilmasdi (127) va skript "qo'lda qarang" deb chiqardi — uzilishni
+tiklash vositasining O'ZI keltirib chiqargan bo'lardi.
+
+Ikkala tomon yopildi: `deploy.sh` yiqilsa o'z yarim relizini
+`trap` bilan o'chiradi; `rollback.sh` hedefni ALMASHTIRISHDAN
+OLDIN tekshiradi va rad etsa `current` ga TEGMAYDI. Operator
+qamalib qolmasin uchun `--majburiy` chiqish yo'li bor.
+
+**Sinov.** `deploy_test` **164 -> 193** tekshiruv. 16-bo'lim
+skriptlarni HAQIQATAN yurgizadi (soxta API, soxta `systemctl`,
+vaqtinchalik reliz daraxti). Mashq muhiti topilmasa sinov
+**YIQILADI**, jimgina o'tmaydi.
+
+**Mashq paytida O'Z sinovimda 3 ta soxta yashil topildi** va
+ular ham tuzatildi: ikkita qo'riqcha skriptning O'Z IZOHIDAGI
+iborani topib yashil bo'lgandi (`seq 1 30`, `|| echo 000`), va
+`os.pathsep` Windows'da `;` bo'lgani uchun shim PATH ga
+tushmasdi — ya'ni "current o'zgarmadi" tekshiruvi hech qachon
+o'zgara olmaydigan holatni tasdiqlayotgan edi.

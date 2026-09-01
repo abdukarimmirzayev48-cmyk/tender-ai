@@ -26,10 +26,17 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -593,6 +600,375 @@ def test_hujjat():
         check(f"hujjatda `{nom}` bor", naqsh in d)
 
 
+
+# =============================================================================
+# 16. MASHQ — SKRIPTLAR O'QILMAYDI, YURGIZILADI (B-1)
+# =============================================================================
+# 1-15 bo'limlar HAMMASI `"satr" in fayl_matni` shaklida edi. Ular
+# satr borligini isbotlaydi, SKRIPT ISHLASHINI EMAS. B-1 mashqi
+# aynan shu farqda beshta HAQIQIY nuqson topdi:
+#
+#   1. `health-check.sh` tiriklik sikli 210 s gacha cho'zilardi,
+#      birlikdagi `TimeoutStartSec` esa 120 s — xizmat yiqilganda
+#      tekshiruv O'LDIRILARDI va sabab NOMA'LUM qolardi;
+#   2. `psql` cheksiz kutishi mumkin edi (byudjetsiz);
+#   3. uzilishda javob kodi `000000` bo'lib chiqardi;
+#   4. `--royxat` da `*` belgisi ota-katalog simvolik havola bo'lsa
+#      YO'QOLARDI — operator qaysi reliz tirikligini bilmasdi;
+#   5. `rollback.sh` `current` ni almashtirib, xizmatni qayta
+#      ishga tushirib, ANDIN sog'liqni tekshirardi — ya'ni yarim
+#      relizga qaytarish UZILISHNI O'ZI KELTIRIB CHIQARARDI.
+#
+# Hech biri grep bilan ko'rinmasdi.
+# =============================================================================
+
+def _mashq_bash():
+    """Repozitoriyani KO'RADIGAN bash topiladi.
+
+    Windows'da `subprocess` oddiy `bash` ni WSL ga yuboradi va u
+    `d:\\...` ni ko'rmaydi (13-bo'limdagi bilan ayni sabab). Shuning
+    uchun nomzodlar SINAB ko'riladi: repodagi faylni ko'ra olgani
+    qabul qilinadi.
+    """
+    nomzodlar = []
+    if os.name == "nt":
+        nomzodlar += [r"C:\Program Files\Git\bin\bash.exe",
+                      r"C:\Program Files (x86)\Git\bin\bash.exe"]
+        g = shutil.which("git")
+        if g:
+            nomzodlar.append(os.path.join(os.path.dirname(os.path.dirname(g)),
+                                          "bin", "bash.exe"))
+    nomzodlar.append(shutil.which("bash") or "bash")
+    for b in nomzodlar:
+        if not b or not os.path.exists(b):
+            continue
+        try:
+            r = subprocess.run([b, "-c", 'test -f "$1" && echo BOR', "_",
+                                "deploy/bin/rollback.sh"],
+                               cwd=ROOT, capture_output=True, text=True,
+                               timeout=30)
+            if "BOR" in r.stdout:
+                return b
+        except Exception:
+            continue
+    return None
+
+
+def _posix_yol(bash, yol):
+    """Windows yo'lini shu bash ko'radigan shaklga o'tkazadi."""
+    if os.name != "nt":
+        return yol
+    r = subprocess.run([bash, "-c", 'cygpath -u "$1"', "_", yol],
+                       capture_output=True, text=True, timeout=30)
+    return r.stdout.strip() or yol
+
+
+def _shimlar(qutі, jurnal):
+    """`sudo`/`systemctl`/`ln` uchun mashq shimlari.
+
+    `ln` FAQAT Windows'da almashtiriladi: MSYS `ln -s` imtiyozsiz
+    yiqiladi va JIMGINA katalog NUSXASI qoldiradi — u holda atomar
+    almashtirish mashqi SOXTA bo'lardi. NTFS "junction" imtiyoz
+    talab qilmaydi va MSYS uni simvolik havola deb ko'radi.
+    Joylashtirish skriptlarining O'ZI o'zgartirilmaydi.
+    """
+    os.makedirs(qutі, exist_ok=True)
+    N = chr(10)
+    yoz = lambda nom, matn: (
+        io.open(os.path.join(qutі, nom), "w", encoding="utf-8",
+                newline=N).write(matn),
+        os.chmod(os.path.join(qutі, nom), 0o755))
+    yoz("sudo", "#!/bin/sh" + N + 'exec "$@"' + N)
+    yoz("systemctl",
+        "#!/bin/sh" + N + 'echo "systemctl $*" >> "' + jurnal + '"' + N)
+    if os.name == "nt":
+        # `$L`/`$T` — SHELL o'zgaruvchilari (qo'sh tirnoq ichida
+        # yoyiladi). PowerShell ning O'Z `$false` i esa `\$` bilan
+        # QOCHIRILADI, aks holda shell uni bo'sh satrga aylantirardi
+        # va junction hech qachon yaratilmasdi (JIMGINA).
+        ps = ("powershell.exe -NoProfile -NonInteractive -Command \""
+              "if (Test-Path -LiteralPath '$L') {"
+              " (New-Object System.IO.DirectoryInfo('$L')).Delete(\$false)"
+              " };"
+              " New-Item -ItemType Junction -Path '$L' -Target '$T'"
+              " | Out-Null\" >/dev/null 2>&1")
+        yoz("ln",
+            "#!/bin/sh" + N
+            + 'if [ "$1" = "-sfn" ]; then' + N
+            + '    T=$(cygpath -w "$2"); L=$(cygpath -w "$3")' + N
+            + "    " + ps + N
+            + '    [ -e "$3" ] || exit 1' + N
+            + "    exit 0" + N
+            + "fi" + N
+            + 'exec /usr/bin/ln "$@"' + N)
+
+
+class _SoxtaAPI(threading.Thread):
+    """/health, /ready, /freshness beradigan eng kichik xizmat."""
+
+    def __init__(self, holat="sogolom"):
+        super().__init__(daemon=True)
+        self.holat = holat
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        self.port = s.getsockname()[1]
+        s.close()
+        ota = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path == "/health":
+                    kod, tana = 200, {"holat": "ok"}
+                elif self.path == "/ready":
+                    if ota.holat == "tayyor_emas":
+                        kod, tana = 503, {"tayyor": False}
+                    else:
+                        kod, tana = 200, {"tayyor": True, "baza": "ok"}
+                elif self.path == "/freshness":
+                    kod, tana = 200, {"overall_age_sec": 1200}
+                else:
+                    kod, tana = 404, {}
+                b = json.dumps(tana).encode()
+                self.send_response(kod)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+        self.srv = HTTPServer(("127.0.0.1", self.port), H)
+
+    def run(self):
+        self.srv.serve_forever()
+
+    def toxta(self):
+        self.srv.shutdown()
+
+
+def test_mashq():
+    bolim("16. MASHQ — skriptlar HAQIQATAN yurgiziladi")
+
+    h = oqi("bin", "health-check.sh")
+    birlik = oqi("systemd", "tenderai-health@.service")
+
+    # --- BYUDJET ARIFMETIKASI (bu tekshiruv MUHITSIZ ham ishlaydi) ---------
+    # Skriptning eng yomon vaqti birlikdagi `TimeoutStartSec` dan
+    # KICHIK bo'lishi SHART. Aks holda xizmat yiqilganda systemd
+    # tekshiruvning O'ZINI o'ldiradi va nosozlik sababi yo'qoladi.
+    ts = re.search(r"TimeoutStartSec=(\d+)", birlik)
+    check("birlikda `TimeoutStartSec` bor", ts is not None)
+    kutish = re.search(r'KUTISH="\$\{HEALTH_WAIT_SEC:-(\d+)\}"', h)
+    check("tiriklik byudjeti O'ZGARUVCHI (takror soni EMAS)",
+          kutish is not None and "for _ in $(seq 1 30); do" not in h)
+    check("tiriklik sikli MUDDAT bilan cheklangan",
+          "MUDDAT=" in h and 'date +%s' in h)
+    if ts and kutish:
+        maxt = [int(x) for x in re.findall(r"--max-time (\d+)", h)]
+        db = re.search(r'BAZA_KUTISH="\$\{HEALTH_DB_TIMEOUT_SEC:-(\d+)\}"', h)
+        # tiriklik byudjeti + qolgan tekshiruvlar (tiriklik `--max-time`
+        # allaqachon byudjet ichida, shuning uchun eng kattasi tashlanadi)
+        eng_yomon = int(kutish.group(1)) + sum(sorted(maxt)[:-1] or [0])
+        eng_yomon += int(db.group(1)) if db else 0
+        check("ENG YOMON vaqt birlik `TimeoutStartSec` dan KICHIK",
+              eng_yomon < int(ts.group(1)),
+              f"{eng_yomon}s vs TimeoutStartSec={ts.group(1)}s")
+    check("`psql` ham byudjetli (cheksiz kutmaydi)",
+          "PGCONNECT_TIMEOUT" in h)
+    check("uzilishda javob kodi BUZILMAYDI (`000000` emas)",
+          "2>/dev/null || echo 000)" not in h)
+
+    # --- MASHQ MUHITI ------------------------------------------------------
+    bash = _mashq_bash()
+    # MUHIT YO'Q BO'LSA JIMGINA O'TIB KETILMAYDI: mashq qilib
+    # bo'lmasligi ham NATIJA — aynan shuning uchun bu skriptlar
+    # oylab bajarilmagan edi.
+    check("mashq muhiti bor (repozitoriyani ko'radigan `bash`)",
+          bash is not None,
+          "" if bash else "topilmadi — skriptlar YURGIZILMADI, faqat O'QILDI")
+    if not bash:
+        return
+
+    baza = tempfile.mkdtemp(prefix="tenderai_mashq_")
+    api = _SoxtaAPI()
+    api.start()
+    try:
+        qutі = os.path.join(baza, "shim")
+        jurnal_w = os.path.join(baza, "systemctl.log")
+        _shimlar(qutі, _posix_yol(bash, jurnal_w))
+
+        envfile = os.path.join(baza, "staging.env")
+        io.open(envfile, "w", encoding="utf-8", newline=chr(10)).write(
+            "APP_ENV=staging" + chr(10)
+            + f"API_PORT={api.port}" + chr(10)
+            + 'XT_DB_DSN="host=127.0.0.1 dbname=x user=y password=z"' + chr(10))
+
+        ildiz = os.path.join(baza, "opt", "staging")
+        relizlar = os.path.join(ildiz, "releases")
+        toliq = []
+        for nom in ("20260101-120000-v1", "20260102-120000-v2",
+                    "20260103-120000-v3"):
+            d = os.path.join(relizlar, nom)
+            os.makedirs(os.path.join(d, "deploy", "bin"))
+            os.makedirs(os.path.join(d, "api"))
+            shutil.copy(os.path.join(ROOT, "deploy", "bin", "health-check.sh"),
+                        os.path.join(d, "deploy", "bin"))
+            shutil.copy(os.path.join(ROOT, "api", "main.py"),
+                        os.path.join(d, "api"))
+            toliq.append(nom)
+            time.sleep(1.1)   # `ls -1dt` tartibi vaqtga tayanadi
+        # YIQILGAN joylashtiruvdan qolgan YARIM reliz
+        yarim = "20260904-090000-yarim"
+        os.makedirs(os.path.join(relizlar, yarim))
+
+        muhit = dict(os.environ)
+        # PATH `bash` NING O'ZIDA qo'yiladi. `os.pathsep` Windows'da
+        # `;` va uni bash BO'LMAYDI -- shim topilmay qolardi va
+        # `ln -sfn` haqiqiy `ln` ga tushib "failed to create
+        # symbolic link" berardi. Mashq shunda JIMGINA soxta
+        # bo'lardi: `current` almashmasdi, sinov esa "o'zgarmadi"
+        # deb YASHIL qolishi mumkin edi.
+        shim_p = _posix_yol(bash, qutі)
+        muhit["TENDERAI_ILDIZ"] = _posix_yol(bash, ildiz)
+        muhit["TENDERAI_ENVFILE"] = _posix_yol(bash, envfile)
+        muhit["HEALTH_WAIT_SEC"] = "5"     # mashq tez bo'lsin
+
+        def yurgiz(skript, *arg, **kw):
+            e = dict(muhit)
+            e.update(kw.pop("qoshimcha", {}))
+            r = subprocess.run(
+                [bash, "-c", 'PATH="$1:$PATH"; shift; exec "$@"', "_",
+                 shim_p, f"deploy/bin/{skript}", *arg],
+                cwd=ROOT, env=e, capture_output=True,
+                text=True, timeout=kw.get("muddat", 180))
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+        def joriy():
+            r = subprocess.run(
+                [bash, "-c", 'basename "$(readlink -f "$1")"', "_",
+                 muhit["TENDERAI_ILDIZ"] + "/current"],
+                capture_output=True, text=True, timeout=30)
+            return r.stdout.strip()
+
+        def qoy(nom):
+            subprocess.run([bash, "-c",
+                            'PATH="$1:$PATH"; ln -sfn "$2" "$3"', "_",
+                            shim_p,
+                            muhit["TENDERAI_ILDIZ"] + "/releases/" + nom,
+                            muhit["TENDERAI_ILDIZ"] + "/current"],
+                           capture_output=True, text=True, timeout=60)
+
+        qoy(toliq[-1])
+        check("mashq maydoni tayyor (`current` simvolik havola ishlaydi)",
+              joriy() == toliq[-1],
+              f"kutilgan {toliq[-1]}, olingan {joriy()!r} — "
+              "simvolik havola yaratilmagan bo'lsa mashqning O'ZI soxta")
+
+        # --- health-check.sh: SOG'LOM ------------------------------------
+        kod, chiq = yurgiz("health-check.sh", "staging")
+        check("sog'liq: sog'lom xizmatda 0 qaytaradi", kod == 0, f"kod={kod}")
+        check("sog'liq: tiriklik VA tayyorlik ALOHIDA o'lchanadi",
+              "tiriklik /health" in chiq and "tayyorlik /ready" in chiq)
+
+        # --- health-check.sh: TAYYOR EMAS (503) --------------------------
+        # `deploy.sh` ning AVTOMATIK QAYTARISHI aynan shunga tayanadi.
+        api.holat = "tayyor_emas"
+        kod, chiq = yurgiz("health-check.sh", "staging")
+        check("sog'liq: /ready 503 bo'lsa 1 qaytaradi", kod == 1, f"kod={kod}")
+        check("sog'liq: tiriklik O'TDI, tayyorlik YIQILDI deb ajratadi",
+              "[OK  ] tiriklik" in chiq and "[XATO] tayyorlik" in chiq)
+        api.holat = "sogolom"
+
+        # --- health-check.sh: XIZMAT YO'Q, BYUDJET ICHIDA ----------------
+        api.toxta()
+        t0 = time.time()
+        kod, chiq = yurgiz("health-check.sh", "staging")
+        ketdi = time.time() - t0
+        check("sog'liq: xizmat yo'q bo'lsa 1 qaytaradi", kod == 1)
+        # 5 s tiriklik + 10 s tayyorlik + biroz zaxira.
+        check("sog'liq: byudjetdan OSHMAYDI (systemd o'ldirmasin)",
+              ketdi < 40, f"{ketdi:.0f}s")
+        check("sog'liq: uzilishda javob kodi BUZUQ emas",
+              "000000" not in chiq)
+        api = _SoxtaAPI()   # yangi port bilan qayta ko'tariladi
+        api.start()
+        io.open(envfile, "w", encoding="utf-8", newline=chr(10)).write(
+            "APP_ENV=staging" + chr(10)
+            + f"API_PORT={api.port}" + chr(10)
+            + 'XT_DB_DSN="host=127.0.0.1 dbname=x user=y password=z"' + chr(10))
+
+        # --- rollback.sh --royxat ----------------------------------------
+        kod, chiq = yurgiz("rollback.sh", "staging", "--royxat")
+        check("qaytarish: ro'yxat 0 qaytaradi", kod == 0, f"kod={kod}")
+        belgili = [q for q in chiq.split(chr(10)) if q.strip().startswith("*")]
+        check("qaytarish: HOZIRGI reliz `*` bilan BELGILANADI",
+              len(belgili) == 1 and toliq[-1] in belgili[0],
+              f"belgilangan: {belgili}")
+
+        # --- rollback.sh: YARIM relizga -> RAD, `current` TEGILMAYDI -----
+        oldin = joriy()
+        kod, chiq = yurgiz("rollback.sh", "staging", yarim)
+        check("qaytarish: YARIM relizga qaytarish RAD ETILADI", kod == 1,
+              f"kod={kod}")
+        check("qaytarish: rad etilganda `current` O'ZGARMAYDI",
+              joriy() == oldin, f"{oldin} -> {joriy()}")
+        check("qaytarish: nima yetishmagani AYTILADI",
+              "YARIM RELIZ" in chiq and "api/main.py" in chiq)
+        check("qaytarish: chiqish yo'li ko'rsatiladi", "--majburiy" in chiq)
+
+        # --- rollback.sh: TO'LIQ relizga -> ishlaydi ---------------------
+        kod, chiq = yurgiz("rollback.sh", "staging", toliq[0])
+        check("qaytarish: to'liq relizga qaytarish ISHLAYDI", kod == 0,
+              f"kod={kod}")
+        check("qaytarish: `current` HAQIQATAN almashdi",
+              joriy() == toliq[0], joriy())
+        jurnal = ""
+        if os.path.exists(jurnal_w):
+            jurnal = io.open(jurnal_w, encoding="utf-8").read()
+        check("qaytarish: xizmat QAYTA ISHGA TUSHIRILADI",
+              "restart tenderai-api@staging" in jurnal, jurnal[:120])
+
+        # --- deploy.sh: PRODUCTION DARVOZASI -----------------------------
+        pildiz = os.path.join(baza, "opt", "production")
+        os.makedirs(os.path.join(pildiz, "releases"))
+        pmuhit = {"TENDERAI_ILDIZ": _posix_yol(bash, pildiz),
+                  "TENDERAI_STAGING_ILDIZ": _posix_yol(bash, ildiz)}
+        tasdiq = os.path.join(ildiz, ".verified")
+        if os.path.exists(tasdiq):
+            os.remove(tasdiq)
+        kod, chiq = yurgiz("deploy.sh", "production", "v1.2.3",
+                           qoshimcha=pmuhit)
+        check("joylashtirish: staging TASDIG'I yo'q -> RAD", kod == 1,
+              f"kod={kod}")
+        io.open(tasdiq, "w", encoding="utf-8").write("v1.2.2")
+        kod, chiq = yurgiz("deploy.sh", "production", "v1.2.3",
+                           qoshimcha=pmuhit)
+        check("joylashtirish: BOSHQA ref tekshirilgan -> RAD", kod == 1,
+              f"kod={kod}")
+        check("joylashtirish: qaysi ref tekshirilgani AYTILADI",
+              "v1.2.2" in chiq and "v1.2.3" in chiq)
+
+        # --- deploy.sh: YIQILSA YARIM RELIZ QOLMAYDI ---------------------
+        # `git archive` mavjud bo'lmagan repoda yiqiladi — mashqda
+        # AYNAN shu yuz bergan edi va bo'sh reliz katalogi qolgandi.
+        io.open(tasdiq, "w", encoding="utf-8").write("v9.9.9")
+        pm = dict(pmuhit)
+        pm["TENDERAI_REPO"] = "/mavjud/bolmagan/repo.git"
+        kod, chiq = yurgiz("deploy.sh", "production", "v9.9.9",
+                           qoshimcha=pm)
+        qolgan = os.listdir(os.path.join(pildiz, "releases"))
+        check("joylashtirish: yiqilgach YARIM RELIZ QOLMAYDI",
+              qolgan == [], str(qolgan))
+        check("joylashtirish: tozalash JIMGINA emas",
+              "yarim reliz olib tashlanmoqda" in chiq)
+    finally:
+        try:
+            api.toxta()
+        except Exception:
+            pass
+        shutil.rmtree(baza, ignore_errors=True)
+
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="Joylashtirish sinovi")
@@ -618,6 +994,7 @@ def main():
     test_tashqi_nusxa()
     test_ogohlantirish()
     test_hujjat()
+    test_mashq()
 
     otdi = sum(1 for _n, ok, _d in _natija if ok)
     jami = len(_natija)
