@@ -366,6 +366,96 @@ def test_baza_qulflari(db):
     return a_cid, b_cid, a_aktor, b_aktor
 
 
+def test_izchillik(db, a_cid, a_aktor):
+    """`ishonch` va `actor_id` ZID bo'la olmaydi — BAZA darajasida (M-2)."""
+    bolim("5. ISHONCH <-> AKTOR IZCHILLIGI (M-2)")
+
+    # Qoida `audit_jurnal` da CHECK bilan himoyalangan edi, QAROR
+    # jadvallarida esa FAQAT KODDA. Ya'ni to'g'ridan-to'g'ri SQL
+    # zid qator yozishi mumkin edi.
+    for jadval in ("tender_routing", "tender_requirement", "kod_qaror"):
+        n = db.scalar("""SELECT count(*) FROM pg_constraint
+                          WHERE conrelid = %(t)s::regclass
+                            AND conname LIKE %(p)s""",
+                      {"t": jadval, "p": "%aktor_izchil%"})
+        check(f"`{jadval}` da izchillik CHECK bor", n == 1, f"{n} ta")
+
+    t = db.query_one("SELECT id FROM tender ORDER BY id LIMIT 1")
+    if not t:
+        check("sinov uchun tender kerak", False, "tender jadvali bo'sh")
+        return
+    r = db.execute_returning(
+        "INSERT INTO tender_requirement(company_id, tender_id, source, name, "
+        "method, review_status, mashina_holat) "
+        "VALUES (%(c)s, %(t)s, 'api', 'ZZTEST izchillik', 'naqsh', "
+        "        'pending_review', 'ajratilgan') RETURNING id",
+        {"c": a_cid, "t": t["id"]})
+    rid = r["id"]
+    _yaratilgan["requirement"].append(rid)
+
+    def urin(nom, ishonch, actor_id):
+        """Zid juftlikni yozishga urinadi. `True` = RAD ETILDI."""
+        try:
+            db.execute_returning(
+                "UPDATE tender_requirement SET review_status='approved', "
+                "  reviewed_by=%(c)s, reviewed_at=now(), review_action='approve', "
+                "  reviewed_ishonch=%(i)s, reviewed_actor_id=%(a)s "
+                "WHERE id=%(id)s RETURNING id",
+                {"c": a_cid, "i": ishonch, "a": actor_id, "id": rid})
+            return False, "qabul qilindi"
+        except Exception as e:                                # noqa: BLE001
+            # AYNAN izchillik cheklovi ishlashi kerak — boshqa xato
+            # (masalan FK) ham "rad etildi" ko'rinardi, lekin
+            # qo'riqchini ISBOTLAMASDI.
+            m = str(e)
+            return ("aktor_izchil" in m), m.splitlines()[0][:90]
+
+    ok, d = urin("erp_sessiya aktorSIZ", "erp_sessiya", None)
+    check("`erp_sessiya` + aktorSIZ RAD ETILADI", ok, d)
+    ok, d = urin("kompaniya_sessiyasi AKTOR bilan", "kompaniya_sessiyasi", a_aktor)
+    check("`kompaniya_sessiyasi` + AKTOR bilan RAD ETILADI", ok, d)
+
+    # MUSBAT TOMONI HAM: to'g'ri juftlik O'TISHI kerak. Busiz
+    # cheklov "hech narsani o'tkazmaydi" holatida ham sinovdan
+    # o'tardi.
+    try:
+        db.execute_returning(
+            "UPDATE tender_requirement SET review_status='approved', "
+            "  reviewed_by=%(c)s, reviewed_at=now(), review_action='approve', "
+            "  reviewed_ishonch='aktor_elon', reviewed_actor_id=%(a)s "
+            "WHERE id=%(id)s RETURNING id",
+            {"c": a_cid, "a": a_aktor, "id": rid})
+        check("`aktor_elon` + AKTOR bilan QABUL QILINADI", True)
+    except Exception as e:                                    # noqa: BLE001
+        check("`aktor_elon` + AKTOR bilan QABUL QILINADI", False,
+              str(e).splitlines()[0][:90])
+
+    # ESKI YORLIQ MUZLATILGAN. `kuzatuvdan_oldin` — MIGRATSIYA
+    # yorlig'i: u "kim ekani noma'lum" degani va YANGI qaror unga
+    # yozilsa, javobsizlik qonuniylashtirilardi.
+    eski = {r["jadval"]: r["soni"]
+            for r in db.query("SELECT * FROM v_aktor_eski_yorliq")}
+    print(f"      eski yorliq: {eski}")
+    check("`kuzatuvdan_oldin` FAQAT `tender_routing` da",
+          eski.get("tender_requirement", 0) == 0, str(eski))
+    # 11-vazifa migratsiyasi 30 ta qatorni belgilagan. Bu son
+    # O'SMASLIGI kerak — o'ssa yangi qaror eski yorliq ortiga
+    # yashiringan.
+    check("`tender_routing` dagi eski yorliq soni 30 dan OSHMAGAN",
+          eski.get("tender_routing", 0) <= 30,
+          f"{eski.get('tender_routing')} ta (11-vazifa migratsiyasi 30 ta "
+          f"qatorni belgilagan; oshgani yangi qaror eski yorliq ortiga "
+          f"yashiringanini bildiradi)")
+
+    src = io.open(os.path.join(ROOT, "api", "routing.py"),
+                  encoding="utf-8").read()
+    q = src[src.index("def qaror("):]
+    q = q[:q.index(chr(10) * 3)]
+    check("`routing.qaror()` `kuzatuvdan_oldin` ni QABUL QILMAYDI",
+          "kuzatuvdan_oldin" not in q,
+          "u migratsiya yorlig'i — ish yo'lidan yozilmasin")
+
+
 def test_api(db, a_cid, b_cid, a_aktor, b_aktor):
     bolim("7. API — `X-Actor` bilan boshqa ijarachining aktori")
     from fastapi.testclient import TestClient
@@ -521,6 +611,7 @@ def main():
         else:
             try:
                 a_cid, b_cid, a_a, b_a = test_baza_qulflari(db)
+                test_izchillik(db, a_cid, a_a)
                 test_api(db, a_cid, b_cid, a_a, b_a)
             finally:
                 _tozala(db)
