@@ -1032,6 +1032,28 @@ def main() -> None:
                 post_xatolar.append(f"broker navbati: {str(e)[:200]}")
 
         if args.vector_budget > 0:
+            # ARZON ISH BIRINCHI — XESHDAN OMMAVIY NUSXALASH.
+            #
+            # O'LCHANGAN (2026-09-01, Q-2). Navbatda 81 081 bo'lak
+            # bor edi, shundan 42 325 tasi (52%) ALLAQACHON
+            # vektorlangan matnning NUSXASI. Ular partiya-partiya,
+            # modelning 2.3 bo'lak/s tezligiga BOG'LANIB o'tardi —
+            # garchi ularga model UMUMAN kerak bo'lmasa ham.
+            #
+            #     partiya yo'li  2 000 bo'lak / 5.4 daqiqa
+            #     ommaviy SQL   42 052 bo'lak / 3.4 daqiqa
+            #
+            # Ya'ni o'sha ishning o'zi ~33 marta tez. Endi u
+            # model navbatidan OLDIN va BIR YO'LA bajariladi;
+            # modelga faqat HAQIQATAN yangi matn qoladi.
+            _ok, _err, _dt, out, _kod = run_script(
+                "etl_embed.py", ["--xeshdan"])
+            emit([chr(10) + "===== post: xeshdan nusxalash =====", *out])
+            if not _ok:
+                # NUSXALASH IXTIYORIY TEZLASHTIRISH: yiqilsa model
+                # yo'li baribir ishlaydi. Lekin JIM qolmaydi.
+                post_xatolar.append(f"etl_embed --xeshdan: {_err}")
+
             _vek_oldin = _sanoq(SQL_VEKTOR_QOLGAN)
 
             # BO'LAK-BO'LAK va HAR BO'LAKDAN KEYIN YOZILADI.

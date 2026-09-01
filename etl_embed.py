@@ -267,6 +267,48 @@ UPDATE doc_chunk c
 RETURNING c.id
 """
 
+#: OMMAVIY XESH NUSXALASH — bitta SQL, MODEL CHAQIRILMAYDI.
+#:
+#: `NUSXALA_SQL` bilan AYNI mantiq, farqi: u PARTIYA ichida
+#: ishlaydi (`c.id = ANY(...)`), bu esa BUTUN navbat bo'ylab.
+#:
+#: NEGA KERAK (o'lchangan 2026-09-01): navbatda 81 081 bo'lak bor
+#: edi, shundan 42 325 tasi (52%) allaqachon vektorlangan matnning
+#: NUSXASI. Ular partiya-partiya, modelning 2.3 bo'lak/s tezligiga
+#: BOG'LANIB o'tardi — garchi ularga model UMUMAN kerak bo'lmasa
+#: ham. 2 000 lik partiya 5.4 daqiqa olardi.
+#:
+#: Endi arzon ish AVVAL va BIR YO'LA bajariladi; modelga faqat
+#: HAQIQATAN yangi matn qoladi.
+#:
+#: `embed_model` SHARTDA — boshqa model bilan hisoblangan vektorni
+#: nusxalash modellarni aralashtirardi.
+OMMAVIY_NUSXA_SQL = """
+WITH manba AS (
+    SELECT DISTINCT ON (content_hash)
+           content_hash, embedding, embed_model, embed_dims
+    FROM doc_chunk
+    WHERE embedding IS NOT NULL AND embed_model = %(model)s
+    ORDER BY content_hash, id
+)
+UPDATE doc_chunk c
+   SET embedding          = m.embedding,
+       embed_model        = m.embed_model,
+       embed_dims         = COALESCE(m.embed_dims, %(dims)s),
+       embed_holat        = 'ok',
+       embedded_at        = now(),
+       embed_content_hash = c.content_hash,
+       embed_manba        = 'xesh',
+       embed_xato         = NULL,
+       embed_xato_at      = NULL,
+       embed_urinish      = 0
+  FROM manba m
+ WHERE c.content_hash = m.content_hash
+   AND c.embedding IS NULL
+RETURNING c.id
+"""
+
+
 #: Bitta bo'lak YIQILGANDA. Butun partiya emas — BITTA bo'lak.
 #:
 #: Ilgari `embed_documents()` istisnosi butun yurishni to'xtatardi
@@ -876,6 +918,41 @@ def vectorize_codes(conn, args) -> None:
               "`SELECT recompute_centroid();` dan keyin qayta yurgizing.")
 
 
+def ommaviy_nusxa(conn, args) -> None:
+    """Butun navbat bo'ylab XESHDAN nusxalash. Model chaqirilmaydi.
+
+    Bu ish `vectorize()` ichida ham bor, lekin PARTIYA ichida —
+    ya'ni arzon nusxa qimmat model navbatiga bog'lanib turadi.
+    Bu yerda u BIR YO'LA, bitta SQL bilan bajariladi.
+    """
+    import time
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(ACTIVE_MODEL_SQL)
+        model = cur.fetchone()
+    if not model:
+        sys.exit("XATO: `embed_model` da faol model yo'q.")
+    oldin = _bir_son(conn, "SELECT count(*) FROM doc_chunk "
+                           "WHERE embedding IS NULL")
+    t0 = time.time()
+    with conn.cursor() as cur:
+        cur.execute(OMMAVIY_NUSXA_SQL,
+                    {"model": model["name"], "dims": model["dims"]})
+        n = cur.rowcount
+    conn.commit()
+    keyin = _bir_son(conn, "SELECT count(*) FROM doc_chunk "
+                           "WHERE embedding IS NULL")
+    print(f"Xeshdan nusxalandi: {n:,} ta bo'lak, {time.time() - t0:.1f} s "
+          f"(model CHAQIRILMADI)")
+    print(f"  navbat: {oldin:,} -> {keyin:,}")
+
+
+def _bir_son(conn, sql: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        return int(cur.fetchone()[0])
+
+
 def qamrov_korsat(conn) -> None:
     """Vektorlash qamrovi — hech narsa yozmaydi.
 
@@ -906,6 +983,26 @@ def qamrov_korsat(conn) -> None:
     print(f"\nmodel mos emas         {v['model_mos_emas']:>9,}")
     print(f"  matn o'zgargan         {v['matn_ozgargan']:>9,}")
     print(f"  manba: model / xesh    {v['modeldan']:>9,} / {v['xeshdan']:,}")
+
+    # OPERATSION QAMROV — FAQAT OCHIQ TENDERLAR (Q-2).
+    #
+    # Umumiy foiz TARIXNI ham sanaydi: yopilgan tenderning bo'lagi
+    # vektorlanmagani RAG uchun ahamiyatsiz — unga taklif berilmaydi.
+    # Q-1 dagi bilan AYNI saboq: bitta foiz ikki savolga javob
+    # bera olmaydi.
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT count(*)                                        AS jami,
+                   count(*) FILTER (WHERE c.embedding IS NOT NULL) AS bor
+              FROM doc_chunk c JOIN tender t ON t.id = c.tender_id
+             WHERE t.status = 'open'""")
+        o = cur.fetchone()
+    if o and o["jami"]:
+        print("\nOCHIQ tenderlar bo'yicha (OPERATSION):")
+        print(f"  bo'lak                 {o['jami']:>9,}")
+        print(f"  vektorlangan           {o['bor']:>9,}")
+        print(f"  QAMROV                 "
+              f"{100.0 * o['bor'] / o['jami']:>8.2f}%")
 
     if sabablar:
         print("\nNEGA VEKTORLANMAGAN:")
@@ -984,6 +1081,9 @@ def main() -> None:
     ap.add_argument("--all", action="store_true",
                     help="Allaqachon bo'lingan hujjatlarni ham qayta bo'ladi")
     ap.add_argument("--limit", type=int, help="Nechta hujjat (sinov uchun)")
+    ap.add_argument("--xeshdan", action="store_true",
+                    help="Butun navbat bo'ylab XESHDAN nusxalash "
+                         "(model chaqirilmaydi, sekundlar)")
     ap.add_argument("--qamrov", action="store_true",
                     help="Vektorlash QAMROVINI ko'rsatadi va chiqadi "
                          "(bazaga yozmaydi)")
@@ -1000,9 +1100,9 @@ def main() -> None:
 
     if not (args.chunks or args.vectors or args.tenders or args.codes
             or args.count_only or args.qamrov or args.model_ozgardi
-            or args.matn_ozgardi):
-        ap.error("--chunks, --vectors, --tenders, --codes, --qamrov yoki "
-                 "--count-only ni tanlang.")
+            or args.matn_ozgardi or args.xeshdan):
+        ap.error("--chunks, --vectors, --tenders, --codes, --xeshdan, "
+                 "--qamrov yoki --count-only ni tanlang.")
     if psycopg2 is None:
         sys.exit("XATO: pip install psycopg2-binary")
     if not args.dsn:
@@ -1013,6 +1113,11 @@ def main() -> None:
         # --- QAMROV: hech narsa yozmaydi, faqat ko'rsatadi ---
         if args.qamrov:
             qamrov_korsat(conn)
+            return
+
+        # ARZON ISH BIRINCHI: xeshdan nusxalash modelsiz va tez.
+        if args.xeshdan:
+            ommaviy_nusxa(conn, args)
             return
 
         # --- BOSHQARILADIGAN QAYTA VEKTORLASH ---

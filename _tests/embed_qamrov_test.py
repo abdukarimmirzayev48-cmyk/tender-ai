@@ -208,19 +208,102 @@ def test_qamrov(conn) -> None:
           f"navbatda={v['navbatda']:,} qamrov={v['qamrov_foiz']}%")
 
 
+def test_ommaviy_nusxa(conn) -> None:
+    """XESHDAN OMMAVIY nusxalash — arzon ish modelga bog'lanmasin (Q-2)."""
+    section("Xeshdan OMMAVIY nusxalash")
+    src = io.open(os.path.join(ROOT, "etl_embed.py"), encoding="utf-8").read()
+
+    check("`--xeshdan` bayrog'i bor", '"--xeshdan"' in src)
+    check("`OMMAVIY_NUSXA_SQL` mavjud", "OMMAVIY_NUSXA_SQL" in src)
+
+    blok = src[src.index("OMMAVIY_NUSXA_SQL = "):]
+    blok = blok[:blok.index('"""', blok.index('"""') + 3) + 3]
+    # MODEL SHARTDA: boshqa model bilan hisoblangan vektorni
+    # nusxalash modellarni ARALASHTIRARDI va masofa ma'nosiz
+    # bo'lardi.
+    check("nusxalash `embed_model` bilan CHEKLANGAN",
+          "embed_model = %(model)s" in blok)
+    # MAVJUD VEKTOR USTIGA YOZILMAYDI.
+    check("faqat `embedding IS NULL` qatorlar yangilanadi",
+          "c.embedding IS NULL" in blok)
+    # MANBASI BELGILANADI — keyin "qaysi vektor qayerdan" deb
+    # so'ralganda javob bo'lsin.
+    check("manba `xesh` deb yoziladi", "embed_manba        = 'xesh'" in blok)
+    check("`DISTINCT ON (content_hash)` — bir xeshdan bittasi",
+          "DISTINCT ON (content_hash)" in blok)
+
+    # QUVURDA ARZON ISH BIRINCHI bo'lsin.
+    etl = io.open(os.path.join(ROOT, "run_etl.py"), encoding="utf-8").read()
+    check("quvur `--xeshdan` ni yurgizadi", '"--xeshdan"' in etl)
+    check("`--xeshdan` MODEL navbatidan OLDIN",
+          etl.index('"--xeshdan"') < etl.index('"--vectors"'),
+          "arzon ish qimmat ishga bog'lanib qolmasin")
+
+    if conn is None:
+        check("baza kerak", False, "o'tkazib yuborildi")
+        return
+
+    # OPERATSION QAMROV ALOHIDA — Q-1 dagi bilan AYNI saboq.
+    check("`--qamrov` OCHIQ tenderlar qamrovini alohida beradi",
+          "OCHIQ tenderlar bo'yicha (OPERATSION)" in src,
+          "yopiq tenderning bo'lagi RAG uchun ahamiyatsiz")
+
+    with conn.cursor() as cur:
+        cur.execute("""SELECT count(*),
+                              count(*) FILTER (WHERE c.embedding IS NOT NULL)
+                         FROM doc_chunk c JOIN tender t ON t.id = c.tender_id
+                        WHERE t.status = 'open'""")
+        jami, bor = cur.fetchone()
+        cur.execute("SELECT count(*) FROM doc_chunk")
+        umumiy = cur.fetchone()[0]
+    if jami:
+        print(f"      OCHIQ: {bor:,}/{jami:,} = {100.0 * bor / jami:.1f}% "
+              f"(umumiy korpus {umumiy:,})")
+    # IKKI FOIZ BOSHQA raqam bo'lishi kerak — aks holda ajratishning
+    # ma'nosi yo'q.
+    with conn.cursor() as cur:
+        cur.execute("SELECT qamrov_foiz FROM v_embedding_coverage")
+        umumiy_foiz = float(cur.fetchone()[0] or 0)
+    check("operatsion va umumiy qamrov BOSHQA raqam",
+          jami == 0 or abs(100.0 * bor / jami - umumiy_foiz) > 0.01,
+          f"ochiq={100.0 * bor / max(jami, 1):.2f}% umumiy={umumiy_foiz}%")
+
+    # MODEL ARALASHMAGAN: bitta korpusda bitta model.
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT embed_model FROM doc_chunk "
+                    "WHERE embedding IS NOT NULL")
+        modellar = {r[0] for r in cur.fetchall()}
+    check("vektorlangan bo'laklarda BITTA model", len(modellar) <= 1,
+          str(sorted(m for m in modellar if m)))
+
+
 def test_sabab_korinishi(conn) -> None:
     section("Har vektorlanmagan bo'lak NEGA vektorlanmagani")
     if conn is None:
         check("baza kerak", False, "o'tkazib yuborildi")
         return
+    # IKKALA SON BITTA SO'ROVDAN — aks holda sinov POYGAGA tushadi.
+    #
+    # O'LCHANGAN (2026-09-01): ikki alohida `execute` orasida
+    # vektorlash ETL i yurib turgan edi va sonlar 35 905 / 35 877
+    # bo'lib chiqdi. Bu NUQSON EMAS — ma'lumot o'zgargan. Lekin
+    # sinov "yig'indi noto'g'ri" deb yiqilardi va u yiqilish
+    # SABABSIZ ko'rinardi.
+    #
+    # Bitta so'rov = bitta lahza. Endi ETL parallel yursa ham
+    # sinov barqaror.
     with conn.cursor() as cur:
+        cur.execute("""
+            SELECT (SELECT count(*) FROM v_embedding_state
+                     WHERE holat <> 'ok')                       AS jami,
+                   COALESCE((SELECT sum(soni)
+                               FROM v_embedding_pending_reason), 0) AS yigindi""")
+        jami, yigindi = cur.fetchone()
         cur.execute("SELECT holat, sabab, soni FROM v_embedding_pending_reason")
         r = cur.fetchall()
-        cur.execute("SELECT count(*) FROM v_embedding_state WHERE holat <> 'ok'")
-        jami = cur.fetchone()[0]
     check("sabab ko'rinishi ishlaydi", True, f"{len(r)} ta sabab")
     check("sabablar yig'indisi = vektorlanmaganlar soni",
-          sum(x[2] for x in r) == jami, f"{sum(x[2] for x in r)} vs {jami}")
+          yigindi == jami, f"{yigindi} vs {jami}")
     for x in r:
         check(f"sabab bo'sh emas: {x[0]}", bool(x[1]), str(x))
 
@@ -549,6 +632,7 @@ def main() -> None:
         tid = r[0] if r else None
         tozala(conn)
         test_qamrov(conn)
+        test_ommaviy_nusxa(conn)
         test_sabab_korinishi(conn)
         if tid is not None:
             test_baza_qulflari(conn, tid)
