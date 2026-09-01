@@ -145,6 +145,31 @@ def test_bazaviy_fayl():
     for u, d in b["usullar"].items():
         for m in ("recall_at_k", "precision_at_k", "mrr", "ndcg_at_k"):
             check(f"{u}: '{m}' hisoblangan", d.get(m) is not None, str(d.get(m)))
+    # T-2 TUZATISHI (2026-09-02): METRIKA QAMROVI PER-TENDER.
+    #
+    # Men "korpus 57% o'sdi, sifat o'zgarmadi" deb yozgan edim va
+    # bu XULOSA CHIQARIB BO'LMAYDIGAN da'vo edi. `rag_eval.py`
+    # dagi HAR qidiruv `WHERE c.tender_id = %(tender_id)s` bilan
+    # cheklangan: boshqa tenderning bo'lagi nomzodlar to'plamiga
+    # UMUMAN kira olmaydi. Ya'ni korpusning boshqa joyida qancha
+    # o'sish bo'lsa ham, bu metrikalarga TA'SIR QILA OLMAYDI.
+    #
+    # O'LCHANDI: 19 holatning 8 tenderida 2 073 bo'lak bor va
+    # ularning HAMMASI bazaviy o'lchovdan oldin vektorlangan
+    # (fon vazifasi ularga TEGMAGAN). Ya'ni bir xil raqamlar
+    # DETERMINIZMNI tasdiqlaydi, korpus o'sishiga chidamlilikni
+    # EMAS.
+    #
+    # Bu qo'riqcha shuning uchun turadi: qamrov o'zgarsa (masalan
+    # qidiruv korpus bo'ylab qilinadigan bo'lsa) sinov yiqiladi va
+    # yuqoridagi xulosa qayta yozilishi kerak bo'ladi.
+    kod = io.open(os.path.join(ROOT, "_tests", "ai_eval", "rag_eval.py"),
+                  encoding="utf-8").read()
+    check("qidiruv PER-TENDER cheklangan (korpus bo'ylab EMAS)",
+          "c.tender_id = %(tender_id)s" in kod)
+    check("holat tenderi HAR qidiruvga uzatiladi",
+          'qidir(conn, usul, cs["tender_id"], cs["savol"], k)' in kod)
+
     # T-2: QAYSI QATLAM O'LCHANMAGANI ANIQ YOZILGAN bo'lsin.
     #
     # Reyestrda T-2 "RAG qatlamlari O'LCHANMAGAN" deb yozilgan edi

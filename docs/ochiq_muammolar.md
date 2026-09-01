@@ -338,9 +338,24 @@ Batafsil: `docs/saved_search.md`.
 > NOTO'G'RI. A qatlami javob sifatining **yuqori chegarasi**:
 > qidiruv topmagan narsani model ham ayta olmaydi.
 >
-> Korpus **57% o'sgach** (105k -> 170k bo'lak) qayta o'lchandi:
-> gibrid recall@8 **0.705**, mrr **0.699**, iqtibos **1.000** —
-> bazaviy bilan **aynan bir xil**.
+> Qayta o'lchandi (korpus **100%** vektorlangach, 189 787
+> bo'lak): gibrid recall@8 **0.705**, mrr **0.699**, iqtibos
+> **1.000** — bazaviy bilan aynan bir xil.
+>
+> **DA'VO TUZATILDI.** Men avval buni "korpus o'sdi, sifat
+> o'zgarmadi" deb yozgan edim — bu **xulosa chiqarib
+> bo'lmaydigan** da'vo edi. `rag_eval.py` dagi har qidiruv
+> `WHERE c.tender_id = %(tender_id)s` bilan cheklangan, ya'ni
+> boshqa tenderning bo'lagi nomzodlarga **umuman kira
+> olmaydi**. O'lchandi: 19 holatning 8 tenderida 2 073 bo'lak
+> bor va hammasi bazaviydan **oldin** vektorlangan — fon
+> vazifasi ularga **tegmagan**. Bir xil raqamlar
+> **determinizmni** tasdiqlaydi, korpus o'sishiga chidamlilikni
+> emas. Qo'riqcha `rag_eval_test` ga qo'shildi (79 ta).
+>
+> Kechikish esa taqqoslanadigan bo'ldi (fon jarayoni tugagach):
+> semantik **21.9s -> 16.5s**, gibrid **1.84s -> 1.67s** — ya'ni
+> avvalgi 44.9s butunlay fon vektorlashining ta'siri edi.
 >
 > **NAMUNA KICHIK: 7 javobli holat.** 0.705 ni statistik da'vo
 > deb o'qib bo'lmaydi va sinov endi buni TALAB qiladi.
