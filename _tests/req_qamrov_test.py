@@ -213,6 +213,70 @@ def test_baza(db):
 
 
 # =====================================================================
+def test_operatsion_qamrov(db):
+    """OPERATSION qamrov TARIXIY qamrovdan ALOHIDA (Q-1)."""
+    bolim("7. OPERATSION va TARIXIY qamrov ARALASHMAYDI")
+    r = db.query_one("SELECT * FROM v_requirement_qamrov WHERE company_id=2")
+    if not r:
+        check("qamrov qatori bor", False, "company_id=2 topilmadi")
+        return
+    for ustun in ("ochiq_talab_bor", "ochiq_navbatda", "ochiq_ishlangan",
+                  "ochiq_ishlangan_foiz"):
+        check(f"`{ustun}` ustuni bor", ustun in r)
+
+    # O'LCHANGAN SABOQ (2026-09-01): navbatdagi OCHIQ tenderlar
+    # ishlangach `ishlangan_foiz` atigi 32.2 -> 34.5 bo'ldi, chunki
+    # qolgan 2 365 tender YOPIQ. Ikki foiz BOSHQA savolga javob
+    # beradi va ularni bir-birining o'rniga ko'rsatish "orqada
+    # qolyapmiz" degan yolg'on xulosa berardi.
+    check("operatsion foiz TARIXIY foizdan FARQ qiladi",
+          r["ochiq_ishlangan_foiz"] != r["ishlangan_foiz"],
+          f"ochiq={r['ochiq_ishlangan_foiz']} tarixiy={r['ishlangan_foiz']}")
+
+    # Ichki muvofiqlik: ochiq qismlar umumiydan OSHMASLIGI kerak.
+    check("`ochiq_talab_bor` <= `talab_bor`",
+          r["ochiq_talab_bor"] <= r["talab_bor"],
+          f"{r['ochiq_talab_bor']} vs {r['talab_bor']}")
+    check("`ochiq_navbatda` <= `navbatda`",
+          r["ochiq_navbatda"] <= r["navbatda"],
+          f"{r['ochiq_navbatda']} vs {r['navbatda']}")
+    check("`ochiq_ishlangan` <= `ishlangan`",
+          r["ochiq_ishlangan"] <= r["ishlangan"],
+          f"{r['ochiq_ishlangan']} vs {r['ishlangan']}")
+
+    # `navbatda` da OCHIQ tender qolgan bo'lsa — bu HAQIQIY qarz.
+    # Nol bo'lsa — quvur ulguryapti.
+    print(f"      ochiq navbatda: {r['ochiq_navbatda']} · "
+          f"operatsion qamrov: {r['ochiq_ishlangan_foiz']}% · "
+          f"tarixiy: {r['ishlangan_foiz']}%")
+
+    # NAVBATDAGILAR HAMMASI YOPIQ ekanini BAZADAN tekshiramiz —
+    # ustunga ishonmaymiz, ikkinchi yo'ldan sanaymiz.
+    ochiq_navbat = db.scalar("""
+        SELECT count(*) FROM v_requirement_tender_holat h
+          JOIN tender t ON t.id = h.tender_id
+         WHERE h.company_id = 2 AND h.holat = 'navbatda'
+           AND t.status = 'open'""")
+    check("`ochiq_navbatda` mustaqil sanoq bilan MOS",
+          ochiq_navbat == r["ochiq_navbatda"],
+          f"view={r['ochiq_navbatda']} sanoq={ochiq_navbat}")
+
+
+def test_quvur_reyestrni_yurgizadi():
+    """`reyestr` usuli QUVURDA bo'lsin — aks holda qarz qayta to'planadi."""
+    bolim("8. QUVUR ikkala BEPUL usulni ham yurgizadi")
+    src = io.open(os.path.join(ROOT, "run_etl.py"), encoding="utf-8").read()
+    blok = src[src.index("if args.with_requirements:"):][:2500]
+    check("`reyestr` quvurda yurgiziladi", '"reyestr"' in blok,
+          "ilgari FAQAT `naqsh` yurardi va 3078 tender ishlanmay qolgandi")
+    check("`naqsh` ham qoldi", '"naqsh"' in blok)
+    # LLM PUL SARFLAYDI — u quvurda BO'LMASLIGI kerak.
+    check("`llm` usuli quvurda YO'Q", '"llm"' not in blok,
+          "u pul sarflaydi va nazoratsiz yurgizilmasligi kerak")
+
+
+
+# =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="Talab qamrovi sinovi")
     rejim.bayroqlar(ap)
@@ -224,6 +288,7 @@ def main():
 
     test_manba()
     test_endpoint_manba()
+    test_quvur_reyestrni_yurgizadi()
 
     if args.bazasiz or not os.environ.get("XT_DB_DSN"):
         print("\n[i] Bazali tekshiruvlar o'tkazib yuborildi.")
@@ -232,6 +297,7 @@ def main():
         try:
             db.init_pool()
             test_baza(db)
+            test_operatsion_qamrov(db)
         except Exception as e:                                # noqa: BLE001
             check("bazali tekshiruv", False, str(e)[:110])
 

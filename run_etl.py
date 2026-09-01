@@ -947,22 +947,39 @@ def main() -> None:
         # uzoq vektorlash orqasida turib qolmasligi kerak — §16.49 dagi
         # `--tenders` bilan bir xil saboq.
         #
-        # `--method naqsh` — BEPUL. LLM ajratish (`requirement_ai`)
-        # ATAYLAB quvurda YO'Q: u pul sarflaydi va nazoratsiz
-        # yurgizilmasligi kerak.
+        # `reyestr` va `naqsh` — IKKALASI HAM BEPUL. LLM ajratish
+        # (`requirement_ai`) ATAYLAB quvurda YO'Q: u pul sarflaydi va
+        # nazoratsiz yurgizilmasligi kerak.
         if args.with_requirements:
-            _talab_p = {"company_id": args.company, "method": "naqsh"}
-            _talab_oldin = _sanoq(SQL_TALAB_QOLGAN, _talab_p)
-            _ok, _err, _dt, out, _kod = run_script(
-                "etl_requirement.py",
-                ["--company", str(args.company), "--method", "naqsh", "--quiet"])
-            emit(["\n===== post: talablar (naqsh) =====", *out])
-            if not _ok:
-                post_xatolar.append(f"etl_requirement: {_err}")
-            else:
-                siljish_tekshir("talab ajratish", _talab_oldin,
-                                _sanoq(SQL_TALAB_QOLGAN, _talab_p),
-                                post_xatolar)
+            # IKKI USUL, IKKALASI HAM BEPUL. Ilgari FAQAT `naqsh`
+            # yurardi va bu O'LCHANGAN qarz to'plagan edi (Q-1):
+            #
+            #     reyestr urinilmagan tender   3078
+            #       shundan OCHIQ               627
+            #
+            # `reyestr` HUJJATSIZ ishlaydi (tender pozitsiyalarini
+            # o'qiydi), `naqsh` esa hujjat MATNINI talab qiladi va
+            # 249 tenderda `no_text` bergan. Ya'ni quvur aynan
+            # ISHONCHLI va TEKIN yo'lni yurgizmasdi.
+            #
+            # O'lchov: 627 ta tender, 1 199 talab, 4 SEKUND, 0 xato.
+            #
+            # TARTIB: `reyestr` BIRINCHI — u manbaning rasmiy
+            # pozitsiyalari, `naqsh` esa hujjatdan TAXMIN qiladi.
+            for _usul in ("reyestr", "naqsh"):
+                _talab_p = {"company_id": args.company, "method": _usul}
+                _talab_oldin = _sanoq(SQL_TALAB_QOLGAN, _talab_p)
+                _ok, _err, _dt, out, _kod = run_script(
+                    "etl_requirement.py",
+                    ["--company", str(args.company), "--method", _usul,
+                     "--quiet"])
+                emit([f"\n===== post: talablar ({_usul}) =====", *out])
+                if not _ok:
+                    post_xatolar.append(f"etl_requirement[{_usul}]: {_err}")
+                else:
+                    siljish_tekshir(f"talab ajratish ({_usul})", _talab_oldin,
+                                    _sanoq(SQL_TALAB_QOLGAN, _talab_p),
+                                    post_xatolar)
 
             # --- BROKER NAVBATI ---
             #

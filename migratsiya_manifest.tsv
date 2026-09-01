@@ -81,3 +81,4 @@
 620	0062_routing_kelishuv	schema_patch_routing_kelishuv.sql
 630	0063_req_qamrov	schema_patch_req_qamrov.sql
 640	0064_hujjat_dalil	schema_patch_hujjat_dalil.sql
+650	0065_req_ochiq	schema_patch_req_ochiq.sql

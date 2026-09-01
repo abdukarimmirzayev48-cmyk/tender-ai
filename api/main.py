@@ -2517,18 +2517,28 @@ def tender_qualification(tender_id: int, request: Request):
 def requirements_coverage(request: Request):
     """Talab qayta ishlash qamrovi — TUSHUNTIRILADIGAN.
 
-    IKKI FOIZ ATAYLAB AJRATILGAN va ular BOSHQA savolga javob
+    UCH FOIZ ATAYLAB AJRATILGAN va ular BOSHQA savolga javob
     beradi:
 
       `ishlanganda_topildi_foiz` — ISHLANGAN tenderlarning qanchasida
                                    talab topilgan (SIFAT)
       `ishlangan_foiz`           — YAROQLILARNING qanchasi umuman
-                                   ishlangan (O'TKAZUVCHANLIK)
+                                   ishlangan (TARIXIY o'tkazuvchanlik;
+                                   maxrajda YOPIQ tenderlar ham bor)
+      `ochiq_ishlangan_foiz`     — OCHIQ tenderlarning qanchasi
+                                   ishlangan (OPERATSION: ulguryapmizmi)
 
-    Sodda `talabi bor / hamma tender` metrikasi ikkalasini
-    ARALASHTIRADI va "talab yo'q" degan yolg'on xulosaga olib
-    boradi. O'lchandi (2026-08-31): sifat 100.0, o'tkazuvchanlik
-    32.2 — ya'ni past raqam ajratish SIFATI emas, ISHLANMAGANI.
+    Sodda `talabi bor / hamma tender` metrikasi ularni ARALASHTIRADI
+    va "talab yo'q" degan yolg'on xulosaga olib boradi. O'lchandi
+    (2026-08-31): sifat 100.0, o'tkazuvchanlik 32.2 — past raqam
+    ajratish SIFATI emas, ISHLANMAGANI.
+
+    UCHINCHI FOIZ NEGA QO'SHILDI (2026-09-01, Q-1). Navbatdagi
+    OCHIQ tenderlar ishlandi (627 ta, 4 sekund, bepul) va
+    `ishlangan_foiz` atigi 32.2 -> 34.5 ga o'zgardi. Sabab
+    o'lchandi: qolgan 2 365 tenderning HAMMASI YOPIQ. Ya'ni past
+    raqam OPERATSION bo'shliq emas, TARIXIY yozuvlar edi —
+    `ochiq_ishlangan_foiz` esa 100.0.
 
     `navbatda` MAXRAJGA KIRMAYDI: ular hali savol berilmagan
     tenderlar va ularni "talabsiz" deb sanash noma'lumni
