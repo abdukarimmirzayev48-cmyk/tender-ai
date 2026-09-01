@@ -83,3 +83,4 @@
 640	0064_hujjat_dalil	schema_patch_hujjat_dalil.sql
 650	0065_req_ochiq	schema_patch_req_ochiq.sql
 660	0066_aktor_izchil	schema_patch_aktor_izchil.sql
+670	0067_audit_tuzatish	schema_patch_audit_tuzatish.sql

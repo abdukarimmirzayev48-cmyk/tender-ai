@@ -456,6 +456,67 @@ def test_izchillik(db, a_cid, a_aktor):
           "u migratsiya yorlig'i — ish yo'lidan yozilmasin")
 
 
+def test_audit_tuzatish(db):
+    """Audit artefakti YASHIRILMAYDI, BELGILANADI (M-3)."""
+    bolim("6. AUDIT TUZATISHI — append-only buzilmaydi")
+
+    # Jadval append-only. Triggerning O'Z xato matni yo'lni
+    # ko'rsatadi: "Tuzatish kerak bo'lsa YANGI qator qo'shing
+    # (amal='tuzatish')". Patch aynan shu yo'ldan borgan.
+    check("`v_audit_jurnal_haqiqiy` mavjud",
+          db.scalar("SELECT to_regclass('public.v_audit_jurnal_haqiqiy') "
+                    "IS NOT NULL"))
+    check("`v_audit_tuzatish` mavjud",
+          db.scalar("SELECT to_regclass('public.v_audit_tuzatish') "
+                    "IS NOT NULL"))
+
+    # ARTEFAKT O'CHIRILMAGAN — jurnal to'liq qoladi.
+    xom = db.scalar("SELECT count(*) FROM audit_jurnal WHERE id=37")
+    check("tuzatilgan qator jurnalda QOLADI", xom == 1,
+          "append-only: o'chirish audit jurnalini buzardi")
+
+    # LEKIN u "haqiqiy amallar" ro'yxatidan CHIQARILGAN.
+    haqiqiy = db.scalar(
+        "SELECT count(*) FROM v_audit_jurnal_haqiqiy WHERE id=37")
+    check("tuzatilgan qator HAQIQIY amallardan chiqarilgan", haqiqiy == 0)
+    # `tuzatish` yozuvining O'ZI ham chiqariladi — u jurnal haqidagi
+    # metama'lumot, ijarachi amali emas.
+    check("`tuzatish` yozuvining O'ZI ham chiqarilgan",
+          db.scalar("SELECT count(*) FROM v_audit_jurnal_haqiqiy "
+                    "WHERE amal='tuzatish'") == 0)
+
+    # TARIXDA BELGILANADI — yashirilmaydi.
+    from api import aktor as A
+    tarix = {r["id"]: r for r in A.tarix(2, limit=50)}
+    check("`tarix()` tuzatilgan qatorni KO'RSATADI", 37 in tarix,
+          "yashirish audit jurnalidan qator yo'qolgandek ko'rinardi")
+    if 37 in tarix:
+        check("`tuzatilgan` bayrog'i qo'yilgan", tarix[37]["tuzatilgan"] is True)
+        check("tuzatish SABABI ham keladi",
+              "artefakt" in (tarix[37]["tuzatish_izohi"] or ""),
+              str(tarix[37]["tuzatish_izohi"])[:70])
+    # Haqiqiy amal BELGILANMAGAN bo'lishi kerak — aks holda bayroq
+    # hamma qatorga qo'yilayotgan bo'lardi va hech narsani
+    # ajratmasdi.
+    haqiqiylar = [r for r in tarix.values()
+                  if r["amal"] not in ("tuzatish",) and not r["tuzatilgan"]]
+    check("haqiqiy amallar BELGILANMAGAN", len(haqiqiylar) >= 1,
+          f"{len(haqiqiylar)} ta belgilanmagan qator")
+
+    # APPEND-ONLY O'ZI ISHLAYDIMI — "hech narsa buzilmadi" bilan
+    # "qo'riqchi bor" ni ajratamiz.
+    for op, sql in (("UPDATE", "UPDATE audit_jurnal SET izoh='x' "
+                               "WHERE id=37 RETURNING id"),
+                    ("DELETE", "DELETE FROM audit_jurnal "
+                               "WHERE id=37 RETURNING id")):
+        try:
+            db.execute_returning(sql, {})
+            check(f"audit_jurnal {op} TAQIQLANGAN", False, "bajarildi!")
+        except Exception as e:                                # noqa: BLE001
+            check(f"audit_jurnal {op} TAQIQLANGAN",
+                  "FAQAT QO" in str(e), str(e).splitlines()[0][:70])
+
+
 def test_api(db, a_cid, b_cid, a_aktor, b_aktor):
     bolim("7. API — `X-Actor` bilan boshqa ijarachining aktori")
     from fastapi.testclient import TestClient
@@ -612,6 +673,7 @@ def main():
             try:
                 a_cid, b_cid, a_a, b_a = test_baza_qulflari(db)
                 test_izchillik(db, a_cid, a_a)
+                test_audit_tuzatish(db)
                 test_api(db, a_cid, b_cid, a_a, b_a)
             finally:
                 _tozala(db)

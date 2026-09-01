@@ -451,7 +451,21 @@ def yoz(k: Kimlik, *, amal: str, entity: str, entity_id: int,
 def tarix(company_id: int, *, entity: Optional[str] = None,
           entity_id: Optional[int] = None, actor_id: Optional[int] = None,
           limit: int = 200) -> List[Dict[str, Any]]:
-    """Audit tarixi. `company_id` HAR DOIM shartda."""
+    """Audit tarixi. `company_id` HAR DOIM shartda.
+
+    TUZATILGAN YOZUV YASHIRILMAYDI, BELGILANADI (M-3). Jurnal
+    append-only, ya'ni xato yozuv o'chirilmaydi — uning ustiga
+    `amal='tuzatish'` qatori qo'shiladi (triggerning O'Z xato
+    matni shu yo'lni ko'rsatadi).
+
+    Ikkala yo'l ham noto'g'ri bo'lardi:
+      * artefaktni KO'RSATISH — u haqiqiy amaldek o'qiladi;
+      * uni YASHIRISH — audit jurnalidan qator yo'qolgandek
+        ko'rinardi va bu auditni buzardi.
+
+    Shuning uchun qator QOLADI va `tuzatilgan` bayrog'i bilan
+    keladi; sabab `tuzatish_izohi` da.
+    """
     shart = ["company_id = %(cid)s"]
     p: Dict[str, Any] = {"cid": company_id, "lim": max(1, min(limit, 1000))}
     if entity:
@@ -461,11 +475,16 @@ def tarix(company_id: int, *, entity: Optional[str] = None,
     if actor_id is not None:
         shart.append("actor_id = %(aid)s"); p["aid"] = actor_id
     return db.query(
-        "SELECT id, at, amal, entity, entity_id, ishonch, actor_id, "
-        "       actor_login, actor_ism, actor_rol, actor_manba, "
-        "       oldin, keyin, izoh, ip "
-        "  FROM v_audit_tolik WHERE " + " AND ".join(shart) +
-        " ORDER BY at DESC, id DESC LIMIT %(lim)s", p)
+        "SELECT v.id, v.at, v.amal, v.entity, v.entity_id, v.ishonch, "
+        "       v.actor_id, v.actor_login, v.actor_ism, v.actor_rol, "
+        "       v.actor_manba, v.oldin, v.keyin, v.izoh, v.ip, "
+        "       (t.id IS NOT NULL) AS tuzatilgan, t.izoh AS tuzatish_izohi "
+        "  FROM v_audit_tolik v "
+        "  LEFT JOIN audit_jurnal t "
+        "    ON t.amal = 'tuzatish' AND t.entity = 'audit_jurnal' "
+        "   AND t.entity_id = v.id "
+        " WHERE " + " AND ".join("v." + x for x in shart) +
+        " ORDER BY v.at DESC, v.id DESC LIMIT %(lim)s", p)
 
 
 def atribut_sifati(company_id: int) -> List[Dict[str, Any]]:
