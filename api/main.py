@@ -2403,7 +2403,7 @@ class ReviewIn(BaseModel):
     `Literal` bilan qulflangan — noto'g'ri qiymat FastAPI darajasida
     422 beradi va `requirement.review_set()` gacha yetib bormaydi.
     """
-    status: Literal["approved", "rejected", "corrected"]
+    status: Literal["approved", "rejected", "corrected", "uncertain"]
     corrected_value: Optional[str] = None
     note: Optional[str] = None
     #: `compliance.DOC_TYPES` kodi yoki 'yoq' / 'boshqa'.
@@ -2427,6 +2427,8 @@ def requirement_review(req_id: int, body: ReviewIn, request: Request):
     # `approved` va `rejected` — TASDIQLASH huquqi; `corrected` esa
     # ko'rib chiqish. Ular ATAYLAB har xil: qiymatni tuzatish va uni
     # rasman tasdiqlash bir xil vaznda emas.
+    # `uncertain` — ko'rib chiqish huquqi yetarli: u hech narsani
+    # tasdiqlamaydi, aksincha "hal qilinmadi" deb belgilaydi.
     ruxsat(k, "tasdiq" if body.status == "approved"
            else "rad" if body.status == "rejected" else "korib_chiq")
     oldin = requirement.bitta(req_id, cid)
@@ -3623,22 +3625,52 @@ class KodQarorIn(BaseModel):
 
 @app.post("/catalog/{product_id}/kod-tasdiq", status_code=204)
 def kod_tasdiq(product_id: int, body: KodQarorIn, request: Request):
-    """Inson kodni TASDIQLAYDI. Kim tasdiqlagani yozib boriladi."""
+    """Inson kodni TASDIQLAYDI. Aktor, manba va audit yoziladi.
+
+    O'LCHANGAN NUQSON (2026-09-02): bu yo'l `catalog_product_code`
+    ga TO'G'RIDAN-TO'G'RI yozardi — aktorsiz, manbasiz, auditsiz.
+    Natijada bazada 1 048 ta "inson tasdig'i" paydo bo'lgan va
+    ularning hammasi mashina yozgan (16 ta sekundda). Endi bu yo'l
+    `/kod/qaror` bilan AYNI qoidaga bo'ysunadi.
+    """
     acc = current_account(request)
     kim = (acc.get("username") or "").strip()
     if not kim:
         # SERVICE kaliti (ERP) odam emas — tasdiq qo'ya olmaydi.
         raise xatolar.Xato("AUTH_LOGIN_REQUIRED")
-    if not kodlash.tasdiqla(company_id_of(request), product_id, body.code, kim):
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "tasdiq")
+    if not kodlash.tasdiqla(cid, product_id, body.code, kim,
+                            ishonch=k.ishonch, actor_id=k.actor_id):
         raise xatolar.Xato("LINK_NOT_FOUND")
+    audit_yoz(k, request, amal="kod_tasdiq",
+              entity="catalog_product_code", entity_id=product_id,
+              keyin={"code": body.code})
     return None
 
 
 @app.post("/catalog/{product_id}/kod-rad", status_code=204)
 def kod_rad(product_id: int, body: KodQarorIn, request: Request):
-    """Inson taklifni RAD etadi (qator qoladi — takror taklif chiqmasin)."""
-    if not kodlash.rad_et(company_id_of(request), product_id, body.code):
+    """Inson taklifni RAD etadi (qator qoladi — takror taklif chiqmasin).
+
+    RAD ETISH HAM QAROR va u avval umuman kimliksiz edi: bu
+    endpoint sessiyani ham tekshirmasdi, ya'ni SERVICE kaliti bilan
+    ham rad etib bo'lardi va "kim rad etdi" javobsiz qolardi.
+    """
+    acc = current_account(request)
+    kim = (acc.get("username") or "").strip()
+    if not kim:
+        raise xatolar.Xato("AUTH_LOGIN_REQUIRED")
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "korib_chiq")
+    if not kodlash.rad_et(cid, product_id, body.code,
+                          ishonch=k.ishonch, actor_id=k.actor_id):
         raise xatolar.Xato("LINK_NOT_FOUND")
+    audit_yoz(k, request, amal="kod_rad",
+              entity="catalog_product_code", entity_id=product_id,
+              keyin={"code": body.code})
     return None
 
 
@@ -3818,7 +3850,7 @@ def kod_qaror(body: AtamaQarorIn, request: Request):
     if body.qaror == "kod" and body.code:
         n_mahsulot = kodlash.atamaga_kod_biriktir(
             cid, body.kalit, (body.code or "").strip(), kim,
-            qaror_id=row.get("id"))
+            qaror_id=row.get("id"), ishonch=k.ishonch, actor_id=k.actor_id)
     audit_yoz(k, request, amal=f"kod_{body.qaror}",
               entity="kod_qaror", entity_id=int(row.get("id") or 0),
               keyin={"atama": body.atama, "qaror": body.qaror,
@@ -3979,6 +4011,52 @@ def aktor_yangila(actor_id: int, body: AktorYangilashIn, request: Request):
               keyin={"rol": row["rol"], "ism": row["ism"],
                      "active": row["active"]})
     return row
+
+
+@app.get("/validatsiya/holat")
+def validatsiya_holat(request: Request):
+    """INSON TASDIG'I holati — qatlam bo'yicha, DALIL darajasi bilan.
+
+    UCH DARAJA ATAYLAB AJRATILGAN va ular qo'shilmaydi:
+
+        aktorli  — qaysi ODAM qilgani ma'lum   (darvoza SHUNI sanaydi)
+        anonim   — odam, lekin shaxsan noma'lum (kompaniya sessiyasi)
+        mashina  — INSON EMAS
+
+    Ilgari uchalasi bitta raqamga qo'shilardi va natijada mashina
+    yozgan 1 048 ta qator "inson tasdig'i 73.4%" bo'lib ko'rinardi.
+
+    `ulush_foiz` chegaradan O'TMAGUNCHA `null` qaytadi: kichik
+    namunadan foiz chiqarish yolg'on aniqlik bo'lardi.
+
+    `tosiq` — pilot nima uchun yurmayotgani. `null` bo'lsa shu
+    qatlamda aktorli qaror yozish mumkin.
+    """
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "korish")
+    darvoza = db.query(
+        "SELECT qatlam, eng_kam, aktorli, qolgan, anonim, mashina, "
+        "       navbatda, holat, ulush_foiz "
+        "  FROM v_sifat_darvoza WHERE company_id = %(c)s ORDER BY qatlam",
+        {"c": cid})
+    tayyorlik = db.query(
+        "SELECT qatlam, aktor_jami, aktor_faol, aktor_koruvchi, tosiq "
+        "  FROM v_pilot_tayyorlik WHERE company_id = %(c)s ORDER BY qatlam",
+        {"c": cid})
+    t_map = {r["qatlam"]: r for r in tayyorlik}
+    return {
+        "qatlamlar": [{**d, **{kk: vv for kk, vv in
+                               (t_map.get(d["qatlam"]) or {}).items()
+                               if kk != "qatlam"}}
+                      for d in darvoza],
+        # HOLAT ATAMALARI — hisobotda aralashmasin.
+        "izoh": {
+            "INSON_TASDIQLADI": "yetarli sondagi AKTORLI qaror bor",
+            "YETARLI_EMAS": "aktorli qaror bor, lekin chegaradan kam",
+            "TASDIQLANMAGAN": "aktorli qaror YO'Q",
+        },
+    }
 
 
 @app.get("/aktor/holat")

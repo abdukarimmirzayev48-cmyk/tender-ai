@@ -575,11 +575,22 @@ MASHINA_HOLATLARI = frozenset({
 
 #: INSON qo'yadigan holatlar. Har biri `reviewed_by` + `reviewed_at`
 #: + `review_action` ni TALAB qiladi (baza cheklovi).
-INSON_QARORLARI = frozenset({"approved", "rejected", "corrected"})
+#: `uncertain` — KO'RUVCHI ISHONCHI KOMIL EMAS.
+#:
+#: Ilgari faqat uchta yo'l bor edi va shubhadagi ko'ruvchi
+#: MAJBURAN ulardan birini tanlardi. Amalda shubha "approved"
+#: bo'lib yozilardi, chunki u eng kam qarshilikli tugma. Bu
+#: o'lchovni JIMGINA buzardi: aniqlik yuqori ko'rinardi.
+#:
+#: `uncertain` HAM inson qarori — aktor, vaqt va amal shu
+#: darajada majburiy. U "ko'rilmagan" DEGANI EMAS.
+INSON_QARORLARI = frozenset({"approved", "rejected", "corrected",
+                             "uncertain"})
 
 #: Holat -> inson amali. Baza `tender_requirement_amal_chk` bilan
 #: shu moslikni majburlaydi, bu yerda esa yagona manba.
-AMAL = {"approved": "approve", "rejected": "reject", "corrected": "correct"}
+AMAL = {"approved": "approve", "rejected": "reject",
+        "corrected": "correct", "uncertain": "uncertain"}
 
 #: `mashina_holat` lug'ati.
 #:   manba       — platformaning RASMIY reyestr yozuvi (xulosa emas)
@@ -656,10 +667,11 @@ UPDATE tender_requirement
        -- INSON AYNAN NIMA QILDI. `review_status` dan kelib chiqadi,
        -- lekin ALOHIDA yoziladi va CHECK ikkalasining mosligini
        -- majburlaydi — ya'ni holatni yozib amalni unutib bo'lmaydi.
-       review_action   = CASE %(status)s
-                             WHEN 'approved'  THEN 'approve'
-                             WHEN 'rejected'  THEN 'reject'
-                             WHEN 'corrected' THEN 'correct' END
+       -- `AMAL` lug'atidan PARAMETR bilan keladi. Ilgari bu yerda
+       -- `CASE` bor edi, ya'ni moslik IKKI joyda yozilgan edi
+       -- (Python va SQL) va yangi holat qo'shilganda ulardan biri
+       -- unutilishi mumkin edi.
+       review_action   = %(amal)s
  WHERE id = %(id)s AND company_id = %(company_id)s
 RETURNING id, tender_id, review_status, review_action, doc_type,
           reviewed_by, reviewed_actor_id, reviewed_ishonch,
@@ -749,7 +761,7 @@ def review_set(req_id: int, company_id: int, status: str,
         "id": req_id, "company_id": company_id, "status": status,
         "corrected": (corrected or "").strip()[:2000] or None,
         "note": (note or "").strip()[:2000] or None, "by": by,
-        "actor_id": actor_id, "ishonch": ishonch,
+        "actor_id": actor_id, "ishonch": ishonch, "amal": AMAL[status],
         "doc_type": doc_type,
         "blind": (blind_value or "").strip()[:2000] or None})
 

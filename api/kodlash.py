@@ -333,12 +333,22 @@ def taklif_yoz(company_id: int, product_id: int,
 
 
 def tasdiqla(company_id: int, product_id: int, code: str, kim: str,
-             qaror_id: Optional[int] = None) -> bool:
-    """Inson tasdig'i. `kim` — `company_account.username`, MAJBURIY.
+             qaror_id: Optional[int] = None, *,
+             ishonch: str, actor_id: Optional[int] = None) -> bool:
+    """Tasdiq yoziladi. `ishonch` MAJBURIY va standart qiymati YO'Q.
 
-    `kim` bo'sh bo'lsa baza CHECK bilan rad etadi
-    (`catalog_product_code_tasdiq_odam`) — bu ataylab: tasdiq odamsiz
-    yozilmasin.
+    O'LCHANGAN NUQSON (2026-09-02). Ilgari yagona shart `kim` bo'sh
+    bo'lmasligi edi va u MASHINANI TO'XTATMASDI: bazada 1 048 ta
+    "tasdiq" bor edi, `tasdiqlagan` ustunida atigi ikki qiymat
+    ('tizim:auto' va 'kompaniya') va ular 16 ta turli sekundda
+    yozilgan — ya'ni ~34 va ~290 qator/sekund. Bo'sh bo'lmagan
+    satr ODAM degani emas.
+
+    Endi MANBA yoziladi va u bazada tekshiriladi
+    (`catalog_product_code_tasdiq_manba_chk`). `ishonch` ning
+    standart qiymati ATAYLAB yo'q: har chaqiruvchi kim nomidan
+    yozayotganini OSHKOR aytishi shart. Avtomatika ham yoza oladi,
+    lekin `servis` deb belgilanadi va inson ulushiga KIRMAYDI.
     """
     if not (kim or "").strip():
         raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "kim"})
@@ -348,25 +358,35 @@ def tasdiqla(company_id: int, product_id: int, code: str, kim: str,
     row = db.execute_returning(
         "UPDATE catalog_product_code "
         "SET tasdiqlandi = now(), tasdiqlagan = %(kim)s, rad_etildi = NULL, "
+        "    tasdiq_ishonch = %(ish)s, tasdiq_actor_id = %(aid)s, "
         # `COALESCE` — mavjud bog'lanish YO'QOLMAYDI: qayta tasdiqlash
         # audit izini o'chirib yubormasin.
         "    qaror_id = COALESCE(%(q)s, qaror_id) "
         "WHERE product_id = %(p)s AND code = %(k)s AND company_id = %(c)s "
         "RETURNING product_id",
         {"p": product_id, "k": code, "c": company_id, "kim": kim.strip(),
-         "q": qaror_id})
+         "q": qaror_id, "ish": ishonch, "aid": actor_id})
     return row is not None
 
 
-def rad_et(company_id: int, product_id: int, code: str) -> bool:
-    """Inson rad etdi. Qator O'CHIRILMAYDI — aks holda keyingi taklif
-    uni qayta chiqarardi va inson bir ishni takror qilardi."""
+def rad_et(company_id: int, product_id: int, code: str, *,
+           ishonch: str, actor_id: Optional[int] = None) -> bool:
+    """Taklif rad etildi. Qator O'CHIRILMAYDI — aks holda keyingi
+    taklif uni qayta chiqarardi va inson bir ishni takror qilardi.
+
+    RAD ETISH HAM QAROR. Ilgari bu yo'lda umuman hech qanday
+    kimlik yozilmasdi (`tasdiqlagan` NULL ga tushardi), ya'ni
+    "kim rad etdi" degan savol JAVOBSIZ edi. Endi tasdiq bilan
+    AYNI qoida.
+    """
     row = db.execute_returning(
         "UPDATE catalog_product_code "
-        "SET rad_etildi = now(), tasdiqlandi = NULL, tasdiqlagan = NULL "
+        "SET rad_etildi = now(), tasdiqlandi = NULL, tasdiqlagan = NULL, "
+        "    tasdiq_ishonch = %(ish)s, tasdiq_actor_id = %(aid)s "
         "WHERE product_id = %(p)s AND code = %(k)s AND company_id = %(c)s "
         "RETURNING product_id",
-        {"p": product_id, "k": code, "c": company_id})
+        {"p": product_id, "k": code, "c": company_id,
+         "ish": ishonch, "aid": actor_id})
     return row is not None
 
 
@@ -1268,7 +1288,8 @@ def qaror_yoz(company_id: int, kalit: str, atama: str, qaror: str,
 
 
 def atamaga_kod_biriktir(company_id: int, kalit: str, code: str,
-                         kim: str, qaror_id: Optional[int] = None) -> int:
+                         kim: str, qaror_id: Optional[int] = None, *,
+                         ishonch: str, actor_id: Optional[int] = None) -> int:
     """Kalitga tegishli MAHSULOTLARGA kodni biriktiradi. Qaytadi: soni.
 
     `qaror_id` — AUDIT IZI: bu biriktirma QAYSI inson qaroridan
@@ -1299,7 +1320,8 @@ def atamaga_kod_biriktir(company_id: int, kalit: str, code: str,
         if _atama.normal(xom) != kalit:
             continue
         taklif_yoz(company_id, p["id"], [{"code": code, "skor": None}])
-        if tasdiqla(company_id, p["id"], code, kim=kim, qaror_id=qaror_id):
+        if tasdiqla(company_id, p["id"], code, kim=kim, qaror_id=qaror_id,
+                    ishonch=ishonch, actor_id=actor_id):
             n += 1
     return n
 

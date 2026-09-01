@@ -390,8 +390,49 @@ def test_baza_qulflari(cid: int):
             {"p": prod["id"], "k": kod["code"]})
     except Exception as e:                                   # noqa: BLE001
         xato = str(e)
+    # IKKI QO'RIQCHI bor va HAR IKKALASI ham shu yozuvni rad etadi:
+    #   tasdiq_odam       — `tasdiqlagan` bo'sh
+    #   tasdiq_manba_chk  — `tasdiq_ishonch` bo'sh (2026-09-02)
+    # Qaysi biri birinchi ishlashi baza ixtiyorida, shuning uchun
+    # NOMI emas, RAD ETILGANI tekshiriladi — aks holda ikkinchi
+    # qo'riqcha qo'shilganda sinov "himoya yo'qoldi" deb yolg'on
+    # signal berardi.
     check("tasdiq ODAMSIZ yozilmadi (CHECK ushladi)",
-          xato is not None and "tasdiq_odam" in (xato or ""), xato or "yozildi!")
+          xato is not None
+          and ("tasdiq_odam" in xato or "tasdiq_manba_chk" in xato),
+          xato or "yozildi!")
+
+    # --- MANBASIZ tasdiq (2026-09-02) ---
+    # O'LCHANGAN NUQSON: bazada 1 048 ta "inson tasdig'i" bor edi va
+    # hammasi mashina yozgan (16 ta turli sekundda, ~34 va ~290
+    # qator/sek). Yagona shart `tasdiqlagan` bo'sh bo'lmasligi edi —
+    # 'tizim:auto' esa bo'sh emas.
+    xato_m = None
+    try:
+        db.execute_returning(
+            "UPDATE catalog_product_code "
+            "SET tasdiqlandi=now(), tasdiqlagan='tizim:auto' "
+            "WHERE product_id=%(p)s AND code=%(k)s RETURNING product_id",
+            {"p": prod["id"], "k": kod["code"]})
+    except Exception as e:                                   # noqa: BLE001
+        xato_m = str(e)
+    check("MANBASIZ tasdiq yozilmadi (bo'sh bo'lmagan satr != odam)",
+          xato_m is not None and "tasdiq_manba_chk" in (xato_m or ""),
+          xato_m or "yozildi!")
+
+    # --- INSON ishonchi, lekin AKTORSIZ ---
+    xato_a = None
+    try:
+        db.execute_returning(
+            "UPDATE catalog_product_code SET tasdiqlandi=now(), "
+            "tasdiqlagan='x', tasdiq_ishonch='aktor_elon' "
+            "WHERE product_id=%(p)s AND code=%(k)s RETURNING product_id",
+            {"p": prod["id"], "k": kod["code"]})
+    except Exception as e:                                   # noqa: BLE001
+        xato_a = str(e)
+    check("AKTORSIZ inson tasdig'i yozilmadi",
+          xato_a is not None and "aktor_izchil" in (xato_a or ""),
+          xato_a or "yozildi!")
 
     # --- Begona kompaniya bog'lay olmaydi ---
     xato2 = None
@@ -470,14 +511,15 @@ def test_moslik_tasdiqsiz_ishlamaydi(cid: int):
           f"oldin={oldin} keyin={keyin} (kod={kod['code']}, yozildi={yozildi})")
 
     # Endi tasdiqlaymiz — moslik O'SISHI kerak (aks holda quvur uzilgan).
-    kodlash.tasdiqla(cid, prod["id"], kod["code"], kim="kodlash-test")
+    kodlash.tasdiqla(cid, prod["id"], kod["code"], kim="kodlash-test",
+                     ishonch="servis")
     tasdiqdan = len(kodlash.moslik(cid, limit=1000))
     check("tasdiqdan KEYIN moslik ishladi", tasdiqdan >= keyin,
           f"keyin={keyin} tasdiqdan={tasdiqdan}")
 
     # Rad etilsa qator QOLADI (takror taklif chiqmasin), lekin moslikdan
     # chiqadi.
-    kodlash.rad_et(cid, prod["id"], kod["code"])
+    kodlash.rad_et(cid, prod["id"], kod["code"], ishonch="servis")
     raddan = len(kodlash.moslik(cid, limit=1000))
     check("rad etilgach moslikdan chiqdi", raddan <= tasdiqdan,
           f"tasdiqdan={tasdiqdan} raddan={raddan}")
