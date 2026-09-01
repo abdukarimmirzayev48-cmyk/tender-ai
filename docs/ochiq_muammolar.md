@@ -7,16 +7,18 @@ yozilgan.
 Bu ro'yxat 9–21-vazifalar davomida topilgan va **tuzatilmagan**
 narsalarni bir joyga yig'adi. Tuzatilganlari kirmagan.
 
-| Daraja | Soni |
-|---|---|
-| Bloker | 3 |
-| Ma'lumot butunligi | 3 |
-| Qamrov qarzi | 3 |
-| Operatsiya | 5 |
-| Sinov jarayoni | 1 |
-| Tugallanmagan imkoniyat | 2 |
-| Kichik | 5 |
-| **Jami** | **22** |
+| Daraja | Ochiq | Yopilgan |
+|---|---|---|
+| Bloker | 2 | 1 (B-2) |
+| Ma'lumot butunligi | 2 | 1 (M-1) |
+| Qamrov qarzi | 3 | — |
+| Operatsiya | 5 | — |
+| Sinov jarayoni | 0 | 1 (S-1) |
+| Tugallanmagan imkoniyat | 2 | — |
+| Kichik | 5 | — |
+| **Jami** | **19** | **3** |
+
+**Oxirgi yangilanish: 2026-09-01.** Yopilganlar §9 da.
 
 ---
 
@@ -32,7 +34,10 @@ yurgizilmagan**. Ular repozitoriyada tekshiriladi, serverda emas.
 **Ta'siri:** birinchi joylashtirish — sinalmagan yo'l.
 **Manba:** 14-vazifa.
 
-### B-2. Manba `ref_selection_public` HTTP 400 qaytaradi
+### ~~B-2. Manba `ref_selection_public` HTTP 400 qaytaradi~~ — YOPILDI, DA'VO NOTO'G'RI EDI
+
+> Qayta o'lchandi: xato **o'tkinchi** edi, doimiy emas (§9.2).
+> Quyidagi tavsif TARIXIY.
 
 O'lchandi (2026-09-01, to'g'ridan-to'g'ri chaqiruv):
 
@@ -65,7 +70,10 @@ inson tasdig'isiz ishlayapti.
 
 ## 2. MA'LUMOT BUTUNLIGI
 
-### M-1. 26 ta hujjat DALILSIZ `ok` deb belgilangan
+### ~~M-1. 26 ta hujjat DALILSIZ `ok` deb belgilangan~~ — YOPILDI
+
+> Sabab isbotlandi va uch qismli tuzatish qo'llandi (§9.3).
+> Quyidagi tavsif TARIXIY.
 
 ```sql
 SELECT count(*) FROM tender_document d
@@ -188,7 +196,10 @@ yumshoq qoldirilgan.
 
 ## 5. SINOV JARAYONI
 
-### S-1. `run_tests.py` standart holatda BAZASIZ yuradi
+### ~~S-1. `run_tests.py` standart holatda BAZASIZ yuradi~~ — YOPILDI
+
+> Ikki mustaqil bayroq joriy etildi; +527 tekshiruv (§9.1).
+> Quyidagi tavsif TARIXIY.
 
 `--offline` standart. Bazali tekshiruvlar **umuman
 bajarilmaydi**, va "o'tkazib yuborilgan sinov — sinov emas".
@@ -281,3 +292,73 @@ uni har doim uzatadi, ya'ni ma'lumot yo'qolishi bo'lmagan.
 
 Tuzatildi: `f5c1348`. Haqiqiy nuqson — S-1 (bazali sinovlar
 yurmasligi).
+
+---
+
+## 9. YOPILGAN BANDLAR (2026-09-01)
+
+### 9.1 S-1 — sinovlar endi baza bilan yuradi (`e5f0361`)
+
+`--bazasiz` va `--tarmoqsiz` ajratildi; `--offline` eski ma'nosini
+saqlab qoldi. Standart rejim endi `--tarmoqsiz`.
+
+| | Tekshiruv |
+|---|---|
+| Eski standart (`--offline`) | 1951 |
+| Yangi standart (`--tarmoqsiz`) | **2478** |
+| Farq | **+527 (+27%)** |
+
+Darhol ikki eskirgan sinov oshkor bo'ldi: `paid_guard_test`
+(`needs_review` ni yiqilish deb hisoblardi) va `doc_qamrov_test`
+(M-1 ni ko'rsatdi).
+
+### 9.2 B-2 — manba xatosi diagnostika qilinadi (`7da3732`)
+
+**Da'vo noto'g'ri edi.** Qayta o'lchandi: `limit` 2–51, `offset`
+0–153 — hammasi HTTP 200; `fetch_all_tenders` 149 ta yozuv qaytardi.
+Xato **o'tkinchi** edi. "Doimiy" so'zi manbadan emas, bizning
+tasniflagichimizdan kelgan va men uni dalil deb o'qidim.
+
+Asl nuqson boshqa ekan va u ikkita:
+
+1. **Sabab yo'qolardi** — `tasnifla()` javob tanasini olmasdi.
+   Endi 220 belgigacha saqlanadi.
+2. **Bitta uzilish 57 ta tekshiruvni o'ldirardi.** Simulyatsiya
+   bilan tekshirildi: oldin 0 tekshiruv va traceback, keyin 48/50
+   va ikkita nomli FAIL.
+
+Tasnif siyosati **o'zgarmadi**: 4xx hali ham qayta urinilmaydi.
+Bitta tushuntirilmagan kuzatuvga qarab siyosat o'zgartirilmaydi.
+
+### 9.3 M-1 — dalilsiz `ok` (`f948d90`)
+
+**Sabab isbotlandi:** `doctext_test:test_cache` haqiqiy hujjat
+matnini `"sinov"` bilan almashtirar, so'ng matn qatorini o'chirar,
+`holat='ok'` esa qolardi. O'lchov: sinovdan oldin 29, keyin 30.
+
+Uch qismli tuzatish: sinov soxta qatorga o'tkazildi · mavjud zarar
+tiklandi (`ok` 3014 → 2984) · **baza darajasida qo'rovul**
+(`hujjat_ok_dalil_trg`) — endi hech qanday yo'ldan o'tmaydi.
+
+`v_hujjat_dalil_nomuvofiq`: `ok_dalilsiz 0`,
+`ok_status_qarama_qarshi 0`, `yetim_matn 392` (tarixiy).
+
+### 9.4 Yo'l-yo'lakay tuzatilganlar
+
+| Nuqson | Commit |
+|---|---|
+| `review_butunlik_test` fiksturasi 11-vazifadan beri eskirgan | `f5c1348` |
+| `paid_guard_test` `needs_review` ni yiqilish deb hisoblardi | `e5f0361` |
+| `doc_qamrov_test` fikstura tartibi qo'rovulga zid | `f948d90` |
+
+Uchalasi ham bitta sinf: **sinov eskirgan, lekin buni hech narsa
+ko'rsatmagan** — chunki u yurmasdi.
+
+---
+
+## 10. YANGI KUZATUV
+
+**`etl_ishonch_test` to'liq to'plamda BIR MARTA yiqildi**, alohida
+yurgizilganda 179/179 o'tdi. Sabab aniqlanmagan — tashqi
+bog'liqlikdagi beqarorlik. Takrorlansa, endi manba javobi xato
+matnida bo'ladi (§9.2).
