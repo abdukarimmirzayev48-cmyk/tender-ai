@@ -382,6 +382,66 @@ Uchala yo'l ham **mashq qilib ko'rildi** (2026-09-01).
 
 ---
 
+## 12c. NOSOZLIK OGOHLANTIRISHI (O-3)
+
+`systemd` xizmatni qayta ko'taradi, ETL taymeri qayta uradi —
+**lekin buni hech kim bilmasdi**. `/ready` bor edi, uni
+**so'raydigan narsa yo'q** edi.
+
+### Ikki qatlam, ikki xil nosozlik
+
+| Qatlam | Nimani ushlaydi | Qanday |
+|---|---|---|
+| **Krash** | xizmat yiqildi (chiqish kodi ≠ 0) | `OnFailure=` har birlikda |
+| **Sog'liq** | xizmat ko'tarilgan, **lekin sog'lom emas** | `tenderai-health@.timer`, har 10 daq |
+
+Ikkinchisi muhim: migratsiya qo'llanmagan yoki baza yetib
+bo'lmayotgan xizmat uchun **`systemd` da hammasi joyida** ko'rinadi.
+
+### Kanal
+
+**Mavjud kanal ishlatiladi, yangisi qurilmaydi** — loyihada
+allaqachon Telegram boti va SMTP bor.
+
+```bash
+ALERT_TELEGRAM_CHAT=   # bot tokeni TELEGRAM_BOT_TOKEN dan
+ALERT_EMAIL=           # SMTP rekvizitlari yuqoridan
+```
+
+**Operator kanali mijoz kanalidan alohida.** Bildirishnoma
+obunachilari — mijozlar; nosozlik xabari operatorga ketishi kerak.
+Aralashtirish mijozga texnik xabar yuborardi.
+
+**Ikkalasi ham bo'sh bo'lsa** `ogohlantir.sh` buni `journald` ga
+**baland ovozda** yozadi: *"OGOHLANTIRISH HECH QAYERGA
+YUBORILMADI"*. "Nosozlik bor, xabar yo'q" holati ko'rinmasdan
+qolmasin.
+
+### Ogohlantirish asl nosozlikni yashirmasin
+
+`ogohlantir.sh` **har doim 0 qaytaradi** va `Restart=no` — u
+`OnFailure=` dan chaqiriladi, uning yiqilishi yoki takrorlanishi
+asl nosozlikning ustiga ikkinchi shovqin qo'shardi.
+
+### Mashq qilindi (2026-09-01)
+
+| Holat | Natija |
+|---|---|
+| Kanal sozlanmagan | `journald` ga "HECH QAYERGA YUBORILMADI", exit 0 |
+| Email sozlangan | **soxta SMTP serveri xabarni qabul qildi** — mavzu, oluvchi va matn tekshirildi |
+| Ikki argument shakli | `mashq:birlik` ham, `mashq birlik` ham ishlaydi |
+
+```bash
+export TENDERAI_ENVFILE=/tmp/mashq.env
+bash deploy/bin/ogohlantir.sh "production:tenderai-api@production.service"
+```
+
+> **Halol cheklov:** `OnFailure=` va taymerlar **systemd da
+> sinalmagan** — bu muhitda systemd yo'q. Skriptning o'zi va
+> email yuborish yo'li mashq qilindi.
+
+---
+
 ## 13. MASHQ — skriptlar HAQIQATAN yurgizildi (B-1)
 
 **O'lchov: 2026-09-01.** Joylashtirish skriptlari shu paytgacha

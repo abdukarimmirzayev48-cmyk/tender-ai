@@ -14,6 +14,10 @@
 Description=Tender AI ETL (%i)
 After=network-online.target postgresql.service
 Wants=network-online.target
+# NOSOZLIK OGOHLANTIRISHI (O-3). Xizmat yiqilsa `systemd` uni qayta
+# ko'taradi, LEKIN BUNI HECH KIM BILMASDI. Endi `OnFailure=`
+# operatorga xabar yuboradi (Telegram yoki email — `.env` da).
+OnFailure=tenderai-ogohlantirish@%i:%n.service
 
 [Service]
 Type=oneshot

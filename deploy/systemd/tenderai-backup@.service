@@ -4,6 +4,10 @@
 [Unit]
 Description=Tender AI zaxira (%i)
 After=postgresql.service
+# NOSOZLIK OGOHLANTIRISHI (O-3). Xizmat yiqilsa `systemd` uni qayta
+# ko'taradi, LEKIN BUNI HECH KIM BILMASDI. Endi `OnFailure=`
+# operatorga xabar yuboradi (Telegram yoki email — `.env` da).
+OnFailure=tenderai-ogohlantirish@%i:%n.service
 
 [Service]
 Type=oneshot

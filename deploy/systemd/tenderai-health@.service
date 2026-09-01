@@ -1,0 +1,36 @@
+# =============================================================================
+# Tender AI — SOG'LIQ TEKSHIRUVI (O-3)
+# =============================================================================
+# `OnFailure=` FAQAT yiqilgan xizmatni ushlaydi. Lekin xizmat
+# KO'TARILGAN, ammo SOG'LOM EMAS bo'lishi mumkin: migratsiya
+# qo'llanmagan, baza yetib bo'lmayapti, ETL to'xtagan. U holatda
+# `systemd` uchun hammasi joyida va HECH KIM XABAR OLMASDI.
+#
+# Bu birlik `/health`, `/ready`, `/freshness` va bazani so'raydi.
+# Yiqilsa — o'zi ham `OnFailure=` orqali ogohlantirish yuboradi.
+#
+# Ya'ni ikki qatlam: KRASH (`OnFailure` xizmatlarda) va SOG'LIQ
+# (shu taymer). Ular BOSHQA nosozliklarni ushlaydi.
+# =============================================================================
+[Unit]
+Description=Tender AI sog'liq tekshiruvi (%i)
+After=tenderai-api@%i.service
+
+OnFailure=tenderai-ogohlantirish@%i:%n.service
+
+[Service]
+Type=oneshot
+User=tenderai
+Group=tenderai
+WorkingDirectory=/opt/tenderai/%i/current
+EnvironmentFile=/etc/tenderai/%i.env
+ExecStart=/opt/tenderai/%i/current/deploy/bin/health-check.sh %i
+TimeoutStartSec=120
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tenderai-health-%i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

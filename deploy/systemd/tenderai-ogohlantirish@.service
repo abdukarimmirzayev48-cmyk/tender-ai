@@ -1,0 +1,40 @@
+# =============================================================================
+# Tender AI — NOSOZLIK OGOHLANTIRISHI (O-3)
+# =============================================================================
+# `OnFailure=` orqali chaqiriladi:
+#
+#     [Unit]
+#     OnFailure=tenderai-ogohlantirish@%i:%n.service
+#
+# `%i` shu yerda IKKI QISM: `<muhit>:<yiqilgan birlik>`. systemd
+# birlik nomida `:` ga ruxsat beradi va bu bitta parametrni ikkiga
+# bo'lishning eng sodda yo'li.
+#
+# BO'LINISH SKRIPT ICHIDA. Uni birlik faylidagi `sh -c` da qilish
+# `%` belgisini ikki marta qochirishni talab qilardi va u OSON
+# BUZILADI — buzilganda ogohlantirish JIMGINA yiqilardi, ya'ni
+# nosozlik ustiga ikkinchi ko'rinmas nosozlik qo'shilardi.
+#
+# NEGA `Type=oneshot`: xabar yuborildi va tugadi.
+# NEGA `Restart=no`: ogohlantirishning takrorlanishi ASL
+# nosozlikdan ko'proq shovqin qilardi.
+# =============================================================================
+[Unit]
+Description=Tender AI nosozlik ogohlantirishi (%i)
+
+[Service]
+Type=oneshot
+User=tenderai
+Group=tenderai
+# `%I` — qochirilmagan namuna nomi (`<muhit>:<birlik>`).
+# Skript uni o'zi ikkiga bo'ladi.
+ExecStart=/bin/sh -c 'exec /opt/tenderai/"$${1%%%%:*}"/current/deploy/bin/ogohlantir.sh "$$1"' _ %I
+TimeoutStartSec=120
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tenderai-ogohlantirish
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

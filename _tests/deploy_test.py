@@ -371,6 +371,70 @@ def test_url_qorovuli():
         importlib.reload(n2)
 
 
+def test_ogohlantirish():
+    """NOSOZLIK OGOHLANTIRISHI — ikki qatlam (O-3)."""
+    bolim("15. OGOHLANTIRISH — systemd qayta ko'taradi, XABAR BERMASDI")
+
+    check("`ogohlantir.sh` mavjud",
+          os.path.exists(os.path.join(D, "bin", "ogohlantir.sh")))
+    check("`tenderai-ogohlantirish@.service` mavjud",
+          os.path.exists(os.path.join(D, "systemd",
+                                      "tenderai-ogohlantirish@.service")))
+    src = oqi("bin", "ogohlantir.sh")
+
+    # 1-QATLAM: KRASH. Har xizmat birligida `OnFailure=` bo'lsin —
+    # bittasi unutilsa, o'sha xizmat jimgina yiqilardi.
+    import glob as _g
+    birliklar = [os.path.basename(x) for x in
+                 _g.glob(os.path.join(D, "systemd", "tenderai-*.service"))]
+    for b in birliklar:
+        if "ogohlantirish" in b:
+            continue
+        u = oqi("systemd", b)
+        check(f"`{b}` da `OnFailure=` bor",
+              "OnFailure=tenderai-ogohlantirish@" in u,
+              "unutilsa o'sha xizmat JIMGINA yiqilardi")
+
+    # 2-QATLAM: SOG'LOM EMAS. `OnFailure` faqat KRASH ni ushlaydi;
+    # ko'tarilgan-u sog'lom bo'lmagan xizmat (migratsiya
+    # qo'llanmagan, baza yo'q) uchun `systemd` da hammasi joyida.
+    check("sog'liq taymeri bor",
+          os.path.exists(os.path.join(D, "systemd", "tenderai-health@.timer")))
+    t = oqi("systemd", "tenderai-health@.timer")
+    check("sog'liq taymeri MUNTAZAM yuradi", "OnUnitActiveSec=" in t)
+    hs = oqi("systemd", "tenderai-health@.service")
+    check("sog'liq tekshiruvi ham OGOHLANTIRADI",
+          "OnFailure=tenderai-ogohlantirish@" in hs)
+
+    # OPERATOR KANALI MIJOZ KANALIDAN ALOHIDA.
+    check("operator chati ALOHIDA sozlama", "ALERT_TELEGRAM_CHAT" in src,
+          "mijoz obunachilariga texnik xabar ketmasin")
+    check("email kanali ham bor", "ALERT_EMAIL" in src)
+
+    # JIM QOLMASIN: hech qayerga ketmagani JURNALGA yozilsin.
+    check("hech qayerga ketmagani JURNALGA yoziladi",
+          "HECH QAYERGA YUBORILMADI" in src)
+
+    # OGOHLANTIRISH ASL NOSOZLIKNI YASHIRMASIN.
+    check("`ogohlantir.sh` har doim 0 qaytaradi",
+          src.rstrip().endswith("exit 0"),
+          "yiqilsa asl nosozlik yashirinardi")
+    u = oqi("systemd", "tenderai-ogohlantirish@.service")
+    check("ogohlantirish QAYTA URINMAYDI", "Restart=no" in u,
+          "takrorlanishi asl nosozlikdan ko'proq shovqin qilardi")
+
+    for muhit in ("production", "staging"):
+        e = oqi("env", f"{muhit}.env.example")
+        check(f"{muhit}: `ALERT_TELEGRAM_CHAT` namunada", "ALERT_TELEGRAM_CHAT" in e)
+        check(f"{muhit}: `ALERT_EMAIL` namunada", "ALERT_EMAIL" in e)
+
+    # MASHQ QILISH MUMKIN.
+    check("`ogohlantir.sh` muhit yo'li ALMASHTIRILADI",
+          "TENDERAI_ENVFILE" in src)
+    check("`health-check.sh` ham mashq qilinadi",
+          "TENDERAI_ENVFILE" in oqi("bin", "health-check.sh"))
+
+
 def test_tashqi_nusxa():
     """Zaxiraning TASHQI nusxasi (O-2)."""
     bolim("14. TASHQI NUSXA — bitta disk yetarli emas")
@@ -552,6 +616,7 @@ def main():
     test_url_qorovuli()
     test_muhit_fayli_shellda()
     test_tashqi_nusxa()
+    test_ogohlantirish()
     test_hujjat()
 
     otdi = sum(1 for _n, ok, _d in _natija if ok)

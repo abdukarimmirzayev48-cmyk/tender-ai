@@ -20,6 +20,10 @@ Documentation=file:///opt/tenderai/%i/current/docs/deploy.md
 # bo'lmasa (boshqariladigan baza) bu qator zararsiz — `Wants` yumshoq.
 After=network-online.target postgresql.service
 Wants=network-online.target
+# NOSOZLIK OGOHLANTIRISHI (O-3). Xizmat yiqilsa `systemd` uni qayta
+# ko'taradi, LEKIN BUNI HECH KIM BILMASDI. Endi `OnFailure=`
+# operatorga xabar yuboradi (Telegram yoki email — `.env` da).
+OnFailure=tenderai-ogohlantirish@%i:%n.service
 
 [Service]
 Type=exec

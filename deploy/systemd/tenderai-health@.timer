@@ -1,0 +1,25 @@
+# =============================================================================
+# Tender AI — sog'liq tekshiruvi jadvali (O-3)
+# =============================================================================
+# HAR 10 DAQIQADA. Nega bunchalik tez-tez emas va bunchalik siyrak
+# emas:
+#   - tezroq (1 daq) bo'lsa jurnal shovqinga to'ladi va o'tkinchi
+#     qayta ishga tushish ham ogohlantirish berardi;
+#   - sekinroq (1 soat) bo'lsa uzilish yarim soat payqalmasdi.
+#
+# `Persistent=false`: mashina uxlab turgan vaqtdagi tekshiruvlarni
+# uyg'ongach QAYTA yurgizishning ma'nosi yo'q — ular o'tmish
+# haqidagi savol, sog'liq esa HOZIRGI holat.
+# =============================================================================
+[Unit]
+Description=Tender AI sog'liq tekshiruvi jadvali (%i)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+Persistent=false
+Unit=tenderai-health@%i.service
+
+[Install]
+WantedBy=timers.target

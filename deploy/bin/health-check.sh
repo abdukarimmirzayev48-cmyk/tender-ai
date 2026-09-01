@@ -21,7 +21,10 @@
 set -uo pipefail
 
 MUHIT="${1:?foydalanish: health-check.sh <staging|production>}"
-ENVFILE="/etc/tenderai/${MUHIT}.env"
+# Yo'l almashtirilishi mumkin — mashq uchun (B-1 dagi bilan bir xil
+# sabab: qotirilgan yo'l skriptni serverdan tashqarida yurgizib
+# bo'lmaydigan qiladi).
+ENVFILE="${TENDERAI_ENVFILE:-/etc/tenderai/${MUHIT}.env}"
 [ -f "$ENVFILE" ] || { echo "muhit fayli yoq: $ENVFILE"; exit 2; }
 
 set -a
