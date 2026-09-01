@@ -432,8 +432,14 @@ def test_musbat_tasdiq(conn) -> None:
     # 3. QUVUR ULARNI CHAQIRADIMI. Funksiya yozilib, ulanmasligi —
     #    aynan shu bo'limdagi 3-nosozlik edi.
     src = io.open(os.path.join(ROOT, "run_etl.py"), encoding="utf-8").read()
+    # Q-1 dan keyin quvur IKKALA bepul usulni ham yurgizadi va
+    # siljish HAR IKKALASIDA tekshiriladi, shuning uchun chaqiruv
+    # f-satr bo'lib qoldi (`f"talab ajratish ({_usul})"`).
     check("talab ajratishdan keyin siljish tekshiriladi",
-          'siljish_tekshir("talab ajratish"' in src)
+          'siljish_tekshir(f"talab ajratish' in src)
+    check("quvur IKKALA bepul usulni ham yurgizadi",
+          'for _usul in ("reyestr", "naqsh")' in src,
+          "ilgari faqat `naqsh` yurardi — 3078 tender ishlanmay qolgandi")
     check("vektorlashdan keyin siljish tekshiriladi",
           'siljish_tekshir("vektorlash"' in src)
     check("korpus o'sishi hisobga olinadi (`QUVIB YETDI`)",
