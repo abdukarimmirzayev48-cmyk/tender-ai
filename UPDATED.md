@@ -633,15 +633,40 @@ Batafsil: `AVTOMATLASHTIRISH.md` (jadval), `docs/integration/*.md` (har modul).
 > qatlam quriladi, sinovlari o'tadi, **lekin uni hech kim ishlatmaydi**.
 > Yangi qatlam qo'shishdan OLDIN quyidagi hisoblagichlarni ko'ring.
 
-### 🔴 Inson halqasi hisoblagichlari — qayta o'lchandi (2026-08-31)
+### 🔴 Inson halqasi hisoblagichlari — qayta o'lchandi (2026-09-01)
 
-| Qatlam | Hisoblagich | Qiymat | Xulosa |
-|---|---|---|---|
-| Yo'naltirish | `tender_routing.inson_qaror` | **30** | ✅ ishlagan yagona halqa |
-| Talab ko'rish | `tender_requirement.reviewed_by <> 0` | **0** | 🔴 bo'sh |
-| Talab yorliqlash | `v_requirement_labeled` | **0** | 🔴 bo'sh |
-| Kodlash qarori | `kod_qaror` (yakunlangan) | **0** | 🔴 bo'sh (maqsad: 40) |
-| Ko'rib chiqish piloti | `review_pilot` | 30 qator, natija yo'q | 🟡 boshlangan, tugatilmagan |
+**DA'VO ANIQLASHTIRILDI.** Avval bu bo'lim "halqa bo'sh" degan bitta
+xulosa berardi. Qatlam bo'yicha o'lchanganda manzara boshqa chiqdi:
+halqa **bo'sh emas, NOTEKIS**. Endi u `v_inson_halqasi` da o'lchanadi.
+
+| Qatlam | Jami | Inson qarori | Navbatda | Ulush |
+|---|---|---|---|---|
+| Kod tasdig'i | 1 427 | **1 048** | 379 | 🟢 **73.4%** |
+| Yo'naltirish | 310 | **31** | 279 | 🟡 10.0% |
+| Talab ko'rigi | 11 099 | **0** | 8 445 | 🔴 **0.0%** |
+
+"Halqa bo'sh" degan bitta raqam bu farqni **yashirardi** va kod
+tasdig'i qatlamini ham "ishlamayapti" deb hisoblashga olib borardi.
+
+**"Ishlatilmagan" ≠ "ishlamaydi".** Talab ko'rigi yo'li endi
+uchidan-uchiga sinaladi (`POST /requirements/{id}/review`): darvoza,
+kimlik, **bazaga yozilishi** va ijarachi izolyatsiyasi. Yo'l
+**ishlaydi** — bo'shlik muhandislik nuqsoni emas.
+
+| Pilot | Qiymat |
+|---|---|
+| Yaratilgan | 2026-08-26 |
+| Jami | 30 |
+| Hali ochiq | **8** |
+| **Eskirgan** | **22** |
+| Kutayotgan talab | 352 |
+| **Qaror berilgan** | **0** |
+
+`pilot_yarat()` ataylab idempotent va **qayta qurish yo'li yo'q** —
+ya'ni muddati o'tgan to'plam yangisini **bloklab** turibdi. Bu
+**mahsulot qarori**: eskirgan namunani tashlash xolislikni buzadi,
+saqlash esa halqani bloklaydi. `v_pilot_holat` holatni ko'rsatadi,
+qarorni emas.
 
 **Soxta tasdiq YO'Q QILINDI.** Avval 1 487 ta talab `review_status='approved'`
 va `reviewed_by = 0` bilan turardi. Hozir o'lchangan taqsimot:
@@ -1248,8 +1273,91 @@ ular har 30 soniyada keladi.
    keyin ma'lum bo'ladi. Taxminiy raqam yozilmadi.
 
 
+
 ---
 
-*Oxirgi yangilanish: 2026-08-31. Bu faylni yangilash qoidasi — har commit'dan
+## 27. Sifat qatlami: 15–21-vazifalar va ochiq muammolar reyestri — 2026-09-01
+
+Bu qatlamda **yangi imkoniyat qo'shilmadi**. Mavjudlarining
+**o'lchovi, halolligi va qo'riqchilari** ustida ishlandi.
+
+### 27.1 Vazifalar (15–21)
+
+| № | Ish | O'lchangan natija |
+|---|---|---|
+| 15 | Katalog kodlash qamrovi | 0 → **467** aniq kod, chegara **o'zgarmadi**; 383 inson yorlig'iga nisbatan **99.7%** |
+| 16 | `Кабель` soxta musbatlari | precision **0.689 → 1.000**, recall yo'qotilmadi |
+| 17 | Yo'naltirish kelishuvi | `review` endi 0% emas — u **maxrajga kirmaydi**; tarixiy haqiqat saqlanadi |
+| 18 | Talab qamrovi | **sifat 100%** va **o'tkazuvchanlik 32.2%** ajratildi; `hisobga_olinmagan = 0` |
+| 19 | Ommaviy manzil | yagona manba `api/ommaviy_url.py`; qurilmadan **4 ta `localhost` chiqarildi** |
+| 20 | API xatolari | **105 kod**, 315 tarjima; `raise HTTPException` **75 → 0** |
+| 21 | Saqlangan qidiruv | CRUD **ishlaydi**; 3 qism **keyinga qoldirilgan** deb yozildi |
+
+### 27.2 Ochiq muammolar reyestri
+
+`docs/ochiq_muammolar.md` — 9–21-vazifalar davomida topilgan va
+**tuzatilmagan** narsalar bir joyda, har biri **o'lchangan dalil**
+bilan. Boshlanishda **22 band**; shundan **8 tasi yopildi**.
+
+| Band | Natija |
+|---|---|
+| **S-1** | Sinovlar standart holatda **bazasiz** yurardi → ikki o'q; **+527 tekshiruv (+27%)** |
+| **B-1** | Skriptlar **hech qachon bajarilmagan** edi → mashq qilindi, **2 nuqson** topildi |
+| **B-2** | ~~Manba HTTP 400 doimiy~~ — **da'vo noto'g'ri edi**, xato o'tkinchi |
+| **B-3** | Halqa **bo'sh emas, notekis**; yo'l **ishlaydi** |
+| **M-1** | **30 hujjat dalilsiz `ok`** — sabab isbotlandi, baza endi rad etadi |
+| **M-2** | ~~Aktor noma'lum~~ — **aniq belgilangan** edi; izchillik endi bazada |
+| **M-3** | Audit artefakti — **storno** yozuvi bilan belgilandi |
+| **Q-1** | Ochiq tenderlar qamrovi **100%**; quvurdagi bo'shliq yopildi |
+| **Q-2** | Xeshdan ommaviy nusxalash — ochiq qamrov **33.1% → 77.2%** |
+| **O-4** | `pip-audit`: **8 zaiflik** topildi va tuzatildi |
+
+### 27.3 Ikki da'vom noto'g'ri chiqdi
+
+Halollik uchun yoziladi: **B-2** da "doimiy" so'zini, **M-2** da
+`NULL aktor` ni **dalil** deb o'qidim. Ikkalasi ham tizimning
+**o'z yorlig'i** edi, manba haqidagi fakt emas. Ikkala holatda ham
+asl nuqson boshqa joyda chiqdi (diagnostika yo'qligi; qoidaning
+bazada emasligi) va o'sha tuzatildi.
+
+### 27.4 Takrorlangan naqsh: eskirgan sinov
+
+Uch sinov eskirgan edi va **buni hech narsa ko'rsatmasdi** — chunki
+ular **yurmasdi**:
+
+| Sinov | Nima bo'lgan |
+|---|---|
+| `review_butunlik_test` | fikstura 11-vazifadan beri eskirgan |
+| `paid_guard_test` | ishlagan ajratgichni yiqilgan deb hisoblardi |
+| `doctext_test` | **haqiqiy hujjat matnini o'chirardi** (M-1 sababi) |
+
+Ildiz sabab **S-1** edi.
+
+### 27.5 O'lchangan raqamlar (2026-09-01)
+
+| Ko'rsatkich | Qiymat |
+|---|---|
+| Sinov to'plamlari | **33**, hammasi o'tadi |
+| Standart rejimda tekshiruvlar | **2 478** (oldin 1 951) |
+| Migratsiyalar | **68** |
+| Xato kodlari | **105** × 3 til |
+| Embedding qamrovi | **84.7%** (ochiq tenderlar **77.2%**) |
+| Talab qamrovi (ochiq) | **100%** |
+| **RTO** (o'lchangan) | **405 s** |
+| Zaxira | 440 MB / **5 daq 28 s** |
+| Ma'lum zaifliklar | **0** |
+
+### 27.6 Hali ochiq (14 band)
+
+Eng muhimlari: **B-1** (server yo'q — O-1/O-2/O-3 unga bog'liq),
+**B-3** (inson halqasi to'ldirilishi kerak), **Q-2** ning qolgan
+29 131 bo'lagi (model vaqti), **T-1/T-2** (saqlangan qidiruv
+ulanishlari, RAG o'lchovi).
+
+To'liq ro'yxat: `docs/ochiq_muammolar.md`.
+
+---
+
+*Oxirgi yangilanish: 2026-09-01. Bu faylni yangilash qoidasi — har commit'dan
 keyin emas, har QATLAM tugagandan keyin, va §18 dagi hisoblagichlarni
 QAYTA O'LCHAB.*

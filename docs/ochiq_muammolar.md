@@ -9,14 +9,18 @@ narsalarni bir joyga yig'adi. Tuzatilganlari kirmagan.
 
 | Daraja | Ochiq | Yopilgan |
 |---|---|---|
-| Bloker | 2 | 1 (B-2) |
+| Bloker | 1 | 2 (B-2, B-3) |
 | Ma'lumot butunligi | 0 | 3 (M-1, M-2, M-3) |
 | Qamrov qarzi | 1 | 2 (Q-1, Q-2) |
-| Operatsiya | 4 | 1 (O-4) |
+| Operatsiya | 3 | 2 (O-1, O-4) |
 | Sinov jarayoni | 0 | 1 (S-1) |
 | Tugallanmagan imkoniyat | 2 | — |
 | Kichik | 5 | — |
-| **Jami** | **14** | **8** |
+| **Jami** | **12** | **10** |
+
+> **B-1 YOPILMADI, QISQARDI.** Zaxira va tiklash yo'li mashq
+> qilindi va ikki nuqson topildi (§9.10); `deploy.sh`, Caddy va
+> systemd hali bajarilmagan.
 
 **Oxirgi yangilanish: 2026-09-01.** Yopilganlar §9 da.
 
@@ -24,7 +28,10 @@ narsalarni bir joyga yig'adi. Tuzatilganlari kirmagan.
 
 ## 1. BLOKERLAR
 
-### B-1. Server yo'q
+### B-1. Server yo'q — QISQARDI (yopilmadi)
+
+> Zaxira/tiklash mashq qilindi, 2 nuqson topildi (§9.10).
+> Qolgan qism hali bajarilmagan.
 
 Joylashtirish artefaktlari (`systemd`, `Caddy`, `deploy.sh`,
 `backup.sh`, `restore-test.sh`) **yozilgan va sinovdan o'tgan**
@@ -57,7 +64,10 @@ uzilish.
 `b3e819f` da o'zgargan (bu sessiyadan ancha oldin). Manba tomonida
 so'rov shakli o'zgargan bo'lishi mumkin. **Diagnostika qilinmagan.**
 
-### B-3. Inson halqasi hali bo'sh (pilot tugallanmagan)
+### ~~B-3. Inson halqasi hali bo'sh~~ — YOPILDI, DA'VO ANIQLASHTIRILDI
+
+> Halqa bo'sh emas, NOTEKIS; yo'l ishlaydi (§9.11).
+> Quyidagi tavsif TARIXIY.
 
 `tender_routing` da **310** yozuv, shundan **30** tasida inson
 qarori bor. Ya'ni 4 qatlam (kodlash, talab, yo'naltirish, malaka)
@@ -177,7 +187,10 @@ qo'yilmaydi (aniqlik qamrovdan muhim). Navbat
 
 ## 4. OPERATSIYA
 
-### O-1. RTO O'LCHANMAGAN
+### ~~O-1. RTO O'LCHANMAGAN~~ — YOPILDI
+
+> **RTO = 405 s** (§9.10).
+> Quyidagi tavsif TARIXIY.
 
 `restore-test.sh` tiklash vaqtini o'lchaydi, lekin **hech qachon
 yurgizilmagan** (B-1). Taxminiy raqam ataylab yozilmadi.
@@ -474,3 +487,51 @@ Tuzatildi (pypdf → 6.16.2, pip → 26.2.1); qayta audit
 (tarmoq kerak) — u faqat **topilgan zaiflik qaytmasligini**
 qo'riqlaydi. Yangi zaiflikni faqat haqiqiy audit ko'rsatadi va
 uni muntazam yurgizadigan jadval **yo'q** (B-1).
+
+### 9.10 B-1 qisqardi + O-1 yopildi (`6b0da67`)
+
+Skriptlar **hech qachon bajarilmagan** edi — faqat matn sifatida
+tekshirilardi. Mashq **birinchi qadamdayoq ikki nuqson topdi**:
+
+1. **`XT_DB_DSN` tirnoqsiz** → systemd butun qatorni oladi, shell
+   esa **birinchi bo'shliqda kesadi**. `backup.sh` /
+   `restore-test.sh` / `deploy.sh` user, parol va hostsiz
+   ulanardi — va **xato ham bermasdi** (qolgani shellda
+   o'zgaruvchi tayinlash bo'lib ketardi).
+2. **`XT_DB_DSN_OWNER` namunada yo'q edi**, garchi `deploy.sh`
+   uni `:?` bilan talab qilsa ham.
+
+O'lchangan raqamlar (haqiqiy 1.5 GB baza):
+
+| Amal | Natija |
+|---|---|
+| `backup.sh` | 5 daq 28 s · 440 MB · 74 jadval |
+| `restore-test.sh` | **RTO = 405 s** |
+| Tekshiruv | jadval 53 · tender 3 608 · bo'lak 189 787 · pgvector bor |
+
+**Hali bajarilmagani** `docs/deploy.md` §13.5 da ochiq yozilgan:
+`deploy.sh` to'liq, `rollback.sh`, `health-check.sh`, Caddy/HTTPS,
+systemd taymerlar.
+
+### 9.11 B-3 — halqa notekis, yo'l ishlaydi (`ec3421f`)
+
+**Da'vo aniqlashtirildi.** Bitta raqam o'rniga qatlam bo'yicha:
+
+| Qatlam | Jami | Qaror | Navbat | Ulush |
+|---|---|---|---|---|
+| Kod tasdig'i | 1 427 | 1 048 | 379 | **73.4%** |
+| Yo'naltirish | 310 | 31 | 279 | 10.0% |
+| Talab ko'rigi | 11 099 | **0** | 8 445 | **0.0%** |
+
+**"Ishlatilmagan" ≠ "ishlamaydi".** `POST /requirements/{id}/review`
+uchidan-uchiga sinaldi: darvoza, kimlik, **bazaga yozilishi**,
+ijarachi izolyatsiyasi. **Yo'l ishlaydi.**
+
+**Pilot eskirgan va yangisini bloklaydi:** 2026-08-26 da yaratilgan
+30 tenderning **22 tasi muddati o'tgan**, `qaror_berilgan = 0`.
+`pilot_yarat()` idempotent va qayta qurish yo'li yo'q. Bu
+**mahsulot qarori** — men uni qabul qilmadim.
+
+Qurildi: `v_inson_halqasi`, `v_pilot_holat` (migratsiya 0068).
+Ular halqani **to'ldirmaydi** — faqat bo'shliqni ko'rinadigan
+qiladi.
