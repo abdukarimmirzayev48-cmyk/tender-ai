@@ -393,6 +393,11 @@ class _Args:
             setattr(self, k, v)
 
 
+#: Sinov yaratadigan qatorlar shu prefiks bilan boshlanadi —
+#: haqiqiy hujjatlardan ajratish va tozalash uchun.
+SOXTA_PREFIKS = "[SINOV]/doctext/"
+
+
 def test_cache(conn) -> None:
     section("5. Kesh (takroriy yuklab olmaslik)")
     with conn.cursor() as cur:
@@ -416,29 +421,103 @@ def test_cache(conn) -> None:
     check("tanlanmaganlar aynan bazadagilar", len(processed_refs) > 0,
           f"{len(processed_refs)} ta o'tkazib yuborildi")
 
-    # Idempotentlik: bir yozuvni ikki marta saqlash dublikat yaratmasligi kerak
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""SELECT tender_id, file_ref, status FROM tender_document_text
-                       WHERE tender_id = %s LIMIT 1""", (tid,))
-        row = dict(cur.fetchone())
-    rec = {"tender_id": row["tender_id"], "file_ref": row["file_ref"],
-           "text": "sinov", "status": row["status"], "char_count": 5,
-           "page_count": 1, "error": None, "extractor": "plain"}
-    E.save(conn, rec)
-    E.save(conn, rec)
+    # Idempotentlik: bir yozuvni ikki marta saqlash dublikat
+    # yaratmasligi kerak.
+    #
+    # SOXTA QATORDA ishlaydi. ILGARI BU YERDA HAQIQIY hujjat
+    # olinardi va u IKKI ZARAR berardi (o'lchangan 2026-09-01, M-1):
+    #
+    #   1. `E.save(rec)` haqiqiy ajratilgan matnni `"sinov"` (5
+    #      belgi) bilan ALMASHTIRARDI — ma'lumot yo'qolardi.
+    #   2. Keyin matn qatori o'chirilardi, lekin
+    #      `tender_document.holat` `ok` bo'lib QOLARDI. Hujjat
+    #      `ok` bo'lgani uchun ETL uni QAYTA OLMASDI
+    #      (`fetch_targets()` `ok` larni o'tkazadi) — ya'ni matn
+    #      butunlay yo'qolardi.
+    #
+    #   sinovdan OLDIN 29 ta dalilsiz `ok`, KEYIN 30 ta (+1 har
+    #   yurishda).
+    #
+    # Endi baza ham buni to'xtatadi (`hujjat_ok_dalil_trg`), lekin
+    # sinov HAQIQIY ma'lumotga UMUMAN tegmasligi kerak.
+    soxta_ref = f"{SOXTA_PREFIKS}kesh-idempotent.pdf"
     with conn.cursor() as cur:
-        cur.execute("""SELECT count(*) FROM tender_document_text
-                       WHERE tender_id = %s AND file_ref = %s""",
-                    (row["tender_id"], row["file_ref"]))
-        cnt = cur.fetchone()[0]
-    check("ikki marta saqlash dublikat yaratmadi", cnt == 1, f"qator: {cnt}")
-
-    # Sinov ma'lumotini o'chiramiz — keyingi yurishda qayta ajratilsin
-    with conn.cursor() as cur:
-        cur.execute("""DELETE FROM tender_document_text
-                       WHERE tender_id = %s AND file_ref = %s""",
-                    (row["tender_id"], row["file_ref"]))
+        cur.execute("""INSERT INTO tender_document
+                         (tender_id, file_ref, name, file_type,
+                          source_platform, holat)
+                       VALUES (%s, %s, '[SINOV] kesh', 'pdf',
+                               'xt-xarid', 'navbatda')
+                       ON CONFLICT (tender_id, file_ref) DO NOTHING""",
+                    (tid, soxta_ref))
     conn.commit()
+    rec = {"tender_id": tid, "file_ref": soxta_ref,
+           "text": "sinov matni", "status": "ok", "char_count": 11,
+           "page_count": 1, "error": None, "extractor": "plain"}
+    try:
+        E.save(conn, rec)
+        E.save(conn, rec)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT count(*) FROM tender_document_text
+                           WHERE tender_id = %s AND file_ref = %s""",
+                        (tid, soxta_ref))
+            cnt = cur.fetchone()[0]
+        check("ikki marta saqlash dublikat yaratmadi", cnt == 1, f"qator: {cnt}")
+        with conn.cursor() as cur:
+            cur.execute("""SELECT holat FROM tender_document
+                           WHERE tender_id = %s AND file_ref = %s""",
+                        (tid, soxta_ref))
+            check("metadata holati ham yangilandi",
+                  cur.fetchone()[0] == "ok")
+    finally:
+        # IKKALA jadval ham tozalanadi. Faqat matnni o'chirish
+        # `holat='ok'` ni DALILSIZ qoldirardi — aynan tuzatilgan
+        # nuqson.
+        with conn.cursor() as cur:
+            cur.execute("""DELETE FROM tender_document_text
+                           WHERE tender_id = %s AND file_ref = %s""",
+                        (tid, soxta_ref))
+            cur.execute("""DELETE FROM tender_document
+                           WHERE tender_id = %s AND file_ref = %s""",
+                        (tid, soxta_ref))
+        conn.commit()
+
+    # QO'ROVUL O'ZI ISHLAYDIMI: dalilsiz `ok` RAD ETILSIN.
+    # Bu "hech narsa buzilmadi" bilan "qo'rovul bor" ni ajratadi.
+    import psycopg2
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO tender_document
+                         (tender_id, file_ref, name, file_type,
+                          source_platform, holat)
+                       VALUES (%s, %s, '[SINOV] qorovul', 'pdf',
+                               'xt-xarid', 'navbatda')""",
+                    (tid, SOXTA_PREFIKS + "qorovul.pdf"))
+    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE tender_document SET holat='ok'
+                           WHERE tender_id=%s AND file_ref=%s""",
+                        (tid, SOXTA_PREFIKS + "qorovul.pdf"))
+        conn.commit()
+        check("dalilsiz `ok` BAZA darajasida rad etiladi", False,
+              "qabul qilindi!")
+    except psycopg2.Error as e:
+        conn.rollback()
+        check("dalilsiz `ok` BAZA darajasida rad etiladi", True,
+              str(e).splitlines()[0][:80])
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("""DELETE FROM tender_document
+                           WHERE tender_id=%s AND file_ref=%s""",
+                        (tid, SOXTA_PREFIKS + "qorovul.pdf"))
+        conn.commit()
+
+    # NOMUVOFIQLIK O'LCHOVI — qoldiq qolmasin.
+    with conn.cursor() as cur:
+        cur.execute("SELECT ok_dalilsiz, ok_status_qarama_qarshi "
+                    "FROM v_hujjat_dalil_nomuvofiq")
+        dalilsiz, qarama = cur.fetchone()
+    check("dalilsiz `ok` hujjat YO'Q", dalilsiz == 0, f"{dalilsiz} ta")
+    check("`ok` yorlig'i matn statusiga ZID emas", qarama == 0, f"{qarama} ta")
 
 
 # ---------------------------------------------------------------------------

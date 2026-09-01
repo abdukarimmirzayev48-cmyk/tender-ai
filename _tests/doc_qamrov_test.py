@@ -464,14 +464,21 @@ def test_manbadan_yoqolish(conn, tid) -> None:
     f = PREFIKS + "yoqoladi.pdf"
     try:
         with conn.cursor() as cur:
+            # TARTIB MUHIM va u ISHLAB CHIQARISH tartibiga MOS:
+            # avval metadata (`navbatda`), keyin MATN, keyin
+            # `ok`. `hujjat_ok_dalil_trg` dalilsiz `ok` ni rad
+            # etadi (M-1) — fikstura ham shu qoidaga bo'ysunadi.
             cur.execute(
                 "INSERT INTO tender_document (tender_id, file_ref, "
                 " source_platform, fetched_at, holat) "
-                "VALUES (%s, %s, 'uzex', now(), 'ok')", (tid, f))
+                "VALUES (%s, %s, 'uzex', now(), 'navbatda')", (tid, f))
             cur.execute(
                 "INSERT INTO tender_document_text "
                 " (tender_id, file_ref, text, status, extracted_at) "
                 "VALUES (%s, %s, 'matn', 'ok', now())", (tid, f))
+            cur.execute(
+                "UPDATE tender_document SET holat='ok' "
+                "WHERE tender_id=%s AND file_ref=%s", (tid, f))
 
             # ETL manbada bu faylni ko'rmadi -> belgilaydi.
             cur.execute(
