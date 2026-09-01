@@ -147,6 +147,77 @@ def test_qolla_qorovuli():
 
 
 # =====================================================================
+def test_avtomatik_yol_tugadi(db):
+    """Avtomatik kodlash CHEGARANI CHETLAB O'TMAYDI (Q-3)."""
+    bolim("6. Avtomatik yo'l — chegara PASAYTIRILMAGAN")
+
+    # O'LCHANGAN (2026-09-01). Reyestrda Q-3 "749 mahsulot kodsiz
+    # (41.7%)" deb yozilgan edi. Qayta tahlil YURGIZILDI (585 s,
+    # 1 797 mahsulot) va natija AYNAN o'sha chiqdi — ya'ni yangi
+    # dalil to'planmagan va chegarani pasaytirmasdan qo'shimcha
+    # kod berib bo'lmaydi.
+    #
+    # Qo'llash quruq yurgizilganda: 0 ta nomzod. Avtomatik yo'l
+    # TUGAGAN.
+    #
+    # BU NUQSON EMAS — bu ATAYLAB tanlangan aniqlik/qamrov
+    # nuqtasi. Lekin u HECH QAYERDA tekshirilmasdi: kimdir
+    # `KUCHSIZ_ISHONCH` ni pasaytirsa yoki `NOT t.kuchsiz_dalil`
+    # shartini olib tashlasa, qamrov "o'sardi" va precision
+    # JIMGINA yeyilardi.
+    from api import catalog_auto as CA
+    check("`MIN_EVIDENCE` = 2", CA.MIN_EVIDENCE == 2, str(CA.MIN_EVIDENCE))
+    check("`MIN_SHARE` = 0.75", abs(CA.MIN_SHARE - 0.75) < 1e-9,
+          str(CA.MIN_SHARE))
+    check("`KUCHSIZ_ISHONCH` = 0.80", abs(CA.KUCHSIZ_ISHONCH - 0.80) < 1e-9,
+          str(CA.KUCHSIZ_ISHONCH))
+    check("`KUCHSIZ_DALIL` = 4", CA.KUCHSIZ_DALIL == 4, str(CA.KUCHSIZ_DALIL))
+
+    if db is None:
+        check("bazali tekshiruv", False, "o'tkazib yuborildi")
+        return
+
+    # HISOB IDENTITETI: taklif = avtomatik + navbatga.
+    # Bu "kuchsiz dalil YO'QOLMADI" degani — u ham qo'llanmagan,
+    # ham unutilmagan.
+    r = db.query_one("SELECT * FROM v_catalog_kod_sifat WHERE company_id=2")
+    if not r:
+        check("sifat ko'rinishi bor", False, "company_id=2 topilmadi")
+        return
+    check("taklif = avtomatik + navbatga",
+          r["taklif"] == r["avtomatik"] + r["navbatga"],
+          f"{r['taklif']} vs {r['avtomatik']}+{r['navbatga']}")
+    print(f"      taklif={r['taklif']} avtomatik={r['avtomatik']} "
+          f"navbatga={r['navbatga']} o'rtacha_ishonch={r['ortacha_ishonch']}")
+
+    # ENG MUHIM QO'RIQCHI: KUCHSIZ DALILLI mahsulotda AVTOMATIK
+    # aniq kod BO'LMASLIGI kerak. Bo'lsa — band chetlab o'tilgan.
+    buzuq = db.scalar("""
+        SELECT count(*) FROM catalog_kod_tahlil t
+          JOIN catalog_product_code c
+            ON c.product_id=t.product_id AND c.company_id=t.company_id
+         WHERE t.company_id=2 AND t.kuchsiz_dalil
+           AND length(c.code) >= 8
+           AND c.manba = 'taklif' AND c.tasdiqlandi IS NULL""")
+    check("kuchsiz dalilga AVTOMATIK aniq kod berilmagan", buzuq == 0,
+          f"{buzuq} ta — band chetlab o'tilgan")
+
+    # NAVBAT BO'SH QOLMASIN: kuchsiz dalil qayergadir borishi kerak.
+    navbat = db.scalar("SELECT count(*) FROM v_catalog_kod_navbat "
+                       "WHERE company_id=2")
+    check("ko'rib chiqish navbati BO'SH emas", (navbat or 0) > 0,
+          f"{navbat} ta — kuchsiz dalil YO'QOLGAN bo'lardi")
+
+    # SABABLAR JAMI mahsulot soniga TENG: hech bir mahsulot
+    # tasnifdan tashqarida qolmasin.
+    jami = db.scalar("SELECT count(*) FROM catalog_kod_tahlil WHERE company_id=2")
+    sabablar = db.scalar("SELECT sum(soni) FROM v_catalog_kod_sabab "
+                         "WHERE company_id=2")
+    check("sabablar yig'indisi = tahlil qilingan mahsulot soni",
+          int(sabablar or 0) == int(jami or 0), f"{sabablar} vs {jami}")
+
+
+# =====================================================================
 def test_baza(db):
     bolim("6. Tahlil bazada — sabab taqsimoti")
     from api import auth
@@ -271,6 +342,7 @@ def main():
         from api import db
         try:
             db.init_pool()
+            test_avtomatik_yol_tugadi(db)
             test_baza(db)
         except Exception as e:                                # noqa: BLE001
             check("bazali tekshiruv", False, str(e)[:100])
