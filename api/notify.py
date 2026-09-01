@@ -833,7 +833,9 @@ def katalog_indeks(products: List[Dict[str, Any]],
 
 def score_candidate(cand: Dict[str, Any], products: List[Dict[str, Any]],
                     profile: Optional[Dict[str, Any]],
-                    indeks: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    indeks: Optional[Dict[str, Any]] = None,
+                    qidiruvlar: Optional[List[Dict[str, Any]]] = None
+                    ) -> Dict[str, Any]:
     """Bitta tenderning moslik balli. YANGI MANTIQ YO'Q — mavjud ikki manba:
 
       katalog: api/main.py `_product_matches` (kod=100, nom=60)
@@ -904,6 +906,40 @@ def score_candidate(cand: Dict[str, Any], products: List[Dict[str, Any]],
     prof = matching.score_tender(cand, profile) if profile else None
     prof_score = int(prof["score"]) if prof else 0
 
+    # --- SAQLANGAN QIDIRUVLAR (T-1) ---
+    #
+    # `saved_search.notify` bayrog'i 2026-08 dan beri jadvalda ham,
+    # API da ham, interfeys turida ham bor edi — LEKIN bildirishnoma
+    # tsikli uni O'QIMASDI. Ya'ni bayroqni yoqish HECH NARSA qilmasdi.
+    #
+    # Qidiruv `company_profile` bilan AYNI SHAKLDA: ikkalasi ham
+    # `matching.score_tender()` ga tushadi. Ikkinchi skorlash mantig'i
+    # YOZILMAYDI — u ikki joyda ikki xil javob berardi.
+    #
+    # ENG YUQORI BALL YUTADI (katalog/profil bilan bir xil qoida) va
+    # QAYSI qidiruv ekani xabarda ko'rsatiladi: "nega bu tender?"
+    # degan savolga javob bo'lsin.
+    qidiruv_score, qidiruv_nom, qidiruv_keys = 0, None, []
+    for q in (qidiruvlar or []):
+        qp = matching.score_tender(cand, q["profil"])
+        if qp and int(qp["score"]) > qidiruv_score:
+            qidiruv_score = int(qp["score"])
+            qidiruv_nom = q.get("name")
+            qidiruv_keys = list(qp.get("reason_keys") or [])
+
+    # Qidiruv PROFILDAN kuchli bo'lsa, u profil o'rnini egallaydi:
+    # ikkalasi ham "filtr bo'yicha moslik" va ularni qo'shish bir
+    # xil dalilni ikki marta sanash bo'lardi.
+    if qidiruv_score > prof_score:
+        prof_score = qidiruv_score
+        prof = {"score": qidiruv_score,
+                "reason_keys": ([{"key": "reason.savedSearch",
+                                  "vars": {"name": qidiruv_nom}}]
+                                + qidiruv_keys)}
+        _prof_by = "by.search"
+    else:
+        _prof_by = "by.profile"
+
     if cat_score >= prof_score:
         score = cat_score
         by_key = "by.catalog" if cat_score else None
@@ -912,7 +948,7 @@ def score_candidate(cand: Dict[str, Any], products: List[Dict[str, Any]],
                   "vars": {"items": ", ".join(matched_products[:5])}}]
                 if matched_products else [])
     else:
-        score, by_key = prof_score, "by.profile"
+        score, by_key = prof_score, _prof_by
         keys = list((prof or {}).get("reason_keys") or [])
 
     # `by` va `reasons` — O'ZBEKCHA (avvalgidek, sinovlar va boshqa
@@ -927,6 +963,32 @@ def score_candidate(cand: Dict[str, Any], products: List[Dict[str, Any]],
         "reason_keys": keys,
         "products": matched_products,
     }
+
+
+def saqlangan_qidiruvlar(company_id: int) -> List[Dict[str, Any]]:
+    """`notify` yoqilgan saqlangan qidiruvlar — skorlashga tayyor shaklda.
+
+    SXEMA QO'LLANMAGAN BO'LSA BO'SH RO'YXAT: bildirishnoma
+    to'xtamasin. Bu YAGONA yutiladigan holat va u ANIQ: jadval
+    yo'q bo'lsa qidiruv ham yo'q.
+    """
+    try:
+        rows = db.query(queries.SEARCHES_NOTIFY_SQL, {"company_id": company_id})
+    except Exception as e:                                    # noqa: BLE001
+        log.warning("saqlangan qidiruvlar o'qilmadi: %s", str(e)[:120])
+        return []
+    return [{
+        "id": r["id"],
+        "name": r["name"],
+        # `api/main.py:_search_to_profile()` BILAN AYNI SHAKL.
+        # `categories` ATAYLAB yo'q — u skorlashda ishlatilmaydi
+        # (`docs/saved_search.md` §3.3).
+        "profil": {"keywords": r["keywords"] or [],
+                   "regions": r["regions"] or [],
+                   "currency": r["currency"],
+                   "min_cost": r["min_cost"],
+                   "max_cost": r["max_cost"]},
+    } for r in rows]
 
 
 def find_candidates(min_score: Optional[int] = None,
@@ -956,6 +1018,7 @@ def find_candidates(min_score: Optional[int] = None,
     # Faqat "xabar yoqilgan" mahsulotlar (catalog_product.notify)
     products = [p for p in products if p.get("notify", True)]
     profile = db.query_one(PROFILE_SQL, {"company_id": company_id})
+    qidiruvlar = saqlangan_qidiruvlar(company_id)
 
     already = set() if include_sent else sent_ids(kind, company_id)
 
@@ -967,7 +1030,8 @@ def find_candidates(min_score: Optional[int] = None,
     for c in _fetch_candidates(since):
         if c["id"] in already:
             continue
-        s = score_candidate(c, products, profile, indeks=ix)
+        s = score_candidate(c, products, profile, indeks=ix,
+                            qidiruvlar=qidiruvlar)
         if s["score"] < threshold:
             continue
         out.append({

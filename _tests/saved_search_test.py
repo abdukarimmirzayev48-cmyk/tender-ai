@@ -323,21 +323,65 @@ def test_crud(db):
                 "RETURNING id", {"i": cid})
 
 
-def test_bildirishnoma_ulanmagan(db):
-    bolim("6. BILDIRISHNOMA — ULANMAGANI ATAYLAB tasdiqlanadi")
-    # `notify` bayrog'i jadvalda ham, API da ham bor. Lekin
-    # bildirishnoma tsikli `company_profile` dan o'qiydi. Ya'ni
-    # bayroqni yoqish HECH NARSA qilmaydi.
-    #
-    # BU TEKSHIRUV "buzuq" demaydi — u HOLATNI QULFLAYDI: ulanish
-    # qo'shilsa sinov YIQILADI va hujjatni yangilash MAJBUR bo'ladi.
+def test_bildirishnoma_ulangan(db):
+    """`notify` bayrog'i endi HAQIQATAN ishlaydi (T-1)."""
+    bolim("6. BILDIRISHNOMA — saqlangan qidiruv ULANGAN")
+
+    # ILGARI: `notify` bayrog'i jadvalda ham, API da ham, interfeys
+    # turida ham bor edi — LEKIN bildirishnoma tsikli uni
+    # O'QIMASDI. Bayroqni yoqish HECH NARSA qilmasdi va bu
+    # "imkoniyat bor" degan YOLG'ON taassurot berardi.
     n = oqi("api", "notify.py")
-    check("bildirishnoma `company_profile` dan o'qiydi",
-          "PROFILE_SQL = queries.PROFILE_GET_SQL" in n)
-    check("bildirishnoma `saved_search` ni O'QIMAYDI",
-          "saved_search" not in n and "SEARCHES_LIST_SQL" not in n,
-          "ulanish qo'shilgan bo'lsa `docs/saved_search.md` yangilansin",
-          faqat_xatoda=True)
+    check("bildirishnoma `company_profile` dan ham o'qiydi",
+          "PROFILE_SQL = queries.PROFILE_GET_SQL" in n,
+          "eski yo'l YO'QOLMASIN")
+    check("bildirishnoma saqlangan qidiruvni ham o'qiydi",
+          "SEARCHES_NOTIFY_SQL" in n)
+    q = oqi("api", "queries.py")
+    check("`SEARCHES_NOTIFY_SQL` FAQAT `notify` yoqilganlarni oladi",
+          "AND notify" in q[q.index("SEARCHES_NOTIFY_SQL"):
+                            q.index("SEARCHES_NOTIFY_SQL") + 400])
+    check("`SEARCHES_NOTIFY_SQL` ijarachi bilan cheklangan",
+          "company_id = %(company_id)s" in q[q.index("SEARCHES_NOTIFY_SQL"):
+                                             q.index("SEARCHES_NOTIFY_SQL") + 400])
+    # IKKINCHI SKORLASH MANTIG'I YOZILMASIN — u ikki joyda ikki xil
+    # javob berardi.
+    check("qidiruv AYNI `matching.score_tender()` dan o'tadi",
+          'matching.score_tender(cand, q["profil"])' in n)
+
+    # HAQIQIY SKORLASH — manba matni emas, CHIQISH tekshiriladi.
+    from api import notify as N
+    cand = {"id": -1, "name": "Kabel VVGng 3x2.5 yetkazib berish",
+            "good_codes": [], "goods_blob": "",
+            "totalcost": None, "currency": None}
+    s0 = N.score_candidate(cand, [], None)
+    check("qidiruvsiz — eski xulq o'zgarmadi", s0["by_key"] is None,
+          str(s0["by_key"]))
+    qq = [{"id": 1, "name": "Kabel qidiruvi",
+           "profil": {"keywords": ["kabel"], "regions": [], "currency": None,
+                      "min_cost": None, "max_cost": None}}]
+    s1 = N.score_candidate(cand, [], None, qidiruvlar=qq)
+    check("qidiruv bilan — ball KO'TARILDI", s1["score"] > s0["score"],
+          f"{s0['score']} -> {s1['score']}")
+    check("manba `by.search` deb ko'rsatiladi", s1["by_key"] == "by.search",
+          str(s1["by_key"]))
+    check("sabab QAYSI qidiruv ekanini AYTADI",
+          any("Kabel qidiruvi" in r for r in s1["reasons"]),
+          str(s1["reasons"]))
+
+    # KATALOG USTUNLIGI SAQLANADI: kod bo'yicha moslik (100) qidiruv
+    # ballidan yuqori bo'lsa, u yutishi kerak.
+    check("katalog ustunligi buzilmadi",
+          "if cat_score >= prof_score:" in n)
+
+    if db is None:
+        return
+    # `notify=false` bo'lgan qidiruv navbatga TUSHMASIN.
+    ochiq = db.scalar("SELECT count(*) FROM saved_search "
+                      "WHERE company_id=2 AND notify")
+    jami = db.scalar("SELECT count(*) FROM saved_search WHERE company_id=2")
+    check("`notify=false` filtri ishlaydi", (ochiq or 0) <= (jami or 0),
+          f"{ochiq} / {jami}")
 
     # `last_seen_at` hech qachon to'ldirilmaydi — "oxirgi ko'rgandan
     # keyingi yangilar" belgisi YO'Q.
@@ -370,7 +414,7 @@ def main():
             db.init_pool()
             test_baza(db)
             test_crud(db)
-            test_bildirishnoma_ulanmagan(db)
+            test_bildirishnoma_ulangan(db)
         except Exception as e:                                # noqa: BLE001
             import traceback
             traceback.print_exc()

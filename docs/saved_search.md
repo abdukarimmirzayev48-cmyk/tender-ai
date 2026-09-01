@@ -1,8 +1,8 @@
 # Saqlangan qidiruv — holat va chegara
 
-**Xulosa:** CRUD **ishlaydi** va interfeysda **topiladi**. Uchta e'lon
-qilingan qism esa **KEYINGA QOLDIRILGAN** va ular ishlayotgandek
-ko'rsatilmaydi.
+**Xulosa:** CRUD **ishlaydi** va interfeysda **topiladi**.
+`notify` **2026-09-01 da ulandi** (T-1). Qolgan **ikki** qism
+**KEYINGA QOLDIRILGAN** va ular ishlayotgandek ko'rsatilmaydi.
 
 O'lchov sanasi: **2026-09-01**. Bazadagi `saved_search` qatorlari:
 **0 ta**.
@@ -58,18 +58,33 @@ ikkinchi ijarachi nomidan o'qish, tahrirlash va o'chirishga urinadi
 
 ## 3. KEYINGA QOLDIRILGAN — saqlanadi, lekin HECH NARSA QILMAYDI
 
-Uchala qism jadvalda va API javobida **bor**, ya'ni ular "tayyor"dek
-ko'rinadi. Aslida ulanmagan:
+`notify` **2026-09-01 da ulandi** (§3.1). Qolgan **ikkitasi**
+jadvalda va API javobida **bor**, ya'ni "tayyor"dek ko'rinadi,
+lekin ulanmagan:
 
-### 3.1 `notify`
+### 3.1 ~~`notify`~~ — ULANDI (2026-09-01, T-1)
 
-Bayroq saqlanadi (standart `true`), lekin **bildirishnoma tsikli uni
-o'qimaydi**. `api/notify.py` nomzodlarni `company_profile` dan
-oladi (`PROFILE_SQL = queries.PROFILE_GET_SQL`), `saved_search` ga
-umuman murojaat qilmaydi.
+Bayroq endi **haqiqatan ishlaydi**. `api/notify.py` har nomzodni
+`company_profile` bilan bir qatorda **`notify` yoqilgan har
+saqlangan qidiruv** bilan ham skorlaydi.
 
-Shu sababli bayroq **interfeysda ko'rsatilmaydi** — ishlamaydigan
-tugmani ko'rsatish yolg'on va'da bo'lardi.
+| Xossa | Qaror |
+|---|---|
+| Skorlash mantig'i | **ayni** `matching.score_tender()` — ikkinchi mantiq yozilmadi |
+| Ball | eng yuqorisi yutadi (katalog/profil bilan bir xil qoida) |
+| Sabab | xabarda **qaysi qidiruv** ekani yoziladi (`reason.savedSearch`) |
+| Manba yorlig'i | `by.search` (uz/ru/en) |
+| Filtr | `notify = TRUE` bo'lganlari, ijarachi shartida |
+
+**O'lchandi:** kalit so'zi mos qidiruv tenderni **0 → 80** ballga
+ko'taradi va sabab qidiruv nomini aytadi.
+
+**Eski yo'l saqlandi:** `company_profile` avvalgidek ishlaydi.
+Qidiruv profildan kuchli bo'lsa uning **o'rnini egallaydi** —
+ikkalasini qo'shish bir xil dalilni ikki marta sanash bo'lardi.
+
+Interfeysda bayroq **hali ko'rsatilmaydi** (shakl uni yubormaydi,
+standart `true`) — bu keyingi qadam.
 
 ### 3.2 `last_seen_at`
 
@@ -120,17 +135,20 @@ sababsiz. Endi xato ko'rsatiladi va ro'yxat yangilanmaydi.
 
 Tartib — qiymati bo'yicha:
 
-1. **`notify` ni ulash.** Bildirishnoma tsikli har saqlangan qidiruv
-   bo'yicha ham skorlasin, nafaqat `company_profile` bo'yicha. Bu
-   imkoniyatning **asosiy qiymati**: "shu filtrga mos tender chiqsa
-   xabar ber".
-2. **`last_seen_at`.** "Ko'rildi" endpointi + yon panelda yangi
+1. ~~**`notify` ni ulash**~~ — **BAJARILDI** (2026-09-01, §3.1).
+   Bu imkoniyatning **asosiy qiymati** edi: "shu filtrga mos tender
+   chiqsa xabar ber".
+2. **Interfeysda `notify` tugmasi.** Bayroq ishlaydi, lekin shakl
+   uni yubormaydi (standart `true`). Foydalanuvchi uni **o'chira
+   olmaydi**.
+3. **`last_seen_at`.** "Ko'rildi" endpointi + yon panelda yangi
    moslar soni.
-3. **`categories`.** Skorlashga qo'shish va shaklga tanlagich.
+4. **`categories`.** Skorlashga qo'shish va shaklga tanlagich.
 
-Ulanish qo'shilganda `_tests/saved_search_test.py` dagi 6-bo'lim
-**yiqiladi** — u hozirgi holatni ataylab qulflaydi va hujjatni
-yangilashga majbur qiladi.
+Har ulanish qo'shilganda `_tests/saved_search_test.py` dagi
+6-bo'lim **yiqiladi** — u hozirgi holatni ataylab qulflaydi va
+hujjatni yangilashga majbur qiladi. `notify` da aynan shunday
+bo'ldi.
 
 ---
 
@@ -145,4 +163,4 @@ yangilashga majbur qiladi.
 | 3 | interfeysda topiladi, o'chirish xatosi yashirilmaydi |
 | 4 | bazadagi son hujjatdagi bilan mos, chegara baza darajasida |
 | 5 | **haqiqiy CRUD** + ijarachi ajratilishi + filtr saqlanishi |
-| 6 | `notify` / `last_seen_at` **ulanmaganini** ataylab tasdiqlaydi |
+| 6 | `notify` **ulanganini** HAQIQIY skorlash bilan isbotlaydi; `last_seen_at` hali ulanmaganini qulflaydi |

@@ -90,6 +90,7 @@ UZ: Dict[str, str] = {
 
     # --- Ball qaysi manbadan ---
     "by.catalog": "katalog",
+    "by.search": "saqlangan qidiruv",
     "by.profile": "profil",
     "by.test": "sinov",
 
@@ -110,6 +111,7 @@ UZ: Dict[str, str] = {
     "reason.budgetHigh": "Byudjetdan tashqari (yuqori)",
     "reason.currency": "Valyuta mos: {currency}",
     "reason.catalogCode": "Katalogingizga mos: {items} (tasniflagich kodi bo‘yicha)",
+    "reason.savedSearch": "«{name}» saqlangan qidiruvingizga mos",
     "reason.catalogName": "Katalogingizga mos: {items} (nom bo‘yicha)",
 }
 
@@ -148,6 +150,7 @@ RU: Dict[str, str] = {
     "tg.foot": "Настройки: Аккаунт → Уведомления",
 
     "by.catalog": "каталог",
+    "by.search": "сохранённый поиск",
     "by.profile": "профиль",
     "by.test": "проверка",
 
@@ -165,6 +168,7 @@ RU: Dict[str, str] = {
     "reason.budgetHigh": "Вне бюджета (выше)",
     "reason.currency": "Валюта совпадает: {currency}",
     "reason.catalogCode": "Есть в вашем каталоге: {items} (по коду классификатора)",
+    "reason.savedSearch": "Соответствует сохранённому поиску «{name}»",
     "reason.catalogName": "Есть в вашем каталоге: {items} (по названию)",
 }
 
@@ -197,6 +201,7 @@ EN: Dict[str, str] = {
     "tg.foot": "Settings: Account → Notifications",
 
     "by.catalog": "catalog",
+    "by.search": "saved search",
     "by.profile": "profile",
     "by.test": "test",
 
@@ -213,6 +218,7 @@ EN: Dict[str, str] = {
     "reason.budgetHigh": "Outside budget (above)",
     "reason.currency": "Currency matches: {currency}",
     "reason.catalogCode": "In your catalog: {items} (by classifier code)",
+    "reason.savedSearch": "Matches your saved search “{name}”",
     "reason.catalogName": "In your catalog: {items} (by name)",
 }
 

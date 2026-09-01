@@ -620,6 +620,16 @@ SEARCHES_LIST_SQL = (f"SELECT {_SS_COLS} FROM saved_search "
 SEARCH_GET_SQL = (f"SELECT {_SS_COLS} FROM saved_search "
                   "WHERE id = %(id)s AND company_id = %(company_id)s")
 
+# BILDIRISHNOMA uchun saqlangan qidiruvlar (T-1).
+#
+# `notify` bayrog'i 2026-08 dan beri jadvalda ham, API da ham bor edi,
+# lekin bildirishnoma tsikli uni O'QIMASDI — u faqat
+# `company_profile` dan skorlardi. Ya'ni bayroqni yoqish HECH NARSA
+# qilmasdi va bu "imkoniyat bor" degan yolg'on taassurot berardi.
+SEARCHES_NOTIFY_SQL = (f"SELECT {_SS_COLS} FROM saved_search "
+                       "WHERE company_id = %(company_id)s AND notify "
+                       "ORDER BY id")
+
 SEARCH_INSERT_SQL = f"""
 INSERT INTO saved_search (company_id, name, keywords, categories, regions,
                           currency, min_cost, max_cost, notify)
