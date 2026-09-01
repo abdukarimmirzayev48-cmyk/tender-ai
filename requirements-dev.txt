@@ -1,0 +1,21 @@
+# ISHLAB CHIQISH va XAVFSIZLIK asboblari.
+#
+# BU FAYL ISHLAB CHIQARISHGA O'RNATILMAYDI. `deploy/bin/deploy.sh`
+# faqat `requirements-api.txt` ni o'rnatadi — audit asbobi xizmat
+# muhitida keraksiz yuza qo'shardi.
+#
+# Ishlatish (ALOHIDA muhitda, loyiha `.venv` iga TEGMASDAN):
+#
+#     python -m venv /tmp/auditvenv
+#     /tmp/auditvenv/bin/pip install -r requirements-dev.txt
+#     .venv/bin/pip list --format=freeze > /tmp/muzlatilgan.txt
+#     /tmp/auditvenv/bin/pip-audit -r /tmp/muzlatilgan.txt --no-deps
+#
+# NEGA ALOHIDA MUHIT: `pip-audit` o'z bog'liqliklarini olib keladi va
+# ularni ishlaydigan muhitga qo'shish auditning O'ZI muhitni
+# o'zgartirishi demak bo'lardi.
+#
+# NEGA `pip list --format=freeze`: `-r requirements-api.txt` faqat
+# E'LON QILINGAN paketlarni tekshiradi (12 ta). HAQIQATAN o'rnatilgan
+# to'plam 91 ta va zaiflik ko'pincha TRANZITIV bog'liqlikda bo'ladi.
+pip-audit>=2.10

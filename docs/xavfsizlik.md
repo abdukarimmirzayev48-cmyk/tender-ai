@@ -243,10 +243,65 @@ ishlaydi. `CORS_ORIGINS=*` sozlansa ham kirish ma'lumoti oqmaydi (L-11).
 - Python paketlari yangi (`fastapi 0.140`, `starlette 1.3.1`,
   `urllib3 2.7`, `requests 2.34`, `certifi 2026.7`).
 
-> **Halol cheklov:** `pip-audit` bu muhitda o'rnatilmagan va PyPI
-> maslahat bazasiga so'rov yuborilmadi. Ya'ni Python bog'liqliklari
-> **versiya bo'yicha yangi** deb tasdiqlandi, lekin **CVE bo'yicha
-> tekshirilmadi**. Buni CI ga qo'shish — §7.
+> **BAJARILDI (2026-09-01, O-4).** Yuqoridagi cheklov endi
+> yopilgan: `pip-audit` **91 ta o'rnatilgan paket** ustida
+> yurgizildi. Natija va tuzatish — §5b.
+
+### 5b. Bog'liqliklar auditi (`pip-audit`)
+
+**O'lchandi (2026-09-01):**
+
+```
+Found 8 known vulnerabilities in 2 packages
+  pypdf 6.14.2   PYSEC-2026-3655, PYSEC-2026-3656   -> 6.15.0
+  pip   25.3     6 ta zaiflik                        -> 26.2
+```
+
+**`pypdf` — bizda TO'G'RIDAN-TO'G'RI yetib boriladigan yo'l.**
+Ikkala zaiflik ham maxsus yasalgan PDF matn ajratilganda
+**xotira va protsessorni tugatadi** (`/ToUnicode` va shrift
+kengligi maydonlarida haddan tashqari katta qiymatlar).
+`etl_doc_text.py` tashqi manbadan yuklangan PDF larni aynan
+shunday ajratadi — ya'ni tender e'lon qila oladigan har kim ETL
+ni to'xtatishi mumkin edi. **Yuqori.**
+
+**`pip`** — qurilma vaqtidagi asbob, ishlaydigan xizmatda emas.
+Zaifliklar zararli paket indeksidan o'rnatishni talab qiladi.
+**Past.**
+
+Tuzatildi: `pypdf` 6.14.2 → 6.16.2, `pip` 25.3 → 26.2.1.
+Qayta audit: **`No known vulnerabilities found`**.
+
+#### Qanday yurgiziladi
+
+Audit **ALOHIDA muhitda** yuriladi — asbob o'z bog'liqliklarini
+olib keladi va ularni ishlaydigan muhitga qo'shish auditning
+o'zi muhitni o'zgartirishi bo'lardi:
+
+```bash
+python -m venv /tmp/auditvenv
+/tmp/auditvenv/bin/pip install -r requirements-dev.txt
+
+# HAQIQATAN o'rnatilgan to'plam (91 ta), e'lon qilingani (12 ta)
+# EMAS: zaiflik ko'pincha TRANZITIV bog'liqlikda bo'ladi.
+.venv/bin/pip list --format=freeze > /tmp/muzlatilgan.txt
+/tmp/auditvenv/bin/pip-audit -r /tmp/muzlatilgan.txt --no-deps
+```
+
+`requirements-dev.txt` **ishlab chiqarishga o'rnatilmaydi** —
+`deploy/bin/deploy.sh` faqat `requirements-api.txt` ni o'rnatadi.
+
+#### Qaytmasligi qanday qo'riqlanadi
+
+`_tests/xavfsizlik_test.py` **`pip-audit` ni yurgizmaydi** (u
+tarmoq va zaiflik bazasini talab qiladi). U **topilgan zaiflik
+qaytib kelmasligini** qo'riqlaydi: `requirements-api.txt` dagi
+chegara pastga tushirilsa sinov darhol yiqiladi.
+
+> **Bu to'liq almashtiruv EMAS.** Yangi zaiflik e'lon qilinganini
+> faqat haqiqiy `pip-audit` yurishi ko'rsatadi. Uni muntazam
+> yurgizishni eslatadigan avtomatik jadval hozir **YO'Q**
+> (server yo'q — B-1).
 
 ---
 
@@ -267,8 +322,10 @@ ishlaydi. `CORS_ORIGINS=*` sozlansa ham kirish ma'lumoti oqmaydi (L-11).
 
 ## 7. Tavsiyalar (bajarilmagan — ATAYLAB ajratilgan)
 
-1. **`pip-audit` ni CI ga qo'shish.** Hozir Python bog'liqliklari CVE
-   bo'yicha tekshirilmagan (yuqorida ochiq yozildi).
+1. ~~**`pip-audit` ni CI ga qo'shish.**~~ **QISMAN BAJARILDI**
+   (2026-09-01): audit yurgizildi, 8 zaiflik topildi va tuzatildi
+   (§5b). **CI da HALI YO'Q** — server yo'q (B-1), ya'ni uni
+   muntazam yurgizadigan jadval mavjud emas.
 2. **Sessiya bo'sh turish chegarasi** (L-12). Hozir 14 kun mutlaq;
    `last_seen_at` bor, ya'ni amalga oshirish oson.
 3. **`aktor_majburiy` ni yoqish** — inson qarorlari haqiqiy odamga

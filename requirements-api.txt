@@ -14,5 +14,10 @@ python-multipart>=0.0.20
 # Ombor/katalog importi (.xlsx) — P0-4
 openpyxl>=3.1
 # Hujjat matnini ajratish — P0-2 (sof deterministik parserlar, AI emas)
-pypdf>=6.0
+# pypdf 6.15.0 IKKI ZAIFLIKNI yopadi (PYSEC-2026-3655/3656): maxsus
+# yasalgan PDF matn ajratishda XOTIRA va PROTSESSORNI tugatishi mumkin
+# (`/ToUnicode` va shrift kengligi maydonlarida haddan tashqari katta
+# qiymatlar). Bu bizda TO'G'RIDAN-TO'G'RI yetib boriladigan yo'l:
+# `etl_doc_text.py` tashqi manbadan yuklangan PDF larni ajratadi.
+pypdf>=6.15.0
 python-docx>=1.1

@@ -393,6 +393,55 @@ def test_huquq(db):
 
 
 # =====================================================================
+def test_boglqliklar_zaifligi():
+    """Bog'liqliklardagi MA'LUM zaifliklar (O-4)."""
+    bolim("BOG'LIQLIKLAR — ma'lum zaifliklar")
+    req = _oqi("requirements-api.txt")
+
+    # O'LCHANGAN (2026-09-01, `pip-audit` 91 ta o'rnatilgan paket
+    # ustida): 2 paketda 8 ta ma'lum zaiflik. Tuzatilgandan keyin 0.
+    #
+    # BU SINOV `pip-audit` NI YURGIZMAYDI — u tarmoq va zaiflik
+    # bazasini talab qiladi. U TOPILGAN zaiflik QAYTIB kelmasligini
+    # qo'riqlaydi: chegara pastga tushirilsa DARHOL yiqiladi.
+    KUTILGAN = {
+        # paket: (eng kam versiya, sabab)
+        "pypdf": ("6.15.0",
+                  "PYSEC-2026-3655/3656 — maxsus yasalgan PDF matn "
+                  "ajratishda xotira/protsessorni tugatadi"),
+    }
+    import re as _re
+    for paket, (eng_kam, sabab) in KUTILGAN.items():
+        m = _re.search(rf"^{paket}>=([0-9.]+)\s*$", req, _re.M)
+        check(f"`{paket}` chegarasi e'lon qilingan", bool(m), sabab)
+        if not m:
+            continue
+        bor = tuple(int(x) for x in m.group(1).split("."))
+        kerak = tuple(int(x) for x in eng_kam.split("."))
+        check(f"`{paket}` >= {eng_kam}", bor >= kerak,
+              f"{m.group(1)} — {sabab}")
+
+    # AUDIT ASBOBI E'LON QILINGAN va u ISHLAB CHIQARISHGA
+    # o'rnatilmaydi: audit asbobi xizmat muhitida keraksiz yuza.
+    import os as _os
+    dev = _os.path.join(ROOT, "requirements-dev.txt")
+    check("`requirements-dev.txt` mavjud", _os.path.exists(dev))
+    if _os.path.exists(dev):
+        d = _oqi("requirements-dev.txt")
+        check("audit asbobi (`pip-audit`) e'lon qilingan", "pip-audit" in d)
+        check("dev fayli ISHLAB CHIQARISHGA o'rnatilmasligi YOZILGAN",
+              "ISHLAB CHIQARISHGA O'RNATILMAYDI" in d)
+    dep = _oqi("deploy/bin/deploy.sh")
+    check("joylashtirish FAQAT `requirements-api.txt` ni o'rnatadi",
+          "requirements-api.txt" in dep and "requirements-dev.txt" not in dep)
+
+    # HUJJAT — audit qanday yurgiziladi.
+    x = _oqi("docs/xavfsizlik.md")
+    check("audit tartibi hujjatda", "pip-audit" in x)
+
+
+
+# =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="Xavfsizlik regressiyasi")
     rejim.bayroqlar(ap)
@@ -413,6 +462,7 @@ def main():
     test_sql()
     test_ai()
     test_sirlar()
+    test_boglqliklar_zaifligi()
 
     if args.bazasiz or not os.environ.get("XT_DB_DSN"):
         print("\n[i] Baza huquqlari tekshiruvi o'tkazib yuborildi.")
