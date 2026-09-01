@@ -19,6 +19,19 @@
  * 3. ESKIRGAN QAROR ENG TEPADA VA QIZIL. Broker allaqachon qaror
  *    bergan, lekin tahlil o'zgargan — u YOLG'ON ISHONCH bilan
  *    yuribdi. Bu navbatdagi eng shoshilinch holat.
+ *
+ * "OLINDI" ENDI ISH TAQSIMOTI HAM
+ * ═══════════════════════════════
+ * Qaror ERP da ish kartasiga aylanadi (`api/topshiriq.py`), shuning
+ * uchun u bilan birga uchta narsa yuboriladi: KIMGA, qanchalik
+ * SHOSHILINCH va QACHONGACHA. Ular ixtiyoriy — hodim tanlanmasa ERP
+ * kartani "Taqsimlanmagan" ga qo'yadi va menejerga xabar beradi
+ * (jimgina yo'qolmaydi).
+ *
+ * HODIM RO'YXATI — AKTORLARDAN (`/aktor`), ya'ni ERP hodimlariga
+ * xaritalangan odamlardan. Xaritalanmagan aktor ham ko'rinadi:
+ * uni tanlash mumkin, lekin ERP kartani biriktira olmaydi va buni
+ * javobda AYTADI.
  */
 import { useCallback, useEffect, useState } from 'react'
 
@@ -27,7 +40,8 @@ import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { useFormat } from '@/format'
 import type {
-  AiQaror, InsonQaror, MalakaNatija, MalakaHolat, RoutingItem, RoutingMoslik,
+  Aktor, AiQaror, InsonQaror, MalakaNatija, MalakaHolat, RoutingItem,
+  RoutingMoslik,
 } from '@/types'
 
 import Icon from './Icon'
@@ -67,6 +81,22 @@ export default function BrokerQueue({
   const [malakaYuk, setMalakaYuk] = useState(false)
   const [izoh, setIzoh] = useState('')
   const [band, setBand] = useState(false)
+  // --- ERP ga topshiriq: ish taqsimoti ---
+  const [hodim, setHodim] = useState('')
+  const [ustuvorlik, setUstuvorlik] =
+    useState<'low' | 'medium' | 'high'>('medium')
+  const [muddat, setMuddat] = useState('')
+  const [aktorlar, setAktorlar] = useState<Aktor[]>([])
+  const [erpXabar, setErpXabar] = useState<string | null>(null)
+
+  // Aktorlar BIR MARTA: ular ish davomida o'zgarmaydi. Ro'yxat
+  // bo'lmasa (patch yo'q yoki huquq yetmasa) tanlov ko'rsatilmaydi
+  // va qaror avvalgidek ishlayveradi.
+  useEffect(() => {
+    void api.aktorlar(true)
+      .then((r) => setAktorlar(r.aktorlar || []))
+      .catch(() => setAktorlar([]))
+  }, [])
 
   const yukla = useCallback(async () => {
     setYuklanmoqda(true)
@@ -105,10 +135,32 @@ export default function BrokerQueue({
   async function qaror(it: RoutingItem, q: InsonQaror) {
     setBand(true)
     try {
-      await api.brokerQaror(it.id, { qaror: q, izoh: izoh || undefined })
+      const r = await api.brokerQaror(it.id, {
+        qaror: q,
+        izoh: izoh || undefined,
+        // Ish taqsimoti FAQAT "olindi" da ma'noga ega.
+        ...(q === 'olindi'
+          ? { hodim_actor_id: hodim ? Number(hodim) : null,
+              ustuvorlik, muddat: muddat || null }
+          : {}),
+      })
+      // ERP GA NIMA BO'LGANI JIM QOLMAYDI. Uchta holat bor va
+      // ular bir-biridan farq qiladi: karta ochildi / kimsasiz
+      // ochildi / umuman yozilmadi.
+      const tp = r.topshiriq
+      if (q === 'olindi' && tp) {
+        setErpXabar(tp.holat === 'yaratildi'
+          ? (tp.hodim_actor_id ? t('broker.erpCard') : t('broker.erpUnassigned'))
+          : `${t('broker.erpFailed')}: ${tp.xato || tp.holat}`)
+      } else {
+        setErpXabar(null)
+      }
       setOchilgan(null)
       setMalaka(null)
       setIzoh('')
+      setHodim('')
+      setMuddat('')
+      setUstuvorlik('medium')
       await yukla()
     } catch (e) {
       setXato(e instanceof Error ? e.message : String(e))
@@ -153,6 +205,20 @@ export default function BrokerQueue({
         <div className="rounded-lg border border-urgent/40 bg-urgent-soft
                         px-3 py-2 text-caption text-urgent-strong">
           {xato}
+        </div>
+      )}
+
+      {/* ERP GA NIMA BO'LGANI. Qaror MUVAFFAQIYATLI bo'lib, ERP
+          kartasi ochilmagan bo'lishi mumkin (masalan hodim
+          xaritalanmagan) — buni jimgina o'tkazib yuborish "hammasi
+          joyida" degan yolg'on taassurot qoldirardi. */}
+      {erpXabar && (
+        <div className="flex items-start gap-2 rounded-lg border
+                        border-soon/40 bg-soon-soft px-3 py-2
+                        text-caption text-soon-strong">
+          <span className="flex-1">{erpXabar}</span>
+          <button type="button" className="underline"
+                  onClick={() => setErpXabar(null)}>×</button>
         </div>
       )}
 
@@ -303,6 +369,52 @@ export default function BrokerQueue({
                   <div className="mt-3 rounded-lg border bg-muted/30 p-3">
                     {malakaYuk && <Skeleton className="h-32 w-full" />}
                     {malaka && <MalakaJadval n={malaka} />}
+
+                    {/* ISH TAQSIMOTI — faqat "Olindi" uchun ma'noli,
+                        lekin oldindan to'ldiriladi: qaror bosilgach
+                        yana bir oyna ochish ishni sekinlashtirardi. */}
+                    {aktorlar.length > 0 && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <label className="text-caption text-muted-foreground">
+                          {t('broker.assignee')}
+                        </label>
+                        <select
+                          className="rounded-md border bg-background px-2
+                                     py-1.5 text-caption"
+                          value={hodim}
+                          onChange={(e) => setHodim(e.target.value)}>
+                          <option value="">{t('broker.assignee.none')}</option>
+                          {aktorlar.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.ism}{a.erp_user_id ? '' : ' (ERP xaritasi yo‘q)'}
+                            </option>
+                          ))}
+                        </select>
+
+                        <label className="text-caption text-muted-foreground">
+                          {t('broker.priority')}
+                        </label>
+                        <select
+                          className="rounded-md border bg-background px-2
+                                     py-1.5 text-caption"
+                          value={ustuvorlik}
+                          onChange={(e) => setUstuvorlik(
+                            e.target.value as 'low' | 'medium' | 'high')}>
+                          <option value="low">{t('broker.priority.low')}</option>
+                          <option value="medium">{t('broker.priority.medium')}</option>
+                          <option value="high">{t('broker.priority.high')}</option>
+                        </select>
+
+                        <label className="text-caption text-muted-foreground">
+                          {t('broker.due')}
+                        </label>
+                        <input type="date"
+                          className="rounded-md border bg-background px-2
+                                     py-1.5 text-caption"
+                          value={muddat}
+                          onChange={(e) => setMuddat(e.target.value)} />
+                      </div>
+                    )}
 
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <input

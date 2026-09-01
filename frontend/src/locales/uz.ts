@@ -77,6 +77,17 @@ export const uz = {
   'broker.daysLeft': '{n} kun',
   'broker.openTender': 'Tenderni ochish',
   'broker.notePlaceholder': 'Izoh (ixtiyoriy)',
+  // ERP GA TOPSHIRIQ — "Olindi" qarori ish kartasiga aylanadi.
+  'broker.assignee': 'Kimga',
+  'broker.assignee.none': 'Taqsimlanmagan',
+  'broker.priority': 'Ustuvorlik',
+  'broker.priority.low': 'Past',
+  'broker.priority.medium': 'O‘rta',
+  'broker.priority.high': 'Yuqori',
+  'broker.due': 'Muddat',
+  'broker.erpCard': 'ERP kartasi ochildi',
+  'broker.erpUnassigned': 'ERP kartasi “Taqsimlanmagan” ga tushdi',
+  'broker.erpFailed': 'ERP ga topshiriq yozilmadi',
   'broker.erp': 'ERP da bor',
   // MOSLIK \u2014 o'lchanmagani "0%" EMAS.
   'broker.agreement': 'Moslik ({n} qaror bo\u2018yicha):',

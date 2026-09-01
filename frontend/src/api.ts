@@ -422,11 +422,21 @@ export const api = {
   // `broker` MAYDONI OLIB TASHLANDI: qarorni KIM qo'yganini mijoz
   // yozardi va uni hech narsa tekshirmasdi. Endi aktor SERVERDA
   // `X-Actor` sarlavhasidan aniqlanadi va ro'yxatdan tekshiriladi.
+  // `olindi` qarori ERP da ISH KARTASIGA aylanadi (`api/topshiriq.py`),
+  // shuning uchun qaror bilan birga ish taqsimoti ham yuboriladi:
+  // kimga, qanchalik shoshilinch, qachongacha. Qarorning KIMLIGI esa
+  // avvalgidek serverda aniqlanadi (mijoz yozmaydi).
   brokerQaror: (routingId: number, body: {
     qaror: InsonQaror; izoh?: string
+    hodim_actor_id?: number | null
+    ustuvorlik?: 'low' | 'medium' | 'high'
+    muddat?: string | null
   }) => request<{ id: number; tender_id: number; ai_qaror: AiQaror
                   inson_qaror: InsonQaror; holat: RoutingHolat
-                  ai_ozgardi: boolean }>(
+                  ai_ozgardi: boolean
+                  topshiriq?: { holat: string; id?: number
+                                hodim_actor_id?: number | null
+                                xato?: string } }>(
     'POST', `/routing/${routingId}/decision`, { body }),
 
   // --- auth-6: aktor va audit ---

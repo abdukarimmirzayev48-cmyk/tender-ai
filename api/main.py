@@ -2654,6 +2654,20 @@ class RoutingDecisionIn(BaseModel):
     # SERVERDA aniqlanadi (`X-Actor` sarlavhasi yoki ERP sessiyasi)
     # va `api/aktor.py` uni ro'yxatdan tekshiradi.
 
+    # --- ERP GA TOPSHIRIQ (`api/topshiriq.py`) --------------------------
+    # `olindi` qarori ERP da ISH KARTASIGA aylanadi. Quyidagilar —
+    # o'sha kartaning boshlang'ich holati. Ular MIJOZDAN keladi va
+    # bu to'g'ri: bular QAROR emas, ish taqsimoti (kimga, qachon,
+    # qanchalik shoshilinch). Qarorning KIMLIGI esa avvalgidek
+    # serverda aniqlanadi.
+    #
+    # `hodim_actor_id` — SHU IJARACHINING aktori bo'lishi shart
+    # (tekshiriladi); ERP hodimiga xaritalanmagan bo'lsa ERP kartani
+    # "Taqsimlanmagan" ga qo'yadi va menejerga xabar beradi.
+    hodim_actor_id: Optional[int] = None
+    ustuvorlik: str = "medium"
+    muddat: Optional[date] = None
+
 
 @app.post("/routing/{routing_id}/decision")
 def routing_decision(routing_id: int, body: RoutingDecisionIn,
@@ -2676,13 +2690,64 @@ def routing_decision(routing_id: int, body: RoutingDecisionIn,
         raise xatolar.kodli(e, "FIELD_INVALID")
     if not row:
         raise xatolar.Xato("RECORD_NOT_FOUND")
+    # --- ERP GA TOPSHIRIQ ---------------------------------------------
+    # `olindi` -> ERP da karta ochiladi; `rad`/`kutilsin` -> avval
+    # berilgan topshiriq BEKOR qilinadi (ERP kartasi o'chmaydi,
+    # `rejected` ga o'tadi). Ikkalasi ham `erp_rollar.md` §5 qoidasi.
+    #
+    # XATO YUTILMAYDI, LEKIN QARORNI HAM YIQITMAYDI: qaror allaqachon
+    # yozilgan va uni orqaga qaytarish yomonroq bo'lardi. Shuning
+    # uchun natija javobda ochiq qaytadi (`topshiriq` maydoni).
+    topshiriq_natija: Optional[Dict[str, Any]] = None
+    try:
+        from api import topshiriq as _topshiriq
+        if not _topshiriq.ready():
+            topshiriq_natija = {"holat": "migratsiya_yoq",
+                                "patch": "schema_patch_topshiriq.sql"}
+        elif body.qaror == "olindi":
+            if body.hodim_actor_id is not None:
+                from api import aktor as _aktor
+                if not _aktor.bitta(cid, body.hodim_actor_id):
+                    raise xatolar.Xato("RECORD_NOT_FOUND",
+                                       {"maydon": "hodim_actor_id"})
+            t = _topshiriq.yarat(
+                routing_id, cid, int(row["tender_id"]),
+                hodim_actor_id=body.hodim_actor_id,
+                yonaltirgan_actor_id=k.actor_id,
+                ishonch=k.ishonch, ustuvorlik=body.ustuvorlik,
+                izoh=body.izoh, muddat=body.muddat)
+            topshiriq_natija = {"holat": "yaratildi", "id": t["id"],
+                                "hodim_actor_id": t["hodim_actor_id"]}
+        else:
+            b = _topshiriq.bekor(routing_id, cid)
+            topshiriq_natija = {"holat": "bekor_qilindi", "id": b["id"]} if b                 else {"holat": "topshiriq_yoq"}
+    except xatolar.Xato:
+        raise
+    except Exception as e:                      # noqa: BLE001
+        topshiriq_natija = {"holat": "xato", "xato": f"{type(e).__name__}: {e}"[:300]}
+
     audit_yoz(k, request, amal=f"yonaltirish_{body.qaror}",
               entity="tender_routing", entity_id=routing_id,
               keyin={"inson_qaror": row.get("inson_qaror"),
                      "ai_qaror": row.get("ai_qaror"),
-                     "tender_id": row.get("tender_id")},
+                     "tender_id": row.get("tender_id"),
+                     "topshiriq": topshiriq_natija},
               izoh=body.izoh)
-    return row
+    return {**row, "topshiriq": topshiriq_natija}
+
+
+@app.get("/routing/{routing_id}/topshiriq")
+def routing_topshiriq(routing_id: int, request: Request):
+    """Shu qaror bo'yicha ERP ga berilgan topshiriq (bo'lsa).
+
+    Navbat ekrani "berildimi va kimga" degan savolga javob berishi
+    kerak: qaror yozilgani bilan ish boshlangani bir xil emas."""
+    from api import topshiriq as _topshiriq
+    cid = company_id_of(request)
+    if not _topshiriq.ready():
+        return {"bor": False, "sabab": "schema_patch_topshiriq.sql qo'llanmagan"}
+    t = _topshiriq.bitta(routing_id, cid)
+    return {"bor": bool(t), "topshiriq": t}
 
 
 class ReviewBulkIn(BaseModel):
