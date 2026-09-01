@@ -41,6 +41,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -350,8 +351,8 @@ def test_bildirishnoma_ulanmagan(db):
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="Saqlangan qidiruv sinovi")
-    ap.add_argument("--offline", action="store_true")
-    args = ap.parse_args()
+    rejim.bayroqlar(ap)
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: SAQLANGAN QIDIRUV — HAQIQATAN ISHLAYDIMI")
@@ -361,7 +362,7 @@ def main():
     test_hujjat()
     test_frontend()
 
-    if args.offline or not os.environ.get("XT_DB_DSN"):
+    if args.bazasiz or not os.environ.get("XT_DB_DSN"):
         print("\n[i] Bazali tekshiruvlar o'tkazib yuborildi.")
     else:
         from api import db

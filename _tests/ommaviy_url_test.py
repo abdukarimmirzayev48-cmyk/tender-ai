@@ -53,6 +53,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -465,8 +466,8 @@ def test_muhit_namunalari():
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="Ommaviy manzil sinovi")
-    ap.add_argument("--offline", action="store_true")
-    ap.parse_args()
+    rejim.bayroqlar(ap)
+    rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: OMMAVIY MANZIL — YAGONA MANBA")

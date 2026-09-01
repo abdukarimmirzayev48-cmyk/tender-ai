@@ -51,6 +51,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -494,8 +495,8 @@ def test_api(db, a_cid, b_cid, a_aktor, b_aktor):
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="Aktor kimligi sinovi")
-    ap.add_argument("--offline", action="store_true")
-    args = ap.parse_args()
+    rejim.bayroqlar(ap)
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: AKTOR KIMLIGI, RUXSAT VA AUDIT")
@@ -508,9 +509,9 @@ def main():
     except Exception as e:                                    # noqa: BLE001
         check("statik sinovlar", False, str(e)[:100])
 
-    if args.offline or not os.environ.get("XT_DB_DSN"):
+    if args.bazasiz or not os.environ.get("XT_DB_DSN"):
         print("\n[i] Bazali sinovlar o'tkazib yuborildi "
-              f"({'--offline' if args.offline else 'XT_DB_DSN yo`q'}).")
+              f"({'--offline' if args.bazasiz else 'XT_DB_DSN yo`q'}).")
     else:
         db = _db()
         from api import aktor

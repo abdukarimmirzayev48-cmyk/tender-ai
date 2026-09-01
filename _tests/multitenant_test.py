@@ -47,6 +47,7 @@ sys.path.insert(0, ROOT)
 # 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -742,9 +743,8 @@ def test_izolyatsiya(conn):
 
 def main():
     ap = argparse.ArgumentParser(description="Ko'p-ijarachilik sinovi (J1)")
-    ap.add_argument("--offline", action="store_true",
-                    help="Faqat statik tekshiruv (baza kerak emas)")
-    args = ap.parse_args()
+    rejim.bayroqlar(ap)
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("KO'P-IJARACHILIK SINOVI (J1)")
@@ -757,7 +757,7 @@ def main():
     test_cid_skaner_ozini_sinaydi()
     test_sole_company_tushishi()
 
-    if not args.offline:
+    if not args.bazasiz:
         from dotenv import load_dotenv
         load_dotenv(os.path.join(ROOT, ".env"))
         import psycopg2

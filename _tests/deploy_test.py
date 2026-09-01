@@ -36,6 +36,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -387,8 +388,8 @@ def test_hujjat():
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="Joylashtirish sinovi")
-    ap.add_argument("--offline", action="store_true")
-    ap.parse_args()
+    rejim.bayroqlar(ap)
+    rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: JOYLASHTIRISH ARTEFAKTLARI")

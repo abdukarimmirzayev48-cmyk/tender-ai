@@ -26,8 +26,9 @@ yakuniy chiqish kodi HAR QANDAY yiqilishda nolga teng bo'lmaydi.
 
 ISHGA TUSHIRISH
 ---------------
-    python run_tests.py                 # hammasi, bazasiz rejimda
+    python run_tests.py                 # BAZALI, tarmoqsiz (standart)
     python run_tests.py --online        # tarmoq/uchidan-uchiga ham
+    python run_tests.py --bazasiz       # bazasiz muhit uchun (CI)
     python run_tests.py --only import   # nomida "import" bori
     python run_tests.py --list          # ro'yxat, yurgizmaydi
 
@@ -61,10 +62,24 @@ def toplamlar(filtr: str = "") -> List[str]:
     return hammasi
 
 
-def yurgiz(yol: str, online: bool) -> Tuple[str, int, float, str]:
+#: Rejim -> bola jarayonga uzatiladigan bayroqlar.
+#:
+#: STANDART `tarmoq_yoq`: baza tekshiruvlari YURADI. Ilgari standart
+#: `--offline` edi va u BAZANI ham o'chirardi — ya'ni haqiqiy
+#: ma'lumot nuqsonlarini ushlaydigan tekshiruvlar UMUMAN
+#: bajarilmasdi. Sabab va o'lchov: `_tests/rejim.py`.
+REJIM = {
+    "toliq": [],                             # hammasi (baza + tarmoq)
+    "tarmoq_yoq": ["--tarmoqsiz"],           # STANDART
+    "baza_yoq": ["--bazasiz"],
+    "hech_narsa": ["--bazasiz", "--tarmoqsiz"],
+}
+
+
+def yurgiz(yol: str, rejim_nomi: str) -> Tuple[str, int, float, str]:
     """Bitta to'plamni yurgizadi. -> (nom, chiqish_kodi, sekund, oxirgi_qator)."""
     nom = os.path.basename(yol)[:-3]
-    args = [sys.executable, yol] + ([] if online else ["--offline"])
+    args = [sys.executable, yol] + REJIM[rejim_nomi]
 
     # BOLAGA UTF-8 MAJBURAN BERILADI. Bu yurgizuvchining o'zi UTF-8
     # bo'lgani yetarli emas — har bola O'Z oqimini o'zi ochadi.
@@ -108,12 +123,24 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description="Sinovlarni yurgizuvchi (CI)")
     ap.add_argument("--online", action="store_true",
-                    help="Tarmoq va uchidan-uchiga sinovlar ham "
-                         "(standart: --offline)")
+                    help="TARMOQ tekshiruvlari ham (standart: tarmoqsiz)")
+    ap.add_argument("--bazasiz", action="store_true",
+                    help="BAZASIZ muhit uchun (baza tekshiruvlari "
+                         "o'tkaziladi). Bu bayroqsiz baza tekshiruvlari "
+                         "YURADI — ular ma'lumot nuqsonlarini ushlaydi.")
     ap.add_argument("--only", default="",
                     help="Faqat nomida shu bo'lak bor to'plamlar")
     ap.add_argument("--list", action="store_true", help="Ro'yxat, yurgizmaydi")
     args = ap.parse_args()
+
+    if args.online and args.bazasiz:
+        rejim_nomi = "baza_yoq"
+    elif args.online:
+        rejim_nomi = "toliq"
+    elif args.bazasiz:
+        rejim_nomi = "hech_narsa"
+    else:
+        rejim_nomi = "tarmoq_yoq"
 
     yollar = toplamlar(args.only)
     if not yollar:
@@ -126,9 +153,12 @@ def main() -> None:
         return
 
     print("=" * 78)
+    tavsif = {"toliq": "TO'LIQ (baza + tarmoq)",
+              "tarmoq_yoq": "BAZALI, tarmoqsiz (standart)",
+              "baza_yoq": "TARMOQLI, bazasiz",
+              "hech_narsa": "FAQAT STATIK (baza ham, tarmoq ham yo'q)"}
     print(f"SINOVLAR: {len(yollar)} ta to'plam · "
-          f"rejim: {'ONLINE' if args.online else 'OFFLINE'} · "
-          f"chegara: {TIMEOUT}s")
+          f"rejim: {tavsif[rejim_nomi]} · chegara: {TIMEOUT}s")
     print(f"stdout.encoding = {sys.stdout.encoding} · "
           f"Unicode xavfsiz: {konsol.tekshir()}")
     print("=" * 78)
@@ -136,7 +166,7 @@ def main() -> None:
     natijalar = []
     t0 = time.time()
     for yol in yollar:
-        nom, kod, dt, xulosa = yurgiz(yol, args.online)
+        nom, kod, dt, xulosa = yurgiz(yol, rejim_nomi)
         natijalar.append((nom, kod, dt, xulosa))
         belgi = "OK  " if kod == 0 else "XATO"
         print(f"  [{belgi}] {nom:<24} {dt:6.1f}s  {xulosa}")

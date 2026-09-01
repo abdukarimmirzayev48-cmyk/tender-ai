@@ -53,6 +53,7 @@ sys.path.insert(0, ROOT)
 # 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -667,8 +668,8 @@ def test_soxta_qator_yoq(conn, cid) -> None:
 # =====================================================================
 def main() -> None:
     ap = argparse.ArgumentParser(description="Kodlash piloti sinovi")
-    ap.add_argument("--offline", action="store_true", help="Bazasiz")
-    args = ap.parse_args()
+    rejim.bayroqlar(ap)
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: KODLASH PILOTI — INSON QARORI HALQASI")
@@ -678,7 +679,7 @@ def main() -> None:
     test_konstantalar()
 
     conn = db_conn()
-    if conn is None or args.offline:
+    if conn is None or args.bazasiz:
         if conn is None:
             print("\n[i] Baza yo'q — cheklov sinovlari o'tkazib yuborildi.")
         else:

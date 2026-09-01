@@ -49,6 +49,7 @@ sys.path.insert(0, ROOT)
 # 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -1120,9 +1121,8 @@ def test_byudjet_taqsimoti() -> None:
 # =====================================================================
 def main() -> None:
     ap = argparse.ArgumentParser(description="ETL ishonchliligi sinovi")
-    ap.add_argument("--offline", action="store_true",
-                    help="Tarmoq va uchidan-uchiga sinovlarsiz")
-    args = ap.parse_args()
+    rejim.bayroqlar(ap)
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: ETL ISHONCHLILIGI")
@@ -1155,7 +1155,7 @@ def main() -> None:
         test_ustma_ust(conn)
         test_qulf_uzilganda_bosaydi(conn)
         test_idempotentlik_bazada(conn)
-        if args.offline:
+        if args.tarmoqsiz:
             print("\n[i] --offline: uchidan-uchiga sinov o'tkazib yuborildi "
                   "(manbaga so'rov yuboradi).")
         else:

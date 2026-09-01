@@ -36,6 +36,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -206,9 +207,8 @@ def test_regressiya(b):
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="RAG baholash regressiyasi")
-    ap.add_argument("--offline", action="store_true",
-                    help="Baholashni QAYTA YURGIZMAYDI (sekin)")
-    args = ap.parse_args()
+    rejim.bayroqlar(ap)
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: RAG BAHOLASH BAZAVIY O'LCHOVI")
@@ -227,7 +227,7 @@ def main():
 
     test_ground_truth(conn)
 
-    if args.offline:
+    if args.bazasiz:
         print("\n[i] --offline: sizish va regressiya tekshiruvi "
               "o'tkazib yuborildi (baholash ~30 s oladi).")
     else:

@@ -45,6 +45,7 @@ sys.path.insert(0, ROOT)
 # 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -147,7 +148,7 @@ def test_coverage(conn) -> None:
 # ---------------------------------------------------------------------------
 # 5) ID to'qnashuvi
 # ---------------------------------------------------------------------------
-def test_id_collisions(conn, offline: bool) -> None:
+def test_id_collisions(conn, tarmoqsiz: bool) -> None:
     print("\n[5] ID to'qnashuvi — reyestrlar ID fazolari kesishmaydimi")
 
     # Baza darajasi: uzex ofseti xt-xarid ID diapazoniga tushib qolmasin
@@ -160,7 +161,7 @@ def test_id_collisions(conn, offline: bool) -> None:
           xt_hi is None or uz_lo is None or uz_lo > xt_hi,
           f"xt=[{xt_lo}..{xt_hi}] uzex=[{uz_lo}..{uz_hi}]")
 
-    if offline:
+    if tarmoqsiz:
         print("        (--offline: manba darajasidagi tekshiruv o'tkazib yuborildi)")
         return
 
@@ -584,11 +585,10 @@ def test_etl_run_log(conn) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     ap = argparse.ArgumentParser(description="ETL qamrovi sinovi")
-    ap.add_argument("--offline", action="store_true",
-                    help="Manba API'ga chiqmaydigan tekshiruvlargina")
+    rejim.bayroqlar(ap)
     ap.add_argument("--skip-orchestrator", action="store_true",
                     help="run_etl.py sinovini o'tkazib yubor (u ~1 daqiqa)")
-    args = ap.parse_args()
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("ETL QAMROVI SINOVI (P0-1)")
@@ -598,8 +598,8 @@ def main() -> None:
     try:
         test_dim_status(conn)
         test_coverage(conn)
-        test_id_collisions(conn, args.offline)
-        if not (args.skip_orchestrator or args.offline):
+        test_id_collisions(conn, args.tarmoqsiz)
+        if not (args.skip_orchestrator or args.tarmoqsiz):
             test_orchestrator()
         test_ochiq_ishlar_belgilangan()
         test_quvur_jimgina_otmasin()

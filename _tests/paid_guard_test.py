@@ -166,8 +166,18 @@ def main() -> None:
         if tid:
             from api import requirement_naqsh as N
             r = N.extract(tid, 2)
+            # `needs_review` HAM MUVAFFAQIYAT: ajratgich ishladi va
+            # 18 ta talab topdi, faqat eng past ishonch 0.60 dan
+            # past bo'lgani uchun inson ko'rigi so'ralyapti
+            # (`requirement_naqsh.py:356`). Ilgari ruxsat etilgan
+            # to'plamda u YO'Q edi va ishlagan ajratgich YIQILGAN
+            # deb ko'rsatilardi.
+            #
+            # Bu tekshiruvning maqsadi — PULLIK qulf BEPUL yo'lni
+            # to'xtatmasligini isbotlash. Uchala holat ham "qulf
+            # to'xtatmadi" degani.
             check("naqsh ajratgichi ishlaydi",
-                  r["status"] in ("ok", "no_text"), str(r))
+                  r["status"] in ("ok", "needs_review", "no_text"), str(r))
 
         section("6. Qulfning O'ZI ishlaydimi")
         # "Hammasi bloklandi" degani "qulf ishlayapti" emas — u har

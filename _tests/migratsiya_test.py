@@ -41,6 +41,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -478,11 +479,10 @@ def test_4_checksum_ozgarishi():
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="Migratsiya versiyalash sinovi")
-    ap.add_argument("--offline", action="store_true",
-                    help="Bazali stsenariylarni O'TKAZIB YUBORADI")
+    rejim.bayroqlar(ap)
     ap.add_argument("--saqla", action="store_true",
                     help="Sinov bazasini tashlamaydi (nosozlik izlash)")
-    args = ap.parse_args()
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: MIGRATSIYA VERSIYALASH")
@@ -494,10 +494,10 @@ def main():
     test_jurnal_mexanizmi()
     test_patch_qulflari()
 
-    bazali = (not args.offline) and psycopg2 is not None \
+    bazali = (not args.bazasiz) and psycopg2 is not None \
         and bool(os.environ.get("XT_DB_DSN"))
     if not bazali:
-        sabab = ("--offline berildi" if args.offline else
+        sabab = ("--offline berildi" if args.bazasiz else
                  "psycopg2 yo'q" if psycopg2 is None else "XT_DB_DSN yo'q")
         print(f"\n[i] Bazali stsenariylar O'TKAZIB YUBORILDI ({sabab}). "
               f"Ular ~40 s oladi va o'z bazasini yaratadi.")

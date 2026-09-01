@@ -40,6 +40,7 @@ sys.path.insert(0, ROOT)
 # 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -708,9 +709,9 @@ def test_ochiq_soat_qulfi(cid: int):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--offline", action="store_true", help="Faqat statik qism")
+    rejim.bayroqlar(ap)
     ap.add_argument("--company", type=int, default=2)
-    args = ap.parse_args()
+    args = rejim.moslash(ap.parse_args())
 
     test_prior()
     test_query_matn()
@@ -723,7 +724,7 @@ def main() -> int:
     test_moslik_sql_faol_korinishdan()
     test_semantik_hublik()
 
-    if not args.offline:
+    if not args.bazasiz:
         try:
             from dotenv import load_dotenv
             load_dotenv(os.path.join(ROOT, ".env"))

@@ -54,6 +54,7 @@ sys.path.insert(0, ROOT)
 # 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -626,9 +627,8 @@ def test_migratsiya_jurnali(conn) -> None:
 # =====================================================================
 def main() -> None:
     ap = argparse.ArgumentParser(description="Ko'rib chiqish butunligi sinovi")
-    ap.add_argument("--offline", action="store_true",
-                    help="Faqat statik tekshiruvlar (bazasiz)")
-    args = ap.parse_args()
+    rejim.bayroqlar(ap)
+    args = rejim.moslash(ap.parse_args())
 
     print("=" * 70)
     print("SINOV: INSON KO'RIB CHIQISH BUTUNLIGI")
@@ -638,7 +638,7 @@ def main() -> None:
     test_konstantalar()
 
     conn = db()
-    if conn is None or args.offline:
+    if conn is None or args.bazasiz:
         if conn is None:
             print("\n[i] Baza yo'q — cheklov sinovlari o'tkazib yuborildi.")
         else:

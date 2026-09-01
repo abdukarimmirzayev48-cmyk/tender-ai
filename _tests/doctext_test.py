@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 143 ta tekshiruvni bajarmasdan yiqilardi. Tafsilot: _tests/konsol.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import konsol  # noqa: E402
+import rejim  # noqa: E402
 
 konsol.sozla()
 
@@ -479,8 +480,8 @@ def report(conn) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Hujjat matni sinovi")
-    ap.add_argument("--offline", action="store_true", help="Tarmoqsiz (4-bo'lim o'tkaziladi)")
-    args = ap.parse_args()
+    rejim.bayroqlar(ap)
+    args = rejim.moslash(ap.parse_args())
 
     dsn = os.environ.get("XT_DB_DSN")
     if not dsn:
@@ -493,7 +494,7 @@ def main() -> None:
         test_zip()
         test_doc_ole2()
         test_status_logic()
-        if not args.offline:
+        if not args.tarmoqsiz:
             import requests
             test_live(conn, requests.Session())
         else:
