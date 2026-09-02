@@ -9,12 +9,13 @@ Dizayn:
   - Pool lifespan'da (main.py) init/close qilinadi.
 """
 import os
+import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 _pool: Optional[ThreadedConnectionPool] = None
 
@@ -49,14 +50,56 @@ def close_pool() -> None:
         _pool = None
 
 
+#: Hovuz bo'sh bo'lganda QANCHA KUTILADI (sekund).
+#:
+#: O'LCHANGAN NUQSON (2026-09-02). `ThreadedConnectionPool.getconn()`
+#: hovuz to'lgan bo'lsa DARHOL `PoolError` beradi. U `psycopg2.Error`
+#: avlodi, ya'ni `DBUnavailable` ga o'raladi va mijozga **503**
+#: ketadi. Foydalanuvchi buni "server ishlamayapti" deb o'qiydi,
+#: aslida server ISHLAYAPTI -- shunchaki band edi.
+#:
+#: O'LCHANDI: 12 parallel so'rov, hovuz 8 ta -> 4 tasi darhol 503.
+#: Aynan shu "Sizga mos" sahifasida ko'ringan: sahifa bir necha
+#: so'rovni birga yuboradi va ular bir-birini yiqitardi.
+#:
+#: FastAPI sync-endpointlarni ~40 ta ipda yuritadi, DB hovuzi esa
+#: 8 ta. Ya'ni 32 ta ip hech qachon ulanish OLA OLMASDI.
+#:
+#: KUTISH -- YASHIRISH EMAS. Chegara tugagach xato BARIBIR
+#: chiqariladi: haqiqiy ortiqcha yuklama ko'rinib turishi kerak.
+_KUTISH_SEK = float(os.environ.get("DB_POOL_WAIT_SEC", "10"))
+#: Qayta urinishlar orasidagi tanaffus.
+_TANAFFUS_SEK = 0.05
+
+
 @contextmanager
 def get_conn():
-    """Pool'dan connection oladi va qaytaradi (context manager)."""
+    """Pool'dan connection oladi va qaytaradi (context manager).
+
+    Hovuz to'la bo'lsa DARHOL yiqilmaydi -- `_KUTISH_SEK` gacha
+    kutadi. Qisqa portlashlar shu bilan yutiladi.
+    """
     if _pool is None:
         raise DBUnavailable("DB pool ishga tushmagan.")
     conn = None
+    muddat = time.monotonic() + _KUTISH_SEK
+    while True:
+        try:
+            conn = _pool.getconn()
+            break
+        except PoolError as e:
+            # FAQAT "hovuz to'la" holati kutiladi. Boshqa
+            # `PoolError` (masalan hovuz yopilgan) DARHOL chiqadi --
+            # uni kutish ma'nosiz va u boshqa nosozlik.
+            if "exhausted" not in str(e).lower():
+                raise DBUnavailable(str(e)) from e
+            if time.monotonic() >= muddat:
+                # HAQIQIY ortiqcha yuklama -- YASHIRILMAYDI.
+                raise DBUnavailable(
+                    f"DB hovuzi {_KUTISH_SEK:.0f}s davomida bo'shamadi "
+                    f"(band): {e}") from e
+            time.sleep(_TANAFFUS_SEK)
     try:
-        conn = _pool.getconn()
         yield conn
     finally:
         if conn is not None:

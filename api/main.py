@@ -137,6 +137,12 @@ class CatalogMatchIn(BaseModel):
     # Mahsulot/xizmat filtri — foydalanuvchi katalogiga qo'shimcha toraytirish
     products: List[str] = []
     services: List[str] = []
+    # MATNLI QIDIRUV. O'LCHANGAN NUQSON (2026-09-02): bu maydon YO'Q edi
+    # va interfeys uni yubormasdi ham -> "Sizga mos" sahifasida qidiruv
+    # maydoni bor edi, lekin natijaga TA'SIR QILMASDI. Foydalanuvchi
+    # yozgan so'z JIMGINA yo'qolardi va u buni "moslik yo'q" deb
+    # o'qirdi — salbiy shartdan olingan yolg'on xulosa.
+    q: Optional[str] = None
     # Standart ro'yxat aniq kod mosligi. Eski matn qidiruvi faqat maxsus
     # taxminiy ko'rinish so'ralsa ishlaydi.
     include_probable: bool = False
@@ -1803,6 +1809,16 @@ def ai_match_tender(
         raise xatolar.Xato("TENDER_NOT_FOUND", {"id": tender_id})
     _tirik_yoki_409(row, tender_id)
 
+    # IJARACHI ENG BOSHIDA aniqlanadi. O'LCHANGAN NUQSON (2026-09-02):
+    # `company_id` shu yerda ISHLATILARDI, lekin 12 qator KEYIN
+    # aniqlanardi -> `UnboundLocalError` -> HTTP 500. Ya'ni bu
+    # endpoint HECH QACHON ishlamagan.
+    #
+    # `company_id_of()` ishlatiladi, `current_account()["id"]` emas:
+    # birinchisi SERVICE kaliti (ERP) yo'lini ham to'g'ri hal qiladi
+    # va qolgan hamma endpoint bilan bir xil.
+    company_id = company_id_of(request)
+
     products = db.query(queries.CATALOG_LIST_SQL, {"company_id": company_id})
     profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL,
                                           {"company_id": company_id}))
@@ -1816,7 +1832,6 @@ def ai_match_tender(
     text = ai_match.build_input(row, products, profile, docs)
     h = ai_match.content_hash(text)
 
-    company_id = current_account(request)["id"]
     cached = db.query_one(queries.AI_CACHED_SQL,
                           {"id": tender_id, "kind": ai_match.KIND,
                            "company_id": company_id})
@@ -2126,7 +2141,7 @@ def get_tender_pricing(tender_id: int, request: Request):
 
 
 @app.post("/tenders/{tender_id}/pricing")
-def post_tender_pricing(tender_id: int, body: PricingIn):
+def post_tender_pricing(tender_id: int, body: PricingIn, request: Request):
     """Smetani qayta hisoblaydi va saqlaydi.
 
     Frontend ham brauzerda hisoblaydi (bir xil formula — `pricing.ts`), lekin
@@ -3445,7 +3460,7 @@ def catalog_match(body: CatalogMatchIn, request: Request):
     # allaqachon id bo'yicha qisqargan, ya'ni so'rov arzon.
     where, params = queries.build_tender_filters(
         status="open", region=body.region, currency=body.currency,
-        products=body.products + body.services)
+        q=body.q, products=body.products + body.services)
     where = (where + " AND t.id = ANY(%(ids)s)") if where else "WHERE t.id = ANY(%(ids)s)"
     params["ids"] = ids
     cand = db.query(queries.match_candidates_sql(where, cap=MATCH_CAP), params)
@@ -3512,7 +3527,18 @@ def catalog_match(body: CatalogMatchIn, request: Request):
             # ko'rishi mumkin va u holda mahsulot nomi taxmin bo'ladi.
             "positions": positions,
             "position_count": n_poz,
-            "products": [x["mahsulot"] for x in positions if x["mahsulot"]][:5],
+            # TAKRORSIZ, TARTIB SAQLANGAN. O'LCHANGAN NUQSON
+            # (2026-09-02): bir mahsulot bir tenderning bir necha
+            # pozitsiyasiga mos kelsa, nomi ro'yxatga BIR NECHA
+            # marta tushardi (37 elementdan 3 tasida). Ikki oqibati
+            # bor edi:
+            #   * interfeys sababni IKKI MARTA ko'rsatardi;
+            #   * React `key` dublikati ogohlantirishi chiqardi
+            #     (`TenderTable` sabablarni nom bo'yicha kalitlaydi).
+            # `dict.fromkeys` tartibni saqlaydi -- eng kuchli moslik
+            # birinchi bo'lib qolsin.
+            "products": list(dict.fromkeys(
+                x["mahsulot"] for x in positions if x["mahsulot"]))[:5],
         }
         matched.append(item)
 

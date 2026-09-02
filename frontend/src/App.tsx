@@ -222,7 +222,19 @@ export default function App() {
     loadSearches()
   }
 
+  // MANBA FILTRI UCH HOLATLI, ikki emas. O'LCHANGAN NUQSON
+  // (2026-09-02): shart `sources.length === 1 ? sources[0] : ''` edi va
+  // u NOL tanlovni HAMMASI bilan bir xil ko'rardi — ikkala manba ham
+  // o'chirilganda foydalanuvchi HAMMA tenderni ko'rardi.
+  //
+  //   2 tanlangan -> filtr YO'Q      (hammasi)
+  //   1 tanlangan -> shu manba
+  //   0 tanlangan -> HECH NARSA      <- avval "hammasi" edi
+  //
+  // Nol tanlov "filtr qo'yilmagan" DEGANI EMAS: u "hech qaysi manba
+  // kerak emas" degani va javob BO'SH bo'lishi kerak.
   const source = sources.length === 1 ? sources[0] : ''
+  const manbaYoq = sources.length === 0
 
   // Asosiy yuklovchi — view'ga qarab /tenders yoki /match
   const load = useCallback(async (opts: { silent?: boolean } = {}) => {
@@ -234,6 +246,13 @@ export default function App() {
     // Ro'yxatsiz ko'rinishlar tender so'ramaydi
     if (['stats', 'profile', 'catalog', 'account', 'documents',
          'requirements', 'broker'].includes(view)) return
+    if (manbaYoq) {
+      // So'rov YUBORILMAYDI: bo'sh natija SO'ROVDAN emas, TANLOVDAN
+      // kelib chiqadi va buni foydalanuvchi ko'rishi kerak.
+      setData({ items: [], total: 0 })
+      if (!opts.silent) setLoading(false)
+      return
+    }
     if (!opts.silent) setLoading(true)
     setError(null)
     try {
@@ -249,9 +268,14 @@ export default function App() {
         })
       } else if (view === 'match') {
         // Standart "Sizga mos" — katalogning aniq lot kodlari bo'yicha.
+        // `q` UZATILADI. O'LCHANGAN NUQSON (2026-09-02): u bu
+        // chaqiruvda YO'Q edi, ya'ni "Sizga mos" sahifasida qidiruv
+        // maydoni ishlardi, natijaga esa TA'SIR QILMASDI — foydalanuvchi
+        // yozgan so'z JIMGINA tashlab yuborilardi.
         const r = await api.catalogMatch({
           product_id: catalogProduct?.id ?? null,
           region: filters.region, currency: filters.currency,
+          q: filters.q,
           products: filters.products, services: filters.services,
           limit: PAGE_SIZE, offset,
         })
@@ -286,7 +310,8 @@ export default function App() {
     } finally {
       if (!opts.silent) setLoading(false)
     }
-  }, [view, filters, offset, source, profile, activeSearchId, catalogProduct, t])
+  }, [view, filters, offset, source, manbaYoq, profile, activeSearchId,
+      catalogProduct, t])
 
   useEffect(() => { load() }, [load])
 
@@ -513,7 +538,16 @@ export default function App() {
 
       {chatFor !== null && (
         <Suspense fallback={null}>
-          <div className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[440px]
+          {/* QATLAM TARTIBI (o'lchangan nuqson, 2026-09-02).
+              Chat `z-40` edi, `Sheet`/`Dialog` esa `z-50` — ya'ni
+              tender oynasi ochiq turib "AI dan so'rash" bosilganda
+              chat oyna ORTIDA ochilardi va foydalanuvchi HECH NARSA
+              ko'rmasdi. Chat oxirgi ochilgan qatlam, shuning uchun
+              u eng ustida turishi kerak.
+
+              Tartib:  30 fon paneli < 40 yon menyu < 50 Sheet/Dialog
+                       < 60 chat */}
+          <div className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[440px]
                           flex-col border-l shadow-xl">
             <ChatPanel
               tenderId={chatFor || null}
