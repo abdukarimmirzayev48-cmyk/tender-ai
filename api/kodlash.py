@@ -56,6 +56,7 @@ Inson tasdig'i aynan shuni ushlaydi.
 """
 import json
 import re
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence
 
 from api import categories as C
@@ -480,11 +481,18 @@ ORDER BY g.tender_id, g.good_code
 ATRIBUT_CHEGARA = 0.05
 
 
-def _uchliklar(s: str) -> set:
+@lru_cache(maxsize=32768)
+def _uchliklar(s: str) -> frozenset:
+    """Belgi-uchliklar to'plami. KESHLANADI — sof funksiya.
+
+    `frozenset` qaytadi: chaqiruvchi to'plamni o'zgartirsa kesh
+    zaharlanardi.
+    """
     s = f"  {(s or '').lower().strip()}  "
-    return {s[i:i + 3] for i in range(len(s) - 2)}
+    return frozenset(s[i:i + 3] for i in range(len(s) - 2))
 
 
+@lru_cache(maxsize=65536)
 def _ozgarish(katalog_nomi: str, pozitsiya: str) -> float:
     """Katalog nomi va tender pozitsiyasining o'xshashligi, 0..1.
 
@@ -540,8 +548,11 @@ def pozitsiya_moslik(company_id: int,
         else:
             # Bir kodni bir necha mahsulot baham ko'rgan -> pozitsiya
             # nomiga eng yaqinini tanlaymiz.
-            eng = max(lst, key=lambda r: _ozgarish(r["product_name"], poz))
-            skor = _ozgarish(eng["product_name"], poz)
+            # BALL BIR MARTA hisoblanadi. Ilgari `max(key=...)` har
+            # da'vogar uchun hisoblardi, so'ng g'olib uchun YANA bir
+            # marta — ya'ni N+1 chaqiruv. Endi juftlik saqlanadi.
+            skor, eng = max(((_ozgarish(r["product_name"], poz), r)
+                             for r in lst), key=lambda t: t[0])
             if skor < ATRIBUT_CHEGARA:
                 # SIGNAL YO'Q -> TAXMIN QILMAYMIZ. Pozitsiya ko'rsatiladi,
                 # mahsulot nomi esa NULL. Tasodifiy nom yopishtirish

@@ -749,6 +749,90 @@ def test_ochiq_soat_qulfi(cid: int):
                          {"k": K})
 
 
+def test_takror_hisob_yoq():
+    """ORTIQCHA HISOB QAYTMASIN — "Sizga mos" sekinligining sababi.
+
+    O'LCHANGAN NUQSON (2026-09-02). `POST /catalog/match` 4.9-8.1 s
+    yuklanardi (35 ta natija uchun). Profil: vaqtning 96% i
+    `pozitsiya_moslik` da, uning ichida `translit._cyr_readings`
+    19 280 marta chaqirilgan va 16 151 990 ta `str.startswith`
+    bajarilgan.
+
+    SABAB ALGORITM EMAS, TAKROR HISOB edi: bitta so'rovda
+    `variants()` 16 851 marta chaqirilardi, TAKRORSIZ kirish esa
+    atigi 1 048 ta — 16 barobar ortiqcha ish.
+
+    BU SINOV VAQTNI O'LCHAMAYDI. Vaqt sinovlari mashinaga bog'liq
+    va tebranadi; ular yiqilganda sabab noaniq bo'ladi. O'lchanadigan
+    narsa — ORTIQCHA ISH: bir xil kirish qayta hisoblanmasin.
+    """
+    section("Takror hisob — kesh")
+    from api import kodlash as K
+    from api import translit as T
+
+    # --- Keshlar mavjud ---
+    for nom, fn in (("translit._variants", T._variants),
+                    ("translit._cyr_readings", T._cyr_readings),
+                    ("translit.fold_cyr", T.fold_cyr),
+                    ("kodlash._uchliklar", K._uchliklar),
+                    ("kodlash._ozgarish", K._ozgarish)):
+        check(f"`{nom}` keshlangan", hasattr(fn, "cache_info"))
+
+    # --- KESH HAQIQATAN ISHLAYDI ---
+    # Mavjudligi yetarli emas: `maxsize=0` bo'lsa ham `cache_info`
+    # bo'lardi.
+    K._ozgarish.cache_clear()
+    T._variants.cache_clear()
+    nomlar = ["Кресло офисное", "Стол ученический", "Кресло офисное"]
+    pozlar = ["Ofis kreslosi", "Ofis kreslosi"]
+    for nom in nomlar:
+        for poz in pozlar:
+            K._ozgarish(nom, poz)
+    ci = K._ozgarish.cache_info()
+    # 3 nom x 2 pozitsiya = 6 chaqiruv, TAKRORSIZ juftlik = 4.
+    check("takroriy juftlik QAYTA hisoblanmaydi",
+          ci.hits >= 2 and ci.misses <= 4, str(ci))
+    # `variants()` ALOHIDA sinaladi: `_ozgarish` keshi tufayli
+    # takroriy juftlik unga umuman YETIB BORMAYDI, ya'ni uni
+    # `_ozgarish` orqali sinash keshni emas, boshqa keshni o'lchardi.
+    T._variants.cache_clear()
+    for _ in range(3):
+        T.variants("Кресло офисное")
+    vi = T._variants.cache_info()
+    check("`variants()` takroriy nomni QAYTA hisoblamaydi",
+          vi.hits == 2 and vi.misses == 1, str(vi))
+
+    # --- KESH ZAHARLANMASIN ---
+    # Keshlangan funksiya O'ZGARUVCHAN qiymat qaytarsa, chaqiruvchi
+    # uni o'zgartirib butun keshni buzardi va xato BUTUNLAY boshqa
+    # joyda chiqardi.
+    v = T.variants("Кресло офисное")
+    check("`variants()` RO'YXAT qaytaradi (chaqiruvchilar shunday kutadi)",
+          isinstance(v, list), type(v).__name__)
+    v.append("ZAHAR")
+    check("qaytgan ro'yxatni o'zgartirish keshni BUZMAYDI",
+          "ZAHAR" not in T.variants("Кресло офисное"))
+    check("`_variants()` O'ZGARMAS tur qaytaradi",
+          isinstance(T._variants("Кресло офисное"), tuple))
+    check("`_cyr_readings()` O'ZGARMAS tur qaytaradi",
+          isinstance(T._cyr_readings("kreslo"), tuple))
+    u = K._uchliklar("Кресло")
+    check("`_uchliklar()` O'ZGARMAS tur qaytaradi (frozenset)",
+          isinstance(u, frozenset), type(u).__name__)
+    # `frozenset` to'plam amallarida `set` bilan bir xil ishlashi shart.
+    check("`frozenset` to'plam amallari ishlaydi",
+          len(K._uchliklar("abc") & K._uchliklar("abc")) > 0
+          and len(K._uchliklar("abc") | K._uchliklar("xyz")) > 0)
+
+    # --- G'OLIB BALLI IKKI MARTA HISOBLANMAYDI ---
+    with open(os.path.join(ROOT, "api", "kodlash.py"),
+              encoding="utf-8") as f:
+        src = f.read()
+    check("g'olib balli QAYTA hisoblanmaydi",
+          'skor = _ozgarish(eng["product_name"], poz)' not in src,
+          "`max(key=...)` dan keyin yana bir chaqiruv bor edi")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     rejim.bayroqlar(ap)
@@ -765,6 +849,7 @@ def main() -> int:
     test_navbat_qaror_filtri_kodda()
     test_moslik_sql_faol_korinishdan()
     test_semantik_hublik()
+    test_takror_hisob_yoq()
 
     if not args.bazasiz:
         try:
