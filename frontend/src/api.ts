@@ -279,6 +279,36 @@ async function request<T>(
   return (text ? JSON.parse(text) : null) as T
 }
 
+/** Suhbat — `chat_session` jadvalidan (`SQL_SESSION_LIST`). */
+export interface ChatSession {
+  id: string
+  tender_id: Nullable<number>
+  title: Nullable<string>
+  lang: Nullable<string>
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * Saqlangan xabar — `chat_message` jadvalidan (`SQL_MESSAGES`).
+ *
+ * `error` MAYDONI ATAYLAB BOR: backend xatoli javoblarni ham
+ * saqlaydi va qaytaradi ("jimgina o'tkazib yuborilmaydi" tamoyili).
+ * Interfeys ularni YASHIRMASLIGI kerak.
+ */
+export interface ChatStoredMessage {
+  id: number
+  seq: number
+  role: string
+  content: unknown
+  citations: Nullable<unknown>
+  model: Nullable<string>
+  latency_ms: Nullable<number>
+  stop_reason: Nullable<string>
+  error: Nullable<string>
+  created_at: string
+}
+
 export interface CompanyAccount {
   id: number
   username: string
@@ -521,6 +551,20 @@ export const api = {
   catalogNewCount: () => request<{ new: number; total: number; deferred?: boolean }>(
     'GET', '/catalog/new-count'),
   catalogSeen: () => request<null>('POST', '/catalog/seen'),
+
+  // --- AI CHAT TARIXI ---------------------------------------------------
+  // Backend bu uchtasini ANCHADAN BERI beradi (`GET /chat/sessions`,
+  // `/chat/sessions/{id}`, `DELETE /chat/sessions/{id}`), lekin frontend
+  // ularni HECH QACHON chaqirmagan: suhbat sahifa yangilanishi bilan
+  // yo'qolardi, `chat_session` jadvali esa to'lib borardi.
+  chatSessions: (limit = 50) =>
+    request<ChatSession[]>('GET', '/chat/sessions', { params: { limit } }),
+  chatHistory: (id: string) =>
+    request<{ session: ChatSession; messages: ChatStoredMessage[] }>(
+      'GET', `/chat/sessions/${encodeURIComponent(id)}`),
+  // O'CHIRMAYDI, ARXIVLAYDI — jurnal va xarajat hisobi saqlanadi.
+  chatArchive: (id: string) =>
+    request<null>('DELETE', `/chat/sessions/${encodeURIComponent(id)}`),
 
   // --- KODLASH (o'lchov bosqichi) ---
   // Ekran O'LCHOV ASBOBI: vaqt, manba va qidiruv soni AVTOMATIK

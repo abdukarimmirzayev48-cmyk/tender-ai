@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icon'
 import ToolBadge from './ToolBadge'
 import CitationChip from './CitationChip'
@@ -8,6 +8,8 @@ import { useChatStream } from '@/hooks/useChatStream'
 import type { Citation } from '@/hooks/useChatStream'
 import { renderMarkdown } from '@/markdown'
 import { cn } from '@/lib/utils'
+import { AIAssistantInterface } from '@/components/ui/ai-assistant-interface'
+import { api, type ChatSession, type ChatStoredMessage } from '@/api'
 
 // AI-CHAT PANELI
 // ══════════════
@@ -41,6 +43,69 @@ export default function ChatPanel({ tenderId, onClose, onOpenCitation }: ChatPan
   const [tarix, setTarix] = useState<Msg[]>([])
   const oxiriRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  // --- SUHBATLAR TARIXI ---------------------------------------------
+  // Backend `GET /chat/sessions` ni ANCHADAN BERI beradi, lekin
+  // frontend uni HECH QACHON chaqirmagan: suhbat sahifa yangilanishi
+  // bilan yo'qolardi va foydalanuvchi savolini qaytadan yozardi.
+  const [tarixOchiq, setTarixOchiq] = useState(false)
+  const [seanslar, setSeanslar] = useState<ChatSession[] | null>(null)
+  const [seansXato, setSeansXato] = useState<string | null>(null)
+
+  const seanslarniYukla = useCallback(async () => {
+    setSeansXato(null)
+    try {
+      setSeanslar(await api.chatSessions())
+    } catch (e) {
+      // XATO YUTILMAYDI: bo'sh ro'yxat va yiqilgan so'rov BOSHQA
+      // holatlar va foydalanuvchi farqni ko'rishi kerak.
+      setSeanslar([])
+      setSeansXato((e as Error).message)
+    }
+  }, [])
+
+  /** Saqlangan xabar bloklaridan matnni ajratadi. */
+  function blokMatni(m: ChatStoredMessage): string {
+    const c = m.content
+    if (typeof c === 'string') return c
+    if (!Array.isArray(c)) return ''
+    return c
+      .filter((b): b is { type?: string; text?: string } =>
+        !!b && typeof b === 'object')
+      .filter((b) => typeof b.text === 'string')
+      .map((b) => b.text as string)
+      .join(String.fromCharCode(10))
+  }
+
+  async function seansOch(id: string) {
+    setSeansXato(null)
+    try {
+      const r = await api.chatHistory(id)
+      const msgs: Msg[] = r.messages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          // XATOLI javob ham KO'RSATILADI — backend uni ataylab
+          // saqlaydi, interfeys uni yashirsa sabab yo'qolardi.
+          text: m.error ? `⚠ ${m.error}` : blokMatni(m),
+        }))
+        .filter((m) => m.text)
+      reset()
+      setTarix(msgs)
+      setTarixOchiq(false)
+    } catch (e) {
+      setSeansXato((e as Error).message)
+    }
+  }
+
+  async function seansArxivla(id: string) {
+    try {
+      await api.chatArchive(id)
+      setSeanslar((xs) => (xs || []).filter((x) => x.id !== id))
+    } catch (e) {
+      setSeansXato((e as Error).message)
+    }
+  }
 
   // Oqim tugagach javobni tarixga ko'chiramiz — shunda keyingi savol
   // ekranni tozalamaydi va suhbat ko'rinib turadi.
@@ -113,6 +178,16 @@ export default function ChatPanel({ tenderId, onClose, onOpenCitation }: ChatPan
               : t('chat.scope.global')}
           </div>
         </div>
+        <Button variant="ghost" size="sm"
+          aria-pressed={tarixOchiq}
+          onClick={() => {
+            const yangi = !tarixOchiq
+            setTarixOchiq(yangi)
+            if (yangi && seanslar === null) void seanslarniYukla()
+          }}
+          title={t('chat.history')}>
+          <Icon name="checklist" size={14} />
+        </Button>
         {tarix.length > 0 && (
           <Button variant="ghost" size="sm" onClick={() => { reset(); setTarix([]) }}
             title={t('chat.new')}>
@@ -126,21 +201,54 @@ export default function ChatPanel({ tenderId, onClose, onOpenCitation }: ChatPan
 
       {/* --- Suhbat ---------------------------------------------------- */}
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
-        {bosh && (
-          <div className="space-y-3 text-body text-muted-foreground">
-            <p>{t('chat.empty')}</p>
-            <ul className="space-y-1.5">
-              {(['chat.example.1', 'chat.example.2', 'chat.example.3'] as const).map((k) => (
-                <li key={k}>
+        {tarixOchiq && (
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-muted-foreground">
+              {t('chat.history')}
+            </div>
+            {seansXato && (
+              <p className="rounded-md bg-destructive/10 px-3 py-2 text-caption
+                            text-destructive">
+                {t('chat.history.failed', { msg: seansXato })}
+              </p>
+            )}
+            {seanslar !== null && !seanslar.length && !seansXato && (
+              <p className="text-caption text-muted-foreground">
+                {t('chat.history.empty')}
+              </p>
+            )}
+            <ul className="divide-y divide-border overflow-hidden rounded-lg border">
+              {(seanslar || []).map((sn) => (
+                <li key={sn.id} className="flex items-center gap-1">
                   <button type="button"
-                    className="text-left text-accent underline-offset-2 hover:underline"
-                    onClick={() => setSavol(t(k))}>
-                    {t(k)}
+                    onClick={() => void seansOch(sn.id)}
+                    title={t('chat.history.open')}
+                    className="min-w-0 flex-1 px-3 py-2 text-left transition-colors
+                               hover:bg-accent/10">
+                    <div className="truncate text-caption">
+                      {sn.title || t('chat.scope.global')}
+                    </div>
+                    <div className="text-micro text-muted-foreground">
+                      {new Date(sn.updated_at).toLocaleString()}
+                      {sn.tender_id ? ` · #${sn.tender_id}` : ''}
+                    </div>
                   </button>
+                  <Button variant="ghost" size="sm"
+                    title={t('chat.history.archive')}
+                    onClick={() => void seansArxivla(sn.id)}>
+                    <Icon name="trash" size={13} />
+                  </Button>
                 </li>
               ))}
             </ul>
           </div>
+        )}
+
+        {bosh && !tarixOchiq && (
+          <AIAssistantInterface tenderId={tenderId} onPick={(m) => {
+            setSavol(m)
+            inputRef.current?.focus()
+          }} />
         )}
 
         {tarix.map((m, i) => (
