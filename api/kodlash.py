@@ -446,6 +446,45 @@ def moslik(company_id: int, only_open: bool = True,
                                                  if product_ids else None)})
 
 
+#: "Sizga mos" bo'limi qancha tenderni ko'rib chiqadi.
+#:
+#: `POST /catalog/match` va navbat filtrlari SHU BITTA raqamni
+#: ishlatadi. Ikki joyda ikki xil chegara turgan bo'lsa "Sizga
+#: mos" da ko'ringan tender navbat filtrida CHIQMASLIGI mumkin
+#: edi — va sabab hech qayerda ko'rinmasdi.
+MOSLIK_LIMIT = 1000
+
+
+def mos_tender_idlari(company_id: int, only_open: bool = True) -> set:
+    """"Sizga mos" bo'limidagi tenderlarning id lari — YAGONA manba.
+
+    NEGA ALOHIDA FUNKSIYA (2026-09-03). Bu ta'rifni endi UCH joy
+    so'raydi: `POST /catalog/match` (ro'yxatning o'zi), broker
+    navbati filtri va ko'rik navbati filtri. Har biri o'zicha
+    hisoblasa ular ASTA-SEKIN ajralib ketardi — bu loyihada
+    aynan shunday bo'lgan: hudud qoidasi ikki joyda yozilgani
+    uchun "Sizga mos" va navbat boshqa-boshqa javob berardi.
+
+    FAQAT KOD YO'LI. `/catalog/match` da matn yo'li ham bor, lekin
+    u `include_probable=true` bo'lgandagina qo'shiladi va interfeys
+    uni STANDART holda YUBORMAYDI. Ya'ni foydalanuvchi ko'radigan
+    "Sizga mos" — aynan shu to'plam. Matn yo'lini bu yerga qo'shish
+    filtrni ro'yxatdan KENGROQ qilardi.
+
+    KATALOG KODLANMAGAN bo'lsa BO'SH to'plam qaytadi. Chaqiruvchi
+    buni "moslik yo'q" deb emas, "katalog hali kodlanmagan" deb
+    ko'rsatishi kerak — ikkisi butunlay boshqa holat.
+    """
+    from api import queries
+
+    prods = db.query(queries.CATALOG_LIST_SQL, {"company_id": company_id})
+    if not prods:
+        return set()
+    rows = moslik(company_id, only_open=only_open, limit=MOSLIK_LIMIT,
+                  product_ids=[p["id"] for p in prods])
+    return {r["tender_id"] for r in rows}
+
+
 #: Bitta tenderning MOS POZITSIYALARI — dalil bilan.
 #:
 #: NEGA POZITSIYA QAYTADI: broker "bu tender menga mos" degan da'voni

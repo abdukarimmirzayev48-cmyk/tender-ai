@@ -79,6 +79,32 @@ export const uz = {
   'broker.title': 'Yo\u2018naltirish navbati',
   'broker.count': '{n} ta tender',
   'broker.refresh': 'Qayta baholash',
+
+  // --- NAVBAT FILTRLARI ---
+  // Filtr SERVERDA: navbat 455 ta, sahifa 100 ta. Mijoz tomonida
+  // filtrlash ikkinchi yuzlikdagi tenderni "topilmadi" qilardi.
+  'navbat.truncated':
+    '{jami} tadan {n} tasi ko\u2018rsatilyapti \u2014 qidiruvni toraytiring.',
+  'navbat.noMatch': 'Filtrga mos tender yo\u2018q.',
+  'navbat.catalogOnly': 'Sizga mos',
+  // KATALOG FILTRI BO'SH natija bersa sabab ANIQ aytiladi: "filtrga
+  // mos yo'q" umumiy javob bo'lardi, holbuki savol aniq —
+  // "katalogimga mos tender bu navbatda bormi?".
+  'navbat.noCatalogMatch':
+    'Bu navbatda katalogingizga mos tender yo‘q.',
+  'broker.f.allStates': 'Barcha holatlar',
+  'broker.f.new': 'Yangi',
+  'broker.f.inProgress': 'Ko\u2018rilmoqda',
+  'broker.f.closed': 'Yopilgan',
+  'broker.f.allDecisions': 'Barcha qarorlar',
+  'broker.f.staleOnly': 'Faqat eskirgan',
+  'talab.f.lowOnly': 'Faqat past ishonch',
+  'talab.f.allSources': 'Barcha manbalar',
+  'talab.f.pattern': 'Naqshdan',
+  'talab.f.model': 'Modeldan',
+  // Muddati o\u2018tganlar standart holda CHIQARILADI: ular navbatning
+  // butun birinchi sahifasini egallab turgan edi (989 dan 534 tasi).
+  'talab.f.expired': 'Muddati o\u2018tganlar ham',
   'broker.empty': 'Navbat bo\u2018sh \u2014 «Qayta baholash» ni bosing.',
   // ESKIRGAN QAROR \u2014 nima o'zgargani AYNAN aytiladi.
   'broker.staleCount': '{n} ta qaror eskirgan',

@@ -8,8 +8,13 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
-import type { HujjatTuri, InsonQarori, ReviewRejim, ReviewTezlik, Talab,
-  TalabNavbat, TalabUsul, TalabXulosa } from '@/types'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
+import NavbatFilters, { Kesildi, TRIGGER, filtrga, tanlovga, HAMMASI }
+  from './NavbatFilters'
+import type { HujjatTuri, InsonQarori, Region, ReviewRejim, ReviewTezlik,
+  Talab, TalabFiltr, TalabNavbat, TalabUsul, TalabXulosa } from '@/types'
 
 // TALABLARNI TASDIQLASH (J3)
 // ══════════════════════════
@@ -48,12 +53,23 @@ interface Props {
   tenderId?: number | null
   /** Manbaga sakrash — hujjat matnini ochadi. */
   onOpenSource?: (fileRef: string, charStart: number) => void
+  /** Hudud filtri uchun — `App` dan keladi. */
+  regions?: Region[]
 }
 
-export default function RequirementReview({ tenderId, onOpenSource }: Props) {
+const BOSH_FILTR: TalabFiltr = {
+  q: '', region: '', past: false, manba: '', otgan: false, katalog: false,
+}
+
+export default function RequirementReview({
+  tenderId, onOpenSource, regions = [],
+}: Props) {
   const t = useT()
   const f = useFormat()
   const [navbat, setNavbat] = useState<TalabNavbat[]>([])
+  const [filtr, setFiltr] = useState<TalabFiltr>(BOSH_FILTR)
+  // Filtrga MOS KELGANLARNING to'liq soni (sahifa 100 ta).
+  const [jami, setJami] = useState(0)
   const [tanlangan, setTanlangan] = useState<number | null>(tenderId ?? null)
   const [items, setItems] = useState<Talab[]>([])
   const [xulosa, setXulosa] = useState<TalabXulosa | null>(null)
@@ -72,17 +88,21 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
   useEffect(() => { api.hujjatTurlari().then((r) => setTurlar(r.doc_types))
     .catch(() => {}) }, [])
 
+  const filtrBor = !!(filtr.q || filtr.region || filtr.past
+                      || filtr.manba || filtr.otgan || filtr.katalog)
+
   const navbatniYukla = useCallback(async () => {
     if (tenderId) return                       // tender paneli — navbat kerak emas
     try {
-      const r = await api.talabNavbat(100)
+      const r = await api.talabNavbat(100, filtr)
       setNavbat(r.queue)
+      setJami(r.jami)
       api.talabTezlik().then(setTezlik).catch(() => {})
       setTanlangan((oldingi) => oldingi ?? r.queue[0]?.tender_id ?? null)
     } catch (e) {
       setXato(errMatn(e))
     }
-  }, [tenderId])
+  }, [tenderId, filtr])
 
   const talablarniYukla = useCallback(async (id: number) => {
     setLoading(true)
@@ -204,7 +224,7 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
             <Icon name="clip" size={16} className="text-accent" />
             <div className="text-body font-medium">{t('req.queue.title')}</div>
             <span className="ml-auto text-xs text-muted-foreground">
-              {t('req.queue.count', { n: navbat.length })}
+              {t('req.queue.count', { n: jami })}
             </span>
           </div>
           {/* PILOT O'LCHOVI — ish davomida ko'rinib tursin.
@@ -270,9 +290,52 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
               )}
             </div>
           )}
+          <div className="px-4 pt-3">
+            {/* FILTR SERVERDA — navbat 455, sahifa 100. Mijoz
+                tomonida filtrlash ikkinchi yuzlikni KO'RMASDI. */}
+            <NavbatFilters
+              q={filtr.q} region={filtr.region} regions={regions}
+              katalog={filtr.katalog}
+              onChange={(patch) => setFiltr((f) => ({ ...f, ...patch }))}
+              onReset={() => setFiltr(BOSH_FILTR)}
+            >
+              <Select value={tanlovga(filtr.manba)}
+                onValueChange={(v) => setFiltr((f) => ({
+                  ...f, manba: filtrga(v) as TalabFiltr['manba'] }))}>
+                <SelectTrigger className={TRIGGER}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={HAMMASI}>{t('talab.f.allSources')}</SelectItem>
+                  <SelectItem value="naqsh">{t('talab.f.pattern')}</SelectItem>
+                  <SelectItem value="llm">{t('talab.f.model')}</SelectItem>
+                </SelectContent>
+              </Select>
+
+              <Button
+                variant={filtr.past ? 'default' : 'outline'} size="sm"
+                onClick={() => setFiltr((f) => ({ ...f, past: !f.past }))}>
+                {t('talab.f.lowOnly')}
+              </Button>
+
+              {/* MUDDATI O'TGANLAR standart holda CHIQARILGAN, lekin
+                  YASHIRILMAGAN: bu tugma ularni qaytaradi. Ko'rik
+                  natijasi J6 oltin to'plamiga ham ketadi va yopilgan
+                  tenderning yorlig'i ham qimmatli. */}
+              <Button
+                variant={filtr.otgan ? 'default' : 'outline'} size="sm"
+                onClick={() => setFiltr((f) => ({ ...f, otgan: !f.otgan }))}>
+                {t('talab.f.expired')}
+              </Button>
+            </NavbatFilters>
+            <Kesildi jami={jami} korsatildi={navbat.length} />
+          </div>
+
           {navbat.length === 0 ? (
             <div className="px-4 py-6 text-center text-body text-muted-foreground">
-              {t('req.queue.empty')}
+              {/* BO'SH NATIJANING SABABI: filtr qo'yilgan bo'lsa
+                  "navbat bo'sh" YOLG'ON bo'lardi. */}
+              {filtr.katalog
+                ? t('navbat.noCatalogMatch')
+                : filtrBor ? t('navbat.noMatch') : t('req.queue.empty')}
             </div>
           ) : (
             <ul className="max-h-64 divide-y overflow-y-auto">

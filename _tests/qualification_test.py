@@ -412,7 +412,7 @@ def test_qaror_eskirishi():
     check("inson qarori TEGILMAYDI", row2["inson_qaror"] == "olindi")
 
     # 4. ESKIRGAN yozuv navbatga QAYTADI va TEPADA turadi.
-    nav = R.navbat(cid, limit=50)
+    nav, _nav_jami = R.navbat(cid, limit=50)
     topildi = [i for i, x in enumerate(nav) if x["id"] == rid]
     check("eskirgan qaror navbatda ko'rinadi", bool(topildi),
           "aks holda broker uni boshqa ko'rmasdi")
@@ -876,6 +876,196 @@ def test_hudud_yagona_qoida():
           not nomuvofiq, f"ajralganlar: {nomuvofiq[:5]}")
 
 
+def test_navbat_filtri():
+    """K. NAVBAT FILTRI serverda va BOSH RO'YXAT BILAN BIR XIL qoidada.
+
+    NEGA SERVERDA: navbat 180, sahifa 100. Mijoz tomonida filtrlash
+    faqat olingan sahifaga tegardi va ikkinchi yuzlikdagi tender
+    "topilmadi" bo'lib ko'rinardi — salbiy shartdan olingan yolg'on
+    xulosa.
+
+    NEGA QOIDA TAKRORLANMAYDI: `translit.variants()` lotin, kirill
+    va o'zbek shakllarini kengaytiradi. Navbatda o'z `LIKE` ini
+    yozish "bosh ro'yxatda topiladi, navbatda topilmaydi" holatini
+    yasardi — hudud qoidasi bilan aynan shunday bo'lgan (J bo'limi).
+    """
+    section("K. Navbat filtri")
+
+    cid = _cid()
+
+    # STRUKTURAVIY: qidiruv YAGONA quruvchidan.
+    src = io.open(os.path.join(ROOT, "api", "routing.py"),
+                  encoding="utf-8").read()
+    gavda = src[src.index("def _navbat_where"):src.index("SQL_NAVBAT_FROM")]
+    check("qidiruv `queries.build_text_search` dan",
+          "build_text_search(" in gavda)
+    check("navbat o'z `LIKE` ini YOZMAYDI", "LIKE ANY" not in gavda,
+          "qidiruv qoidasi ikki joyda ajralib ketardi")
+
+    hammasi, jami0 = R.navbat(cid, limit=500)
+    check("filtrsiz navbat bo'sh emas", jami0 > 0, str(jami0))
+    if not jami0:
+        return
+
+    # --- JAMI SAHIFADAN MUSTAQIL -------------------------------------
+    # Kesilganini interfeys shundan biladi. `len(items)` ni `jami`
+    # deb yuborish "100 ta topildi" degan yolg'on berardi.
+    kichik, jami_kichik = R.navbat(cid, limit=3)
+    check("`jami` SAHIFA hajmiga bog'liq EMAS", jami_kichik == jami0,
+          f"limit=3 -> jami={jami_kichik}, limit=500 -> jami={jami0}")
+    check("sahifa chegarani hurmat qiladi", len(kichik) <= 3, str(len(kichik)))
+
+    # --- QIDIRUV UCH ALIFBODA BIR XIL --------------------------------
+    # ASOSIY TEKSHIRUV. Bosh ro'yxat "кабель" ni "kabel" so'rovida
+    # topadi; navbat ham topishi SHART.
+    nom = None
+    for x in hammasi:
+        if x["tender_name"] and len(x["tender_name"].split()) > 1:
+            nom = x["tender_name"].split()[0]
+            break
+    check("o'lchov bazasi bor: qidiriladigan nom topildi", bool(nom), str(nom))
+    if nom:
+        _, j = R.navbat(cid, limit=500, q=nom)
+        check("qidiruv natija beradi", j > 0, f"q={nom!r} -> {j}")
+        check("qidiruv natijani TORAYTIRADI", j <= jami0, f"{j} <= {jami0}")
+        _, j_katta = R.navbat(cid, limit=500, q=nom.upper())
+        check("qidiruv REGISTRGA bog'liq emas", j == j_katta,
+              f"{j} vs {j_katta}")
+
+    # --- FILTRLAR TORAYTIRADI, KENGAYTIRMAYDI ------------------------
+    for nomi, kw in (("holat=yangi", {"holat": "yangi"}),
+                     ("qaror=go", {"qaror": "go"}),
+                     ("faqat eskirgan", {"eskirgan": True})):
+        _, j = R.navbat(cid, limit=500, **kw)
+        check(f"{nomi} natijani toraytiradi", j <= jami0, f"{j} <= {jami0}")
+
+    # Ikki filtr BIRGA — VA (AND) bog'lanishi kerak, YOKI emas.
+    _, j_bir = R.navbat(cid, limit=500, holat="yangi")
+    _, j_ikki = R.navbat(cid, limit=500, holat="yangi", qaror="go")
+    check("ikki filtr VA bilan bog'lanadi", j_ikki <= j_bir,
+          f"holat+qaror={j_ikki} > holat={j_bir}")
+
+    # --- NOTO'G'RI QIYMAT JIMGINA O'TMASIN ---------------------------
+    # E'tiborsiz qoldirilsa foydalanuvchi "filtr ishlamayapti" emas,
+    # "natija yo'q" deb o'qirdi.
+    for maydon, qiymat in (("holat", "yo'q"), ("qaror", "bilmadim")):
+        tutildi = False
+        try:
+            R.navbat(cid, limit=5, **{maydon: qiymat})
+        except Exception:                                   # noqa: BLE001
+            tutildi = True
+        check(f"noto'g'ri `{maydon}` RAD ETILADI", tutildi)
+
+    # --- IZOLYATSIYA FILTR BILAN HAM SAQLANADI -----------------------
+    begona = db.scalar("SELECT id FROM company_account WHERE id <> %(c)s "
+                       "ORDER BY id LIMIT 1", {"c": cid})
+    if begona:
+        _, j_begona = R.navbat(begona, limit=500, q=nom or "a")
+        oz = {x["tender_id"] for x in R.navbat(cid, limit=500, q=nom or "a")[0]}
+        boshqa = {x["tender_id"] for x in R.navbat(begona, limit=500,
+                                                   q=nom or "a")[0]}
+        check("qidiruv BOSHQA ijarachining navbatini ochmaydi",
+              not (oz & boshqa) or j_begona == 0,
+              f"kesishma: {sorted(oz & boshqa)[:3]}")
+
+
+def test_katalog_filtri():
+    """L. "SIZGA MOS" FILTRI ro'yxatning O'ZI bilan bir xil to'plam.
+
+    Foydalanuvchi da'vosi oddiy: "Sizga mos" da ko'ringan tender
+    navbat filtrida ham chiqsin. Bu FAQAT to'plam ta'rifi bitta
+    joyda bo'lsa bajariladi.
+
+    XAVF O'LCHANGAN VA TAKRORLANGAN: hudud qoidasi ikki joyda
+    yozilgani uchun "Sizga mos" va broker navbati boshqa-boshqa
+    javob berardi (J bo'limi). Katalog to'plamini navbatda qayta
+    hisoblash AYNAN o'sha xatoni takrorlardi — faqat bu safar
+    sekinroq ajralardi (katalog kodlari vaqt o'tib o'zgaradi).
+    """
+    section("L. \"Sizga mos\" filtri")
+
+    from api import kodlash
+
+    cid = _cid()
+
+    # STRUKTURAVIY: navbat o'z katalog moslashuvini YOZMASIN.
+    src = io.open(os.path.join(ROOT, "api", "routing.py"),
+                  encoding="utf-8").read()
+    gavda = src[src.index("def navbat("):src.index("def ochildi")]
+    check("navbat `kodlash.mos_tender_idlari()` ni chaqiradi",
+          "mos_tender_idlari(" in gavda)
+    check("navbat katalog moslashuvini QAYTA YOZMAYDI",
+          "v_catalog_code_active" not in gavda and "good_code" not in gavda,
+          "to'plam ta'rifi ikki joyda ajralib ketardi")
+
+    # `/catalog/match` ham AYNI chegarani ishlatsin — ikki joyda
+    # ikki xil `limit` bo'lsa ro'yxatda ko'ringan tender filtrda
+    # chiqmasligi mumkin edi.
+    msrc = io.open(os.path.join(ROOT, "api", "main.py"),
+                   encoding="utf-8").read()
+    cm = msrc[msrc.index("def catalog_match"):
+              msrc.index('@app.get("/catalog/new-count")')]
+    check("`/catalog/match` `kodlash.MOSLIK_LIMIT` dan foydalanadi",
+          "kodlash.MOSLIK_LIMIT" in cm,
+          "qotirilgan raqam ikki joyda ajralib ketardi")
+
+    kat = kodlash.mos_tender_idlari(cid)
+    check("o'lchov bazasi bor: katalogga mos tender topildi",
+          len(kat) > 0, f"{len(kat)} ta")
+    if not kat:
+        return
+
+    hammasi, jami0 = R.navbat(cid, limit=500)
+    rows, jami = R.navbat(cid, limit=500, katalog=True)
+
+    # --- QAYTGANLARNING HAMMASI KATALOGDA -----------------------------
+    tashqari = [r["tender_id"] for r in rows if r["tender_id"] not in kat]
+    check("filtr FAQAT katalogdagilarni qaytaradi", not tashqari,
+          f"begona: {tashqari[:5]}")
+
+    # --- KATALOGDAGI HAR TENDER, NAVBATDA BO'LSA, CHIQADI -------------
+    # ASOSIY TEKSHIRUV — foydalanuvchi so'ragan xulq AYNAN shu:
+    # "Sizga mos" dagi tender ro'yxatda mavjud bo'lsa, filtr uni
+    # KO'RSATISHI kerak. Teskari yo'nalish (navbatda yo'q tender)
+    # bu yerda tekshirilmaydi — u boshqa masala.
+    navbatda = {r["tender_id"] for r in hammasi}
+    kutilgan = kat & navbatda
+    olingan = {r["tender_id"] for r in rows}
+    check("navbatdagi HAR katalog tenderi filtrda CHIQADI",
+          kutilgan <= olingan,
+          f"tushib qolgan: {sorted(kutilgan - olingan)[:5]}")
+    check("son ham mos", jami == len(kutilgan),
+          f"jami={jami}, kutilgan={len(kutilgan)}")
+    check("filtr natijani TORAYTIRADI", jami <= jami0, f"{jami} <= {jami0}")
+
+    # --- BOSHQA FILTR BILAN BIRGA — VA (AND) ---------------------------
+    _, j_ikki = R.navbat(cid, limit=500, katalog=True, holat="yangi")
+    check("katalog + holat VA bilan bog'lanadi", j_ikki <= jami,
+          f"{j_ikki} > {jami}")
+
+    # --- KATALOGI YO'Q IJARACHI: BO'SH, "FILTRSIZ" EMAS ---------------
+    # ENG XAVFLI XATO SHAKLI: bo'sh ro'yxat "filtr qo'llanmadi" ga
+    # aylansa, foydalanuvchi BEGONA tenderlarni "sizga mos" deb
+    # o'qirdi. Bo'sh massiv bilan `= ANY` FALSE berishi SHART.
+    # NOMZOD JADVAL NOMI BO'YICHA EMAS, NATIJA bo'yicha topiladi:
+    # katalog jadvalining nomini bu yerda takrorlash yana bitta
+    # ajralib ketadigan bog'liqlik bo'lardi (`company_product`
+    # deb yozilgan edi — bunday jadval YO'Q, `catalog_product` bor).
+    begona = None
+    for r in db.query("SELECT id FROM company_account "
+                      "WHERE id <> %(c)s ORDER BY id LIMIT 10", {"c": cid}):
+        if not kodlash.mos_tender_idlari(r["id"]):
+            begona = r["id"]
+            break
+    check("o'lchov bazasi bor: katalogi bo'sh ijarachi topildi",
+          begona is not None,
+          "bunday ijarachi yo'q — bo'sh to'plam yo'li SINALMADI")
+    if begona is not None:
+        _, j_bosh = R.navbat(begona, limit=500, katalog=True)
+        check("katalogi BO'SH ijarachida filtr NOL beradi", j_bosh == 0,
+              f"{j_bosh} ta chiqdi — bo'sh to'plam 'filtrsiz' ga aylandi")
+
+
 def qoldiqni_supur() -> int:
     """OLDINGI yurishdan qolgan sinov yozuvlarini o'chiradi.
 
@@ -937,6 +1127,8 @@ def main() -> None:
             test_olchovsizlik()
             test_navbat_nomzodlari()
             test_hudud_yagona_qoida()
+            test_navbat_filtri()
+            test_katalog_filtri()
     finally:
         try:
             tozala()

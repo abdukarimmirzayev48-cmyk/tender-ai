@@ -105,6 +105,22 @@ def section(t: str) -> None:
     print(f"\n=== {t} ===")
 
 
+def _bosh_ochiq_tender():
+    """Talabi yo'q OCHIQ tender — fikstura uchun.
+
+    OCHIQLIK SHART. Ko'rik navbati 2026-09-03 dan muddati o'tgan
+    tenderlarni standart holda CHIQARADI: ular navbatning BUTUN
+    birinchi sahifasini egallab turgan edi (989 dan 534 tasi). Bu
+    shartsiz fikstura yopiq tender tanlashi mumkin va sinov
+    "navbatga tushmadi" deb yiqilardi — sabab esa FIKSTURADA
+    bo'lardi, kodda emas. Bunday yiqilish eng chalg'ituvchi turi.
+    """
+    return db.scalar("""SELECT t.id FROM tender t
+        WHERE (t.close_at IS NULL OR t.close_at > now())
+          AND NOT EXISTS (SELECT 1 FROM tender_requirement r
+                          WHERE r.tender_id = t.id) LIMIT 1""")
+
+
 # =====================================================================
 def test_sinovni_sinash():
     """0. SINOV VOSITASINING O'ZI to'g'ri ishlaydimi.
@@ -632,9 +648,7 @@ def test_review():
     B = kompaniyalar[1] if len(kompaniyalar) > 1 else A
 
     # --- Sinov uchun O'Z tenderimizni tayyorlaymiz ---
-    tid = db.scalar("""SELECT t.id FROM tender t
-        WHERE NOT EXISTS (SELECT 1 FROM tender_requirement r
-                          WHERE r.tender_id = t.id) LIMIT 1""")
+    tid = _bosh_ochiq_tender()
     if not tid:
         check("bo'sh tender topildi", False)
         return
@@ -658,7 +672,8 @@ def test_review():
             "mashina_holat": "ajratilgan"})
 
     # --- 1. Navbatga TUSHDIMI ---
-    navbat = {x["tender_id"] for x in R.review_queue(A, 500)}
+    nav_a, _ = R.review_queue(A, 500)
+    navbat = {x["tender_id"] for x in nav_a}
     check("yangi talablar navbatga tushdi", tid in navbat)
 
     items = R.review_items(tid, A)
@@ -677,8 +692,9 @@ def test_review():
     shablon_id = top("Sinov shablon")["id"]
 
     # --- 2. IZOLYATSIYA: B kompaniya bularni ko'rmaydi ---
+    nav_b, _ = R.review_queue(B, 500)
     check("B kompaniya navbatida yo'q",
-          tid not in {x["tender_id"] for x in R.review_queue(B, 500)})
+          tid not in {x["tender_id"] for x in nav_b})
     check("B kompaniya talablarni ko'rmaydi",
           len(R.review_items(tid, B)) == 0)
 
@@ -696,7 +712,8 @@ def test_review():
     r1 = R.review_set(kafolat_id, A, "approved", by=A, ishonch="kompaniya_sessiyasi")
     check("tasdiqlash ishladi", r1 and r1["review_status"] == "approved",
           str(r1))
-    navbat2 = {x["tender_id"]: x["kutayotgan"] for x in R.review_queue(A, 500)}
+    nav_a2, _ = R.review_queue(A, 500)
+    navbat2 = {x["tender_id"]: x["kutayotgan"] for x in nav_a2}
     check("navbat SONI kamaydi", navbat2.get(tid) == 1, str(navbat2.get(tid)))
 
     # --- 5. TUZATISH — qiymatsiz RAD ETILADI ---
@@ -718,7 +735,8 @@ def test_review():
           str(tuzatilgan["attrs"]))
 
     # --- 6. ASOSIY SHART: tender navbatdan CHIQDIMI ---
-    navbat3 = {x["tender_id"] for x in R.review_queue(A, 500)}
+    nav_a3, _ = R.review_queue(A, 500)
+    navbat3 = {x["tender_id"] for x in nav_a3}
     check("HAMMASI ko'rib chiqilgach tender NAVBATDAN CHIQDI",
           tid not in navbat3,
           "aks holda navbat raqami o'zgarmaydi va ish ko'rinmaydi")
@@ -1254,9 +1272,7 @@ def test_vaqt_olchovi():
     section("L. Ko'rib chiqish vaqti")
 
     A = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
-    tid = db.scalar("""SELECT t.id FROM tender t
-        WHERE NOT EXISTS (SELECT 1 FROM tender_requirement r
-                          WHERE r.tender_id = t.id) LIMIT 1""")
+    tid = _bosh_ochiq_tender()
     if not tid:
         check("bo'sh tender topildi", False)
         return
@@ -1422,9 +1438,7 @@ def test_yorliqlash():
 
     # --- Yozish ---
     A = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
-    tid = db.scalar("""SELECT t.id FROM tender t
-        WHERE NOT EXISTS (SELECT 1 FROM tender_requirement r
-                          WHERE r.tender_id = t.id) LIMIT 1""")
+    tid = _bosh_ochiq_tender()
     if not tid:
         check("bo'sh tender topildi", False)
         return
@@ -1499,9 +1513,7 @@ def test_qayta_ajratish():
     section("I. Qayta ajratish va inson qarori")
 
     A = db.scalar("SELECT id FROM company_account ORDER BY id LIMIT 1")
-    tid = db.scalar("""SELECT t.id FROM tender t
-        WHERE NOT EXISTS (SELECT 1 FROM tender_requirement r
-                          WHERE r.tender_id = t.id) LIMIT 1""")
+    tid = _bosh_ochiq_tender()
     if not tid:
         check("bo'sh tender topildi", False)
         return
@@ -1542,8 +1554,9 @@ def test_qayta_ajratish():
     check("izohda ESKI va YANGI qiymat bor",
           "12 oy" in (x["review_note"] or "")
           and "24 oy" in (x["review_note"] or ""), str(x["review_note"]))
+    nav_a4, _ = R.review_queue(A, 500)
     check("tender NAVBATGA QAYTDI",
-          tid in {q["tender_id"] for q in R.review_queue(A, 500)})
+          tid in {q["tender_id"] for q in nav_a4})
 
     # --- TUZATILGAN qiymat qayta ajratishda YO'QOLMAYDI ---
     R.review_set(olish()["id"], A, "corrected", corrected="36 oy", by=A, ishonch="kompaniya_sessiyasi")
@@ -1556,6 +1569,156 @@ def test_qayta_ajratish():
 
 
 # =====================================================================
+def test_navbat_filtri():
+    """KO'RIK NAVBATINING FILTRI — va MUDDATI O'TGAN tender masalasi.
+
+    O'LCHANGAN NUQSON (2026-09-03). `v_requirement_review` da muddat
+    sharti YO'Q, tartib esa `close_at` bo'yicha O'SISH — ya'ni eng
+    erta yopilganlar ENG TEPADA. Natijada ko'rik navbatining BUTUN
+    BIRINCHI SAHIFASI allaqachon yopilgan tenderlardan iborat edi:
+
+        jami 989 · ochiq 455 · MUDDATI O'TGAN 534
+        birinchi 10 qatorning 10 tasi ham o'tgan
+
+    Ya'ni ko'ruvchining ko'rinadigan butun ish yuki O'LIK tenderlar
+    edi va buni hech narsa ko'rsatmasdi. Broker navbatida bu nuqson
+    yo'q (`v_routing_queue` muddatni tekshiradi) — ikki navbat bir
+    xil qoidada bo'lsin.
+    """
+    section("N. Ko'rik navbatining filtri")
+
+    A = db.scalar("""SELECT company_id FROM v_requirement_review
+                     GROUP BY company_id ORDER BY count(*) DESC LIMIT 1""")
+    check("o'lchov bazasi bor: navbati bor kompaniya topildi", bool(A), str(A))
+    if not A:
+        return
+
+    # STRUKTURAVIY: qidiruv YAGONA quruvchidan olinsin.
+    src = io.open(os.path.join(ROOT, "api", "requirement.py"),
+                  encoding="utf-8").read()
+    gavda = src[src.index("def _review_queue_where"):
+                src.index("def review_queue")]
+    check("qidiruv `queries.build_text_search` dan",
+          "build_text_search(" in gavda)
+    check("navbat o'z `LIKE` ini YOZMAYDI", "LIKE ANY" not in gavda,
+          "qidiruv qoidasi ikki joyda ajralib ketardi")
+
+    rows, jami = R.review_queue(A, 500)
+    check("filtrsiz navbat bo'sh emas", jami > 0, str(jami))
+    if not jami:
+        return
+
+    # --- MUDDATI O'TGAN STANDART HOLDA CHIQARILGAN -------------------
+    # ASOSIY TEKSHIRUV. Qatorlarning O'ZIDA tekshiriladi, sanoqda
+    # emas: "jami kamaydi" `LIMIT` dan ham kelib chiqishi mumkin.
+    otgan_id = db.scalar("""
+        SELECT v.tender_id FROM v_requirement_review v
+        JOIN tender t ON t.id = v.tender_id
+        WHERE v.company_id = %(c)s
+          AND t.close_at IS NOT NULL AND t.close_at <= now()
+        LIMIT 1""", {"c": A})
+    check("o'lchov bazasi bor: muddati o'tgan tender navbatda mavjud",
+          bool(otgan_id), str(otgan_id))
+    if otgan_id:
+        check("STANDART holda muddati o'tgan tender navbatda YO'Q",
+              otgan_id not in {x["tender_id"] for x in rows},
+              "ko'ruvchining ish yuki o'lik tenderlar bo'lardi")
+        keng, jami_keng = R.review_queue(A, 500, otgan=True)
+        check("`otgan=True` bilan u QAYTADI — yashirilmagan",
+              otgan_id in {x["tender_id"] for x in keng})
+        check("`otgan=True` qamrovi kengroq", jami_keng >= jami,
+              f"{jami_keng} >= {jami}")
+
+    # --- JAMI SAHIFADAN MUSTAQIL -------------------------------------
+    kichik, jami_kichik = R.review_queue(A, 3)
+    check("`jami` SAHIFA hajmiga bog'liq EMAS", jami_kichik == jami,
+          f"limit=3 -> {jami_kichik}, limit=500 -> {jami}")
+    check("sahifa chegarani hurmat qiladi", len(kichik) <= 3, str(len(kichik)))
+
+    # --- QIDIRUV -----------------------------------------------------
+    nom = None
+    for x in rows:
+        if x["tender_name"] and len(x["tender_name"].split()) > 1:
+            nom = x["tender_name"].split()[0]
+            break
+    check("o'lchov bazasi bor: qidiriladigan nom topildi", bool(nom), str(nom))
+    if nom:
+        _, j = R.review_queue(A, 500, q=nom)
+        check("qidiruv natija beradi", j > 0, f"q={nom!r} -> {j}")
+        check("qidiruv natijani TORAYTIRADI", j <= jami, f"{j} <= {jami}")
+
+    # --- FILTRLAR TORAYTIRADI ----------------------------------------
+    _, j_past = R.review_queue(A, 500, faqat_past=True)
+    check("`past` natijani toraytiradi", j_past <= jami, f"{j_past} <= {jami}")
+    _, j_naqsh = R.review_queue(A, 500, manba="naqsh")
+    check("`manba=naqsh` natijani toraytiradi", j_naqsh <= jami)
+    _, j_ikki = R.review_queue(A, 500, faqat_past=True, manba="naqsh")
+    check("ikki filtr VA bilan bog'lanadi", j_ikki <= j_past,
+          f"past+manba={j_ikki} > past={j_past}")
+
+    # --- NOTO'G'RI QIYMAT JIMGINA O'TMASIN ---------------------------
+    tutildi = False
+    try:
+        R.review_queue(A, 5, manba="sehrli")
+    except Exception:                                       # noqa: BLE001
+        tutildi = True
+    check("noto'g'ri `manba` RAD ETILADI", tutildi)
+
+    # --- "SIZGA MOS" FILTRI -------------------------------------------
+    # To'plam ta'rifi `kodlash.mos_tender_idlari()` da — bu yerda
+    # TAKRORLANMAYDI. Hudud qoidasi ikki joyda yozilgani uchun
+    # "Sizga mos" va navbat boshqa-boshqa javob bergan edi.
+    from api import kodlash
+
+    src2 = io.open(os.path.join(ROOT, "api", "requirement.py"),
+                   encoding="utf-8").read()
+    rq = src2[src2.index("def review_queue"):]
+    rq = rq[:rq.index("\ndef ", 1)]
+    check("ko'rik navbati `mos_tender_idlari()` ni chaqiradi",
+          "mos_tender_idlari(" in rq)
+    check("ko'rik navbati katalog moslashuvini QAYTA YOZMAYDI",
+          "good_code" not in rq and "v_catalog_code_active" not in rq)
+
+    kat = kodlash.mos_tender_idlari(A)
+    check("o'lchov bazasi bor: katalogga mos tender topildi",
+          len(kat) > 0, f"{len(kat)} ta")
+    if kat:
+        k_rows, k_jami = R.review_queue(A, 500, katalog=True)
+        tashqari = [x["tender_id"] for x in k_rows
+                    if x["tender_id"] not in kat]
+        check("filtr FAQAT katalogdagilarni qaytaradi", not tashqari,
+              f"begona: {tashqari[:5]}")
+        # ASOSIY XULQ: navbatda bo'lgan katalog tenderi CHIQSIN.
+        kutilgan = kat & {x["tender_id"] for x in rows}
+        check("navbatdagi HAR katalog tenderi filtrda CHIQADI",
+              kutilgan <= {x["tender_id"] for x in k_rows},
+              f"tushib qolgan: "
+              f"{sorted(kutilgan - {x['tender_id'] for x in k_rows})[:5]}")
+        check("katalog filtri natijani TORAYTIRADI", k_jami <= jami,
+              f"{k_jami} <= {jami}")
+
+        # `otgan` BILAN BIRGA: katalog to'plami ham kengaysin.
+        # Aks holda ikki filtr birga qo'yilganda natija HAR DOIM
+        # bo'sh chiqardi va sabab ko'rinmasdi.
+        _, k_otgan = R.review_queue(A, 500, katalog=True, otgan=True)
+        check("`katalog + otgan` qamrovi kengroq", k_otgan >= k_jami,
+              f"{k_otgan} >= {k_jami}")
+
+    # KATALOGI BO'SH ijarachida filtr NOL bersin — "filtrsiz" EMAS.
+    begona = None
+    for r in db.query("SELECT id FROM company_account "
+                      "WHERE id <> %(c)s ORDER BY id LIMIT 10", {"c": A}):
+        if not kodlash.mos_tender_idlari(r["id"]):
+            begona = r["id"]
+            break
+    check("o'lchov bazasi bor: katalogi bo'sh ijarachi topildi",
+          begona is not None, "bo'sh to'plam yo'li SINALMADI")
+    if begona is not None:
+        _, j_bosh = R.review_queue(begona, 500, katalog=True)
+        check("katalogi BO'SH ijarachida filtr NOL beradi", j_bosh == 0,
+              f"{j_bosh} ta chiqdi — bo'sh to'plam 'filtrsiz' ga aylandi")
+
+
 def test_indeks_taqiqi():
     """H. Sinov fayllarida INDEKS bo'yicha tanlash bo'lmasin.
 
@@ -1676,6 +1839,7 @@ def main() -> None:
             test_eskirish()
             test_yorliqlash()
             test_qayta_ajratish()
+            test_navbat_filtri()
             test_indeks_taqiqi()
     finally:
         try:

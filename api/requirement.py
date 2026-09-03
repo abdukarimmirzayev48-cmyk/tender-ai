@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from api import db, xatolar
 
@@ -599,12 +599,24 @@ MASHINA_MANBA = "manba"
 MASHINA_AJRATILGAN = "ajratilgan"
 
 
-SQL_REVIEW_QUEUE = """
-SELECT tender_id, tender_name, close_at, kutayotgan, modeldan, naqshdan,
-       eng_past_ishonch, past_ishonchli, ajratilgan
-FROM v_requirement_review
-WHERE company_id = %(company_id)s
-LIMIT %(limit)s
+#: Ko'rib chiqish navbatining ustunlari va manbai.
+#:
+#: `tender t` JOIN QILINADI — `queries.build_text_search()` aynan shu
+#: taxallusni kutadi va qidiruv qoidasi SHU YERDA QAYTA YOZILMAYDI.
+#: Takrorlash "bosh ro'yxatda topiladi, navbatda topilmaydi"
+#: holatini yasardi: `translit.variants()` lotin/kirill/o'zbek
+#: shakllarini kengaytiradi va uni qo'lda takrorlash mumkin emas.
+SQL_REVIEW_QUEUE_FROM = """
+FROM v_requirement_review v
+JOIN tender t ON t.id = v.tender_id
+"""
+
+#: Tartib VIEW ichida ham bor, lekin JOIN dan keyin unga
+#: ISHONIB BO'LMAYDI (planner uni saqlashi shart emas). Shuning
+#: uchun ANIQ yoziladi — view'dagi bilan AYNI: muddati yaqin
+#: birinchi, keyin eng past ishonch.
+SQL_REVIEW_QUEUE_TARTIB = """
+ORDER BY v.close_at NULLS LAST, v.eng_past_ishonch NULLS LAST
 """
 
 #: TANLANMA QIYSHIQLIGI — ATAYLAB YUMSHATILGAN.
@@ -679,10 +691,109 @@ RETURNING id, tender_id, review_status, review_action, doc_type,
 """
 
 
-def review_queue(company_id: int, limit: int = 100) -> List[dict]:
-    """Ko'rib chiqish navbati. Muddati yaqin tenderlar birinchi."""
-    return db.query(SQL_REVIEW_QUEUE, {"company_id": company_id,
-                                       "limit": limit})
+#: Talab manbai bo'yicha filtr. Ustunlar `v_requirement_review` da
+#: allaqachon sanab qo'yilgan — yangi so'rov kerak emas.
+MANBA_FILTRLARI = {"naqsh": "v.naqshdan > 0", "llm": "v.modeldan > 0"}
+
+
+def _review_queue_where(company_id: int, q: Optional[str],
+                        region: Optional[str], faqat_past: bool,
+                        manba: Optional[str], otgan: bool,
+                        katalog_ids: Optional[List[int]]
+                        ) -> Tuple[str, Dict[str, Any]]:
+    """Ko'rib chiqish navbatining filtri."""
+    from api import queries
+
+    clauses = ["v.company_id = %(company_id)s"]
+    params: Dict[str, Any] = {"company_id": company_id}
+
+    if not otgan:
+        # MUDDATI O'TGAN TENDER STANDART HOLDA CHIQARILADI.
+        #
+        # O'LCHANGAN NUQSON (2026-09-03). `v_requirement_review` da
+        # muddat sharti YO'Q, tartib esa `close_at` bo'yicha O'SISH —
+        # ya'ni eng erta yopilganlar ENG TEPADA turadi. Natijada
+        # ko'rik navbatining BUTUN BIRINCHI SAHIFASI allaqachon
+        # yopilgan tenderlardan iborat edi:
+        #
+        #     jami 989 · ochiq 455 · MUDDATI O'TGAN 534
+        #     birinchi 10 qatorning 10 tasi ham o'tgan
+        #
+        # Ya'ni ko'ruvchining ko'rinadigan butun ish yuki O'LIK
+        # tenderlar edi va buni hech narsa ko'rsatmasdi. Broker
+        # navbatida bu nuqson yo'q — `v_routing_queue` muddatni
+        # tekshiradi; ikki navbat bir xil qoidada bo'lsin.
+        #
+        # YASHIRILMAYDI, CHIQARILADI: `otgan=True` bilan ular
+        # baribir ko'rinadi. Ko'rik natijasi J6 oltin to'plamiga
+        # ham ketadi va yopilgan tenderning yorlig'i ham qimmatli —
+        # lekin u KUNDALIK ish yukini ko'mib tashlamasin.
+        clauses.append("(v.close_at IS NULL OR v.close_at > now())")
+    if faqat_past:
+        # PAST ISHONCH — ko'rikning eng qimmat qismi. `> 0` yetadi:
+        # chegara `v_requirement_review` da (`confidence < 0.60`) va
+        # uni bu yerda TAKRORLASH ikkinchi haqiqat yasardi.
+        clauses.append("v.past_ishonchli > 0")
+    if katalog_ids is not None:
+        # "SIZGA MOS" — ta'rif `kodlash.mos_tender_idlari()` da.
+        # Bo'sh ro'yxat "filtr yo'q" emas, "moslik yo'q" degani.
+        clauses.append("v.tender_id = ANY(%(katalog_ids)s::bigint[])")
+        params["katalog_ids"] = katalog_ids
+    if manba:
+        if manba not in MANBA_FILTRLARI:
+            raise xatolar.Xato("INVALID_ENUM",
+                               {"maydon": "manba", "qiymat": manba})
+        clauses.append(MANBA_FILTRLARI[manba])
+    if region:
+        clauses.append("(t.area_path = %(region)s"
+                       " OR t.area_path LIKE %(region)s || '.%%')")
+        params["region"] = region
+    if q:
+        clause, q_params = queries.build_text_search(q)
+        if clause:
+            clauses.append(clause)
+            params.update(q_params)
+    return "WHERE " + " AND ".join(clauses), params
+
+
+def review_queue(company_id: int, limit: int = 100,
+                 q: Optional[str] = None, region: Optional[str] = None,
+                 faqat_past: bool = False, manba: Optional[str] = None,
+                 otgan: bool = False,
+                 katalog: bool = False) -> Tuple[List[dict], int]:
+    """Ko'rib chiqish navbati. Muddati yaqin tenderlar birinchi.
+
+    QATORLAR **va** MOS KELGANLARNING JAMI SONI qaytariladi.
+
+    NEGA JAMI ALOHIDA (2026-09-03): `limit` 100, navbat esa 484.
+    Faqat qatorlarni bersak interfeys "100 ta" derdi va filtr
+    natijasi JIMGINA kesilardi — qidirilgan tender ro'yxatda
+    bo'lmasa foydalanuvchi buni "yo'q" deb o'qirdi.
+    """
+    # KATALOG FILTRI — id lar YAGONA manbadan.
+    #
+    # `only_open` NAVBAT QAMROVIGA ERGASHADI: `otgan=True` bo'lsa
+    # navbat yopilgan tenderlarni ham ko'rsatadi va katalog to'plami
+    # ham shunday bo'lishi kerak. Aks holda ikki filtr birga
+    # qo'yilganda natija HAR DOIM bo'sh chiqardi — va sabab
+    # ko'rinmasdi.
+    katalog_ids = None
+    if katalog:
+        from api import kodlash
+        katalog_ids = sorted(
+            kodlash.mos_tender_idlari(company_id, only_open=not otgan))
+    where, params = _review_queue_where(company_id, q, region,
+                                        faqat_past, manba, otgan,
+                                        katalog_ids)
+    jami = db.scalar(f"SELECT count(*) {SQL_REVIEW_QUEUE_FROM} {where}",
+                     params) or 0
+    qatorlar = db.query(
+        f"SELECT v.tender_id, v.tender_name, v.close_at, v.kutayotgan,"
+        f"       v.modeldan, v.naqshdan, v.eng_past_ishonch,"
+        f"       v.past_ishonchli, v.ajratilgan"
+        f" {SQL_REVIEW_QUEUE_FROM} {where} {SQL_REVIEW_QUEUE_TARTIB}"
+        f" LIMIT %(limit)s", {**params, "limit": limit})
+    return qatorlar, int(jami)
 
 
 def review_items(tender_id: int, company_id: int) -> List[dict]:

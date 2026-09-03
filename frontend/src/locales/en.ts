@@ -76,6 +76,24 @@ export const en: Dict = {
   'broker.title': 'Routing queue',
   'broker.count': '{n} tenders',
   'broker.refresh': 'Re-evaluate',
+
+  // --- QUEUE FILTERS ---
+  'navbat.truncated': 'Showing {n} of {jami} \u2014 narrow the search.',
+  'navbat.noMatch': 'No tenders match the filter.',
+  'navbat.catalogOnly': 'Matched',
+  'navbat.noCatalogMatch':
+    'No tenders from your catalogue in this queue.',
+  'broker.f.allStates': 'All states',
+  'broker.f.new': 'New',
+  'broker.f.inProgress': 'In progress',
+  'broker.f.closed': 'Closed',
+  'broker.f.allDecisions': 'All decisions',
+  'broker.f.staleOnly': 'Stale only',
+  'talab.f.lowOnly': 'Low confidence only',
+  'talab.f.allSources': 'All sources',
+  'talab.f.pattern': 'From pattern',
+  'talab.f.model': 'From model',
+  'talab.f.expired': 'Include expired',
   'broker.empty': 'Queue is empty \u2014 press "Re-evaluate".',
   'broker.staleCount': '{n} decisions are stale',
   'broker.stale': 'You said "{qaror}", but the analysis changed: '

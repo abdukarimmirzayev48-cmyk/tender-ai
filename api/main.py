@@ -2407,16 +2407,29 @@ def tender_compliance_for(tender_id: int, body: ComplianceDocsIn):
 # ---------------------------------------------------------------------------
 
 @app.get("/requirements/queue")
-def requirements_queue(request: Request, limit: int = 100):
+def requirements_queue(request: Request, limit: int = 100,
+                       q: Optional[str] = Query(None),
+                       region: Optional[str] = Query(None),
+                       past: bool = Query(False),
+                       manba: Optional[str] = Query(None),
+                       otgan: bool = Query(False),
+                       katalog: bool = Query(False)):
     """Ko'rib chiqish navbati — kutayotgan talabi bor tenderlar.
 
     Muddati YAQIN tenderlar birinchi: ular bo'yicha qaror tezroq
     kerak. Tenderning hamma talablari ko'rib chiqilgach u navbatdan
     CHIQIB KETADI.
+
+    FILTR SERVERDA (2026-09-03) — navbat 484, sahifa 100. Mijoz
+    tomonida filtrlash olingan sahifadan tashqarisini KO'RMASDI.
+    `jami` mos kelganlarning to'liq sonini beradi.
     """
     from api import requirement
     cid = company_id_of(request)
-    return {"queue": requirement.review_queue(cid, min(max(limit, 1), 500))}
+    queue, jami = requirement.review_queue(
+        cid, min(max(limit, 1), 500), q=q, region=region,
+        faqat_past=past, manba=manba, otgan=otgan, katalog=katalog)
+    return {"queue": queue, "jami": jami, "korsatildi": len(queue)}
 
 
 @app.get("/tenders/{tender_id}/requirements")
@@ -2681,15 +2694,31 @@ def routing_agreement(request: Request):
 @app.get("/routing/queue")
 def routing_queue(request: Request,
                   holat: Optional[str] = Query(None),
+                  q: Optional[str] = Query(None),
+                  qaror: Optional[str] = Query(None),
+                  region: Optional[str] = Query(None),
+                  eskirgan: bool = Query(False),
+                  katalog: bool = Query(False),
                   limit: int = Query(100, ge=1, le=500)):
-    """Brokerga ko'rsatiladigan navbat — FAQAT ochiq tenderlar."""
+    """Brokerga ko'rsatiladigan navbat — FAQAT ochiq tenderlar.
+
+    FILTR SERVERDA (2026-09-03). Mijoz tomonida filtrlash faqat
+    olingan sahifaga tegardi: navbat 188, sahifa 100 — ya'ni
+    qidirilgan tender ikkinchi yuzlikda bo'lsa "topilmadi" bo'lib
+    ko'rinardi. Bu JIMGINA noto'g'ri javob.
+
+    `jami` — mos kelganlarning TO'LIQ soni, qaytarilganlar emas.
+    Interfeys kesilganini shundan biladi.
+    """
     from api import routing
     cid = company_id_of(request)
     try:
-        items = routing.navbat(cid, holat=holat, limit=limit)
+        items, jami = routing.navbat(cid, holat=holat, limit=limit,
+                                     q=q, qaror=qaror, region=region,
+                                     eskirgan=eskirgan, katalog=katalog)
     except ValueError as e:
         raise xatolar.kodli(e, "FIELD_INVALID")
-    return {"items": items, "jami": len(items),
+    return {"items": items, "jami": jami, "korsatildi": len(items),
             "moslik": routing.moslik(cid)}
 
 
@@ -3533,7 +3562,11 @@ def catalog_match(body: CatalogMatchIn, request: Request):
     # ------------------------------------------------------------------
 
     # --- 1. KOD yo'li (tasdiqlangan tasniflagich) ---
-    kod_rows = kodlash.moslik(cid, only_open=True, limit=1000,
+    # CHEGARA `kodlash.MOSLIK_LIMIT` DAN. Navbat filtrlari ham shuni
+    # ishlatadi (`kodlash.mos_tender_idlari`) — ikki joyda ikki xil
+    # raqam bo'lsa "Sizga mos" da ko'ringan tender filtrda chiqmasdi.
+    kod_rows = kodlash.moslik(cid, only_open=True,
+                              limit=kodlash.MOSLIK_LIMIT,
                               product_ids=product_ids)
     poz = kodlash.pozitsiya_moslik(
         cid, [r["tender_id"] for r in kod_rows], product_ids=product_ids)

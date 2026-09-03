@@ -40,16 +40,21 @@ import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { useFormat } from '@/format'
 import type {
-  Aktor, AiQaror, InsonQaror, MalakaNatija, MalakaHolat, RoutingItem,
-  RoutingMoslik,
+  Aktor, AiQaror, InsonQaror, MalakaNatija, MalakaHolat, NavbatFiltr,
+  Region, RoutingItem, RoutingMoslik,
 } from '@/types'
 
 import Icon from './Icon'
 import { DarvozaProgress } from './DarvozaProgress'
+import NavbatFilters, { Kesildi, TRIGGER, filtrga, tanlovga, HAMMASI }
+  from './NavbatFilters'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
 import { Skeleton } from './ui/skeleton'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from './ui/select'
 
 /** AI qarorining rangi. `no_go` navbatga tushmaydi, lekin to'liqlik uchun. */
 const QAROR_RANG: Record<AiQaror, string> = {
@@ -66,14 +71,23 @@ const HOLAT_RANG: Record<MalakaHolat, string> = {
   malumot_yoq: 'text-muted-foreground',
 }
 
+const BOSH_FILTR: NavbatFiltr = {
+  q: '', region: '', holat: '', qaror: '', eskirgan: false, katalog: false,
+}
+
 export default function BrokerQueue({
-  onOpenTender,
+  onOpenTender, regions = [],
 }: {
   onOpenTender?: (tenderId: number) => void
+  regions?: Region[]
 }) {
   const { t } = useI18n()
   const fmt = useFormat()
   const [items, setItems] = useState<RoutingItem[]>([])
+  const [filtr, setFiltr] = useState<NavbatFiltr>(BOSH_FILTR)
+  // `jami` — filtrga MOS KELGANLARNING to'liq soni. Sahifa 100 ta,
+  // shuning uchun u `items.length` dan katta bo'lishi mumkin.
+  const [jami, setJami] = useState(0)
   const [moslik, setMoslik] = useState<RoutingMoslik | null>(null)
   const [yuklanmoqda, setYuklanmoqda] = useState(true)
   const [xato, setXato] = useState<string | null>(null)
@@ -103,15 +117,16 @@ export default function BrokerQueue({
     setYuklanmoqda(true)
     setXato(null)
     try {
-      const r = await api.brokerNavbat(undefined, 100)
+      const r = await api.brokerNavbat(filtr, 100)
       setItems(r.items)
+      setJami(r.jami)
       setMoslik(r.moslik)
     } catch (e) {
       setXato(e instanceof Error ? e.message : String(e))
     } finally {
       setYuklanmoqda(false)
     }
-  }, [])
+  }, [filtr])
 
   useEffect(() => { void yukla() }, [yukla])
 
@@ -182,9 +197,9 @@ export default function BrokerQueue({
     }
   }
 
-  if (yuklanmoqda) return <Skeleton className="h-[420px] w-full rounded-xl" />
-
   const eskirgan = items.filter((x) => x.ai_ozgardi).length
+  const filtrBor = !!(filtr.q || filtr.region || filtr.holat
+                      || filtr.qaror || filtr.eskirgan || filtr.katalog)
 
   return (
     <div className="space-y-3">
@@ -228,12 +243,57 @@ export default function BrokerQueue({
         </div>
       )}
 
+      {/* FILTR — server tomonda. Panel qidiruvni 400 ms kechiktiradi
+          (`NavbatFilters`), ya'ni har harf so'rov yubormaydi. */}
+      <NavbatFilters
+        q={filtr.q} region={filtr.region} regions={regions}
+        katalog={filtr.katalog}
+        onChange={(patch) => setFiltr((f) => ({ ...f, ...patch }))}
+        onReset={() => setFiltr(BOSH_FILTR)}
+      >
+        <Select value={tanlovga(filtr.holat)}
+          onValueChange={(v) =>
+            setFiltr((f) => ({ ...f, holat: filtrga(v) as NavbatFiltr['holat'] }))}>
+          <SelectTrigger className={TRIGGER}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value={HAMMASI}>{t('broker.f.allStates')}</SelectItem>
+            <SelectItem value="yangi">{t('broker.f.new')}</SelectItem>
+            <SelectItem value="korilmoqda">{t('broker.f.inProgress')}</SelectItem>
+            <SelectItem value="yopildi">{t('broker.f.closed')}</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <Select value={tanlovga(filtr.qaror)}
+          onValueChange={(v) =>
+            setFiltr((f) => ({ ...f, qaror: filtrga(v) as NavbatFiltr['qaror'] }))}>
+          <SelectTrigger className={TRIGGER}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value={HAMMASI}>{t('broker.f.allDecisions')}</SelectItem>
+            <SelectItem value="go">go</SelectItem>
+            <SelectItem value="review">review</SelectItem>
+            {/* `no_go` navbatga faqat `--barchasi` bilan yoziladi.
+                Variant baribir turadi: yozilgan bo'lsa broker uni
+                topa olishi kerak, bo'lmasa ro'yxat bo'sh chiqadi —
+                bu "filtr yo'q" dan ANIQROQ javob. */}
+            <SelectItem value="no_go">no_go</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {/* ESKIRGAN QAROR — eng shoshilinch holat, shuning uchun
+            alohida tugma: broker uni bir bosishda ajratib olsin. */}
+        <Button
+          variant={filtr.eskirgan ? 'default' : 'outline'} size="sm"
+          onClick={() => setFiltr((f) => ({ ...f, eskirgan: !f.eskirgan }))}>
+          {t('broker.f.staleOnly')}
+        </Button>
+      </NavbatFilters>
+
       <Card className="p-0">
         <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
           <Icon name="send" size={16} className="text-accent" />
           <div className="text-body font-medium">{t('broker.title')}</div>
           <span className="text-xs text-muted-foreground">
-            {t('broker.count', { n: items.length })}
+            {t('broker.count', { n: jami })}
           </span>
           {/* ESKIRGAN QAROR — eng shoshilinch raqam. */}
           {eskirgan > 0 && (
@@ -279,10 +339,25 @@ export default function BrokerQueue({
           </div>
         )}
 
-        {items.length === 0 ? (
+        {!yuklanmoqda && (
+          <div className="px-4 pt-2">
+            <Kesildi jami={jami} korsatildi={items.length} />
+          </div>
+        )}
+
+        {yuklanmoqda ? (
+          <div className="p-4">
+            <Skeleton className="h-[360px] w-full rounded-lg" />
+          </div>
+        ) : items.length === 0 ? (
           <div className="px-4 py-8 text-center text-body
                           text-muted-foreground">
-            {t('broker.empty')}
+            {/* BO'SH NATIJANING SABABI AYTILADI. Filtr qo'yilgan
+                bo'lsa "navbat bo'sh" YOLG'ON bo'lardi — navbatda
+                tender bor, faqat filtrga mos kelmagan. */}
+            {filtr.katalog
+              ? t('navbat.noCatalogMatch')
+              : filtrBor ? t('navbat.noMatch') : t('broker.empty')}
           </div>
         ) : (
           <ul className="divide-y">

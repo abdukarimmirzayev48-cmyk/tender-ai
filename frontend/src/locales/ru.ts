@@ -80,6 +80,24 @@ export const ru: Dict = {
   'broker.title': '\u041e\u0447\u0435\u0440\u0435\u0434\u044c \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438',
   'broker.count': '{n} \u0442\u0435\u043d\u0434\u0435\u0440\u043e\u0432',
   'broker.refresh': '\u041f\u0435\u0440\u0435\u043e\u0446\u0435\u043d\u0438\u0442\u044c',
+
+  // --- ФИЛЬТРЫ ОЧЕРЕДЕЙ ---
+  'navbat.truncated': 'Показано {n} из {jami} — уточните поиск.',
+  'navbat.noMatch': 'Нет тендеров по фильтру.',
+  'navbat.catalogOnly': 'Подходящие',
+  'navbat.noCatalogMatch':
+    'В этой очереди нет тендеров по вашему каталогу.',
+  'broker.f.allStates': 'Все статусы',
+  'broker.f.new': 'Новые',
+  'broker.f.inProgress': 'В работе',
+  'broker.f.closed': 'Закрытые',
+  'broker.f.allDecisions': 'Все решения',
+  'broker.f.staleOnly': 'Только устаревшие',
+  'talab.f.lowOnly': 'Только низкая уверенность',
+  'talab.f.allSources': 'Все источники',
+  'talab.f.pattern': 'По шаблону',
+  'talab.f.model': 'От модели',
+  'talab.f.expired': 'Включая истёкшие',
   'broker.empty': '\u041e\u0447\u0435\u0440\u0435\u0434\u044c \u043f\u0443\u0441\u0442\u0430 \u2014 \u043d\u0430\u0436\u043c\u0438\u0442\u0435 \u00ab\u041f\u0435\u0440\u0435\u043e\u0446\u0435\u043d\u0438\u0442\u044c\u00bb.',
   'broker.staleCount': '{n} \u0440\u0435\u0448\u0435\u043d\u0438\u0439 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u0438',
   'broker.stale': '\u0412\u044b \u0441\u043a\u0430\u0437\u0430\u043b\u0438 \u00ab{qaror}\u00bb, \u043d\u043e \u0430\u043d\u0430\u043b\u0438\u0437 \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0441\u044f: '

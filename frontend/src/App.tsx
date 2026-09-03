@@ -531,6 +531,7 @@ export default function App() {
             {/* Manbaga sakrash: hujjat matni tender panelida ochiladi,
                 ya'ni tasdiqlovchi AYNAN o'sha bo'lakni ko'radi. */}
             <RequirementReview
+              regions={regions}
               onOpenSource={(_ref, _pos) => { /* keyingi qadam: DocumentText ga chuqur havola */ }}
             />
           </Suspense>
@@ -539,7 +540,8 @@ export default function App() {
           <Suspense fallback={<Skeleton className="h-[420px] w-full rounded-xl" />}>
             {/* Tenderni ochish: broker qaror berishdan OLDIN manbani
                 ko'rishi kerak — qaror faqat `ai_sabab` ga tayanmasin. */}
-            <BrokerQueue onOpenTender={(id) => setSelected({ id })} />
+            <BrokerQueue regions={regions}
+              onOpenTender={(id) => setSelected({ id })} />
           </Suspense>
         )}
         {view === 'stats' && (

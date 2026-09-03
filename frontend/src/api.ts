@@ -9,7 +9,8 @@ import type {
   Aktor, AktorHolat, AktorRol, AuditYozuv, Kimlik,
   HujjatTuri, InsonQarori, ReviewRejim, ReviewTezlik, Talab, TalabHolat,
   TalabNavbat,
-  AiQaror, InsonQaror, MalakaNatija, RoutingHolat, RoutingItem,
+  AiQaror, InsonQaror, MalakaNatija, NavbatFiltr, RoutingHolat,
+  RoutingItem, TalabFiltr,
   KodNavbat, KodQaror, KodQidiruv, KodOlchov, Manba,
   RoutingMoslik,
   TalabXulosa,
@@ -400,8 +401,15 @@ export const api = {
   //
   // Tasdiqlash MAJBURIY: tekshirilmagan talabni cheklistga ulash AI
   // xatosini qaror qatlamiga o'tkazadi (arvoh blocker).
-  talabNavbat: (limit = 100) =>
-    request<{ queue: TalabNavbat[] }>('GET', `/requirements/queue?limit=${limit}`),
+  talabNavbat: (limit = 100, f?: Partial<TalabFiltr>) =>
+    request<{ queue: TalabNavbat[]; jami: number; korsatildi: number }>(
+      'GET', `/requirements/queue?limit=${limit}`
+             + (f?.region ? `&region=${encodeURIComponent(f.region)}` : '')
+             + (f?.q ? `&q=${encodeURIComponent(f.q)}` : '')
+             + (f?.manba ? `&manba=${f.manba}` : '')
+             + (f?.past ? '&past=true' : '')
+             + (f?.otgan ? '&otgan=true' : '')
+             + (f?.katalog ? '&katalog=true' : '')),
   tenderTalablar: (id: number) =>
     request<{ tender_id: number; rejim: ReviewRejim; summary: TalabXulosa
               items: Talab[] }>(
@@ -437,10 +445,18 @@ export const api = {
   // solishtiriladi. O'lchandi: 500 tender 1.3 s, 0 pullik chaqiruv.
   malaka: (tenderId: number) =>
     request<MalakaNatija>('GET', `/tenders/${tenderId}/qualification`),
-  brokerNavbat: (holat?: RoutingHolat, limit = 100) =>
-    request<{ items: RoutingItem[]; jami: number; moslik: RoutingMoslik }>(
+  // `jami` — MOS KELGANLARNING to'liq soni, qaytarilganlar EMAS.
+  // `korsatildi` bilan solishtirib interfeys kesilganini biladi.
+  brokerNavbat: (f?: Partial<NavbatFiltr>, limit = 100) =>
+    request<{ items: RoutingItem[]; jami: number; korsatildi: number
+              moslik: RoutingMoslik }>(
       'GET', `/routing/queue?limit=${limit}`
-             + (holat ? `&holat=${holat}` : '')),
+             + (f?.holat ? `&holat=${f.holat}` : '')
+             + (f?.qaror ? `&qaror=${f.qaror}` : '')
+             + (f?.region ? `&region=${encodeURIComponent(f.region)}` : '')
+             + (f?.q ? `&q=${encodeURIComponent(f.q)}` : '')
+             + (f?.eskirgan ? '&eskirgan=true' : '')
+             + (f?.katalog ? '&katalog=true' : '')),
   brokerYangila: (limit = 2000) =>
     request<{ baholandi: number; navbatga_tushdi: number
               yangilandi: number; kesildi: number; jami_nomzod: number

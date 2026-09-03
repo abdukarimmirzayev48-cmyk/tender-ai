@@ -243,6 +243,50 @@ export type InsonQaror = 'olindi' | 'rad' | 'kutilsin'
 
 export type RoutingHolat = 'yangi' | 'korilmoqda' | 'yopildi'
 
+/**
+ * Broker navbatining filtri. Bo'sh satr / `false` = filtr yo'q.
+ *
+ * FILTR SERVERGA KETADI. Mijoz tomonida filtrlash faqat olingan
+ * sahifaga tegardi (navbat 180, sahifa 100) va ikkinchi yuzlikdagi
+ * tender "topilmadi" bo'lib ko'rinardi.
+ */
+export interface NavbatFiltr {
+  q: string
+  region: string
+  holat: '' | RoutingHolat
+  qaror: '' | AiQaror
+  eskirgan: boolean
+  /**
+   * Faqat "Sizga mos" bo'limidagi tenderlar.
+   *
+   * Ta'rif SERVERDA, `kodlash.mos_tender_idlari()` da — ya'ni
+   * ro'yxatning O'ZI bilan bir xil to'plam. Mijoz tomonida
+   * hisoblash ikkinchi haqiqat yasardi.
+   */
+  katalog: boolean
+}
+
+/** Ko'rib chiqish (Talablar) navbatining filtri. */
+export interface TalabFiltr {
+  q: string
+  region: string
+  /** Faqat past ishonchli talabi borlar. */
+  past: boolean
+  /** Talab manbai: naqsh yoki model. */
+  manba: '' | 'naqsh' | 'llm'
+  /** Faqat "Sizga mos" bo'limidagi tenderlar. */
+  katalog: boolean
+  /**
+   * Muddati O'TGAN tenderlarni ham ko'rsatish.
+   *
+   * Standart `false`. O'LCHANGAN NUQSON (2026-09-03): navbatda
+   * muddat sharti YO'Q edi va tartib `close_at` bo'yicha o'sish —
+   * ya'ni butun birinchi sahifa allaqachon yopilgan tenderlardan
+   * iborat edi (989 dan 534 tasi o'tgan).
+   */
+  otgan: boolean
+}
+
 export interface RoutingItem {
   id: number
   tender_id: number
