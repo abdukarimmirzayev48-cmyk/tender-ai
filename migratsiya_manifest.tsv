@@ -87,3 +87,12 @@
 680	0068_inson_halqasi	schema_patch_inson_halqasi.sql
 690	0069_inson_dalil	schema_patch_inson_dalil.sql
 700	0070_pilot_tayyorlik	schema_patch_pilot_tayyorlik.sql
+710	0071_topshiriq	schema_patch_topshiriq.sql
+720	0072_kuzatuv	schema_patch_kuzatuv.sql
+730	0073_hujjat_kashfi	schema_patch_hujjat_kashfi.sql
+740	0074_etl_darvoza	schema_patch_etl_darvoza.sql
+750	0075_hujjat_sabab	schema_patch_hujjat_sabab.sql
+760	0076_pilot_avlod	schema_patch_pilot_avlod.sql
+770	0077_pilot_tartib	schema_patch_pilot_tartib.sql
+780	0078_kod_pilot_atribut	schema_patch_kod_pilot_atribut.sql
+790	0079_kod_provenans	schema_patch_kod_provenans.sql
