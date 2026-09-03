@@ -47,6 +47,21 @@ xato() { printf '[%s] XATO: %s\n' "$(date '+%F %T')" "$*" >&2; exit 1; }
 
 [ -f "$ENVFILE" ] || xato "muhit fayli yo'q: $ENVFILE"
 
+# --- 0) SOZLAMA TEKSHIRUVI — QIMMAT QADAMLARDAN OLDIN ------------------------
+# ENG BOSHIDA turishining sababi: to'ldirilmagan sozlama ilgari FAQAT
+# 6-bo'limda (migratsiya) chiqardi, ya'ni `venv`, `npm ci` va frontend
+# qurilmasidan KEYIN — ~4-5 daqiqa va yarim reliz katalogi.
+#
+# Undan ham yomoni: `example.uz` domeni bilan joylashtirish
+# MUVAFFAQIYATLI tugardi va faqat bildirishnoma yuborilganda
+# ma'lum bo'lardi.
+#
+# Skript RELIZDAN emas, DEPLOY.SH YONIDAN olinadi: bu qadam arxiv
+# ochilishidan OLDIN yuradi.
+BU_KATALOG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"${BU_KATALOG}/oldindan-tekshir.sh" "$MUHIT" \
+    || xato "sozlamada to'siq bor (yuqorida) — joylashtirish BOSHLANMADI"
+
 # --- 1) ISHLAB CHIQARISH UCHUN STAGING TASDIQI SHART -------------------------
 if [ "$MUHIT" = "production" ]; then
     TASDIQ="${TENDERAI_STAGING_ILDIZ:-/opt/tenderai/staging}/.verified"
