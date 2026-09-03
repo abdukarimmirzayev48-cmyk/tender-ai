@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, errMatn } from '@/api'
 import Icon from './Icon'
+import { DarvozaProgress } from './DarvozaProgress'
 import { useT } from '@/i18n'
 import { useFormat } from '@/format'
 import { Button } from '@/components/ui/button'
@@ -188,7 +189,9 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
     (x) => x.review_status === 'extracted')
 
   return (
-    <div className="space-y-4">
+    <>
+      <DarvozaProgress qatlam="talab_korigi" />
+      <div className="space-y-4">
       {xato && (
         <div className="rounded-lg border border-urgent/40 bg-urgent-soft px-3
                         py-2 text-body text-urgent">{xato}</div>
@@ -583,5 +586,6 @@ export default function RequirementReview({ tenderId, onOpenSource }: Props) {
         </Card>
       )}
     </div>
+    </>
   )
 }

@@ -1051,4 +1051,36 @@ export interface KodPilot {
   taklif_kelishuv_foiz: Nullable<number>
   qidiruv_foiz: Nullable<number>
   kodsiz_mahsulot: number
+  /** MAQSADGA QO'SHILMAYDIGAN qarorlar: anonim (`kompaniya_sessiyasi`)
+   *  yoki mashina (`servis`). `qaror_soni` FAQAT atributlanganni
+   *  sanaydi — ekran va sifat darvozasi bir xil qoidada bo'lsin.
+   *  Bu son noldan farq qilsa, ko'ruvchi "bajardim" deb o'ylagan ish
+   *  darvozaga o'tmagan degani. */
+  atributsiz_qaror?: number
+}
+
+/** `/validatsiya/holat` bitta qatlami.
+ *
+ * `aktorli` — DARVOZA SHUNI sanaydi. `anonim` va `mashina` ALOHIDA
+ * turadi va hech qachon qo'shilmaydi: qo'shilsa darvoza yopiq bo'la
+ * turib ochiqdek ko'rinardi. */
+export interface ValidatsiyaQatlam {
+  qatlam: string
+  eng_kam: number
+  aktorli: number
+  qolgan: number
+  anonim: number
+  mashina: number
+  navbatda: number
+  holat: string
+  ulush_foiz: number | null
+  aktor_jami?: number
+  aktor_faol?: number
+  aktor_koruvchi?: number
+  tosiq?: string | null
+}
+
+export interface ValidatsiyaHolat {
+  qatlamlar: ValidatsiyaQatlam[]
+  izoh: Record<string, string>
 }

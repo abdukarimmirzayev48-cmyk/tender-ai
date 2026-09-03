@@ -45,6 +45,7 @@ import type {
 } from '@/types'
 
 import Icon from './Icon'
+import { DarvozaProgress } from './DarvozaProgress'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
@@ -187,6 +188,11 @@ export default function BrokerQueue({
 
   return (
     <div className="space-y-3">
+      {/* SIFAT DARVOZASI — "18 / 40". Ko'ruvchi o'z ekranida
+          qanchasi qolganini ko'rsin; ilgari bu raqam faqat
+          `v_sifat_darvoza` da, ya'ni SQL yozadigan odam uchun
+          ko'rinardi. Tugallanmagan darvoza YASHIRILMAYDI. */}
+      <DarvozaProgress qatlam="yonaltirish" />
       {/* SINOV PROFILI — eng tepada va yo'qolmaydi.
           "147 ta tender navbatda" degan raqam o'ylab topilgan
           qiymatlarni o'lchaydi; yorliqsiz u haqiqiy deb o'qilardi. */}

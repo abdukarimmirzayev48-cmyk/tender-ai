@@ -952,5 +952,13 @@ export const en: Dict = {
   'err.SOURCE_FETCH_FAILED': 'Could not fetch from the source — the site did not respond.',
   'err.PLATFORM_DOWNLOAD_UNSUPPORTED': 'Downloading is not supported for “{platforma}”.',
   'err.SCHEMA_PATCH_MISSING': 'The database is not updated for this feature. Tell an administrator.',
+  'gate.kod_tasdigi': 'Code confirmation',
+  'gate.talab_korigi': 'Requirement review',
+  'gate.yonaltirish': 'Routing',
+  'gate.loading': 'loading…',
+  'gate.unreadable': 'gate status unavailable',
+  'gate.onlyAttributed': 'Only attributed human decisions are counted',
+  'gate.blocker': 'What blocks the pilot',
+  'gate.notCounted': 'not counted: {anonim} anonymous, {mashina} machine',
   'err.INTERNAL_ERROR': 'Internal error. Please try again.',
 }

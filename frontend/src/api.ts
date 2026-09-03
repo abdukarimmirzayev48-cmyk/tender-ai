@@ -13,6 +13,7 @@ import type {
   RoutingMoslik,
   TalabXulosa,
   TelegramSubscriber, TenderDetail, TenderRow, NotifySettingsData, Nullable,
+  ValidatsiyaHolat,
 } from './types'
 
 // ZAXIRA QIYMAT `/api` — SAME-ORIGIN.
@@ -482,6 +483,8 @@ export const api = {
                                      active?: boolean; izoh?: string }) =>
     request<Aktor>('PATCH', `/aktor/${id}`, { body }),
   aktorHolat: () => request<AktorHolat>('GET', '/aktor/holat'),
+  validatsiyaHolat: () =>
+    request<ValidatsiyaHolat>('GET', '/validatsiya/holat'),
   audit: (p: { entity?: string; entity_id?: number; actor_id?: number
                limit?: number } = {}) =>
     request<{ tayyor: boolean; yozuvlar: AuditYozuv[] }>(

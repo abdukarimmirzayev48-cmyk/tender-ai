@@ -152,6 +152,43 @@ function main(): void {
         olik.length === 0,
         olik.length ? olik.join('\n       ') : '')
 
+  // ── BRAUZER CHROME RANGI UCH JOYDA BIR XILMI ──────────────────────
+  //
+  // `<meta name="theme-color">` qiymati UCH joyda takrorlanadi va
+  // buni yo'qotib bo'lmaydi: `index.css` — haqiqiy fon; `theme.tsx` —
+  // mavzu almashganda; `theme-init.js` — React dan OLDIN, birinchi
+  // bo'yashda. Uchtasi CSS o'zgaruvchisini o'qiy olmaydi (biri
+  // brauzergacha ishlaydi), shuning uchun qiymat qo'lda ko'chirilgan.
+  //
+  // Farq JIMGINA bo'lardi: sahifa foni o'zgaradi, mobil manzil paneli
+  // esa eski rangda qolib, ekran tepasida ko'rinadigan chok paydo
+  // bo'ladi. Hech qayerda xato chiqmaydi.
+  const css = readFileSync(join(SRC, 'index.css'), 'utf8')
+  const [yorugQism, qorongiQism] = css.split(/^\.dark\s*\{/m)
+  const bgOl = (s = '') => (s.match(/--background:\s*(#[0-9a-fA-F]{3,8})/) || [])[1]
+  const cssYorug = bgOl(yorugQism)
+  const cssQorongi = bgOl(qorongiQism)
+
+  const th = readFileSync(join(SRC, 'theme.tsx'), 'utf8')
+  const thBlok = (th.match(/THEME_COLOR[^=]*=\s*\{([\s\S]*?)\}/) || [])[1] ?? ''
+  const thYorug = (thBlok.match(/light:\s*'(#[0-9a-fA-F]{3,8})'/) || [])[1]
+  const thQorongi = (thBlok.match(/dark:\s*'(#[0-9a-fA-F]{3,8})'/) || [])[1]
+
+  const init = readFileSync(join(SRC, '..', 'public', 'theme-init.js'), 'utf8')
+  const initJuft = init.match(
+    /dark\s*\?\s*'(#[0-9a-fA-F]{3,8})'\s*:\s*'(#[0-9a-fA-F]{3,8})'/)
+  const initQorongi = initJuft?.[1]
+  const initYorug = initJuft?.[2]
+
+  check('`--background` ikkala mavzuda ham topildi',
+        Boolean(cssYorug && cssQorongi), `${cssYorug} / ${cssQorongi}`)
+  check('`theme-color` YORUG` mavzuda `--background` bilan bir xil',
+        Boolean(cssYorug) && thYorug === cssYorug && initYorug === cssYorug,
+        `css=${cssYorug} theme.tsx=${thYorug} theme-init.js=${initYorug}`)
+  check('`theme-color` QORONG`I mavzuda `--background` bilan bir xil',
+        Boolean(cssQorongi) && thQorongi === cssQorongi && initQorongi === cssQorongi,
+        `css=${cssQorongi} theme.tsx=${thQorongi} theme-init.js=${initQorongi}`)
+
   // SKANERNI SINAYMIZ. Salbiy sinov jimgina "o'tib" ketishi eng oson.
   const soxta = 'className="text-qqqfake bg-ok-soft"'
   const topilgan = [...soxta.matchAll(SINF_RE)].map((m) => m[2])

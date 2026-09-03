@@ -959,5 +959,13 @@ export const ru: Dict = {
   'err.SOURCE_FETCH_FAILED': 'Не удалось получить с источника — сайт не ответил.',
   'err.PLATFORM_DOWNLOAD_UNSUPPORTED': 'Загрузка для «{platforma}» не поддерживается.',
   'err.SCHEMA_PATCH_MISSING': 'Для этой функции база не обновлена. Сообщите администратору.',
+  'gate.kod_tasdigi': 'Подтверждение кода',
+  'gate.talab_korigi': 'Проверка требований',
+  'gate.yonaltirish': 'Маршрутизация',
+  'gate.loading': 'загрузка…',
+  'gate.unreadable': 'состояние шлюза не прочитано',
+  'gate.onlyAttributed': 'Считаются только атрибутированные решения человека',
+  'gate.blocker': 'Причина, блокирующая пилот',
+  'gate.notCounted': 'не считается: {anonim} аноним, {mashina} машина',
   'err.INTERNAL_ERROR': 'Внутренняя ошибка. Попробуйте ещё раз.',
 }

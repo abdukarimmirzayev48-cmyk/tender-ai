@@ -954,6 +954,14 @@ export const uz = {
   'err.SOURCE_FETCH_FAILED': 'Manbadan olinmadi — sayt javob bermadi.',
   'err.PLATFORM_DOWNLOAD_UNSUPPORTED': "«{platforma}» uchun yuklab olish qo'llab-quvvatlanmaydi.",
   'err.SCHEMA_PATCH_MISSING': "Bu imkoniyat uchun baza yangilanmagan. Ma'muriyatga xabar bering.",
+  'gate.kod_tasdigi': "Kod tasdig‘i",
+  'gate.talab_korigi': "Talab ko‘rigi",
+  'gate.yonaltirish': "Yo‘naltirish",
+  'gate.loading': 'yuklanmoqda…',
+  'gate.unreadable': "darvoza holati o‘qilmadi",
+  'gate.onlyAttributed': 'Faqat atributlangan inson qarorlari sanaladi',
+  'gate.blocker': "Pilotni to‘sib turgan sabab",
+  'gate.notCounted': 'sanalmaydi: {anonim} anonim, {mashina} mashina',
   'err.INTERNAL_ERROR': "Ichki xato. Qaytadan urinib ko'ring.",
 }
 
