@@ -22,6 +22,13 @@ export const en: Dict = {
   'aktor.trust.unknown': 'Recorded before actor tracking existed.',
   'app.catalogProductMatch': 'Tenders for this product:',
   'app.allCatalog': 'Entire catalogue',
+
+  // --- REGION FLAG ---
+  'match.outOfRegion': 'outside region',
+  'match.outOfRegionNote':
+    '{n} matching tenders are outside the regions set in your profile — '
+    + 'they do not reach the broker queue.',
+  'match.toProfile': 'Change regions',
   'app.matchedBy.code': 'Exact product line match: {items}',
   'cat.fNameNote': 'Be specific, for example: “Computer monitor”.',
   'cat.moreOptions': 'Additional details',

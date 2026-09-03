@@ -1,7 +1,8 @@
 // Backend API qatlami — barcha so'rovlar shu yerdan o'tadi.
 // Bazaviy manzil .env dagi VITE_API_BASE dan (zaxira: `/api`, same-origin).
 import type {
-  AiMatchResult, Category, CompanyDocument, CompanyProfileData, ComplianceResult,
+  AiMatchResult, CatalogMatchResponse, Category, CompanyDocument,
+  CompanyProfileData, ComplianceResult,
   DocumentTextResult, DocumentType, Freshness, GoNoGoResult, Paged, PricingInputs,
   PricingSaved, Product, ProductSuggestion, Region, SavedSearch, Stats, Status,
   StockCheckResult, TelegramBot, TelegramLink, TelegramLinkStatus,
@@ -550,7 +551,7 @@ export const api = {
   createProduct: (body: unknown) => request<Product>('POST', '/catalog', { body }),
   updateProduct: (id: number, body: unknown) => request<Product>('PUT', `/catalog/${id}`, { body }),
   deleteProduct: (id: number) => request<null>('DELETE', `/catalog/${id}`),
-  catalogMatch: (body: unknown) => request<Paged<TenderRow>>('POST', '/catalog/match', { body }),
+  catalogMatch: (body: unknown) => request<CatalogMatchResponse>('POST', '/catalog/match', { body }),
   catalogNewCount: () => request<{ new: number; total: number; deferred?: boolean }>(
     'GET', '/catalog/new-count'),
   catalogSeen: () => request<null>('POST', '/catalog/seen'),

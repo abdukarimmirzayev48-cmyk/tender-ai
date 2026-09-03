@@ -196,7 +196,15 @@ export default function TenderTable({
               {row.region?.name && (
                 <div className="flex gap-1.5">
                   <dt className="sr-only">{t('table.region')}</dt>
-                  <dd>{row.region.name}</dd>
+                  <dd>
+                    {row.region.name}
+                    {row.hudud_tashqari && (
+                      <span className="ml-1.5 rounded border border-soon/40
+                                       bg-soon-soft px-1 text-micro text-soon-strong">
+                        {t('match.outOfRegion')}
+                      </span>
+                    )}
+                  </dd>
                 </div>
               )}
             </dl>
@@ -340,6 +348,17 @@ export default function TenderTable({
                 </TableCell>
                 <TableCell className="truncate text-muted-foreground" title={row.region?.name ?? ''}>
                   {row.region?.name || '—'}
+                  {/* HUDUDDAN TASHQARI — qator YASHIRILMAYDI, belgilanadi.
+                      Katalog "mahsulot mos" deydi, profil esa "biz u yerda
+                      ishlamaymiz". Ikkinchisini ko'rsatmasa foydalanuvchi
+                      broker navbatida nega bu tender yo'qligini bilmasdi. */}
+                  {row.hudud_tashqari && (
+                    <Badge variant="outline"
+                      className="ml-1.5 border-soon/40 bg-soon-soft px-1.5 py-0
+                                 text-micro text-soon-strong align-middle">
+                      {t('match.outOfRegion')}
+                    </Badge>
+                  )}
                 </TableCell>
                 <TableCell className="tabular hidden text-right text-muted-foreground xl:table-cell">
                   {dlv ? t('common.days', { n: dlv }) : '—'}

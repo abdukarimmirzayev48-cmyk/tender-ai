@@ -23,6 +23,16 @@ export const uz = {
   'aktor.trust.unknown': 'Aktor kuzatuvidan oldin yozilgan.',
   'app.catalogProductMatch': 'Aynan shu mahsulot uchun:',
   'app.allCatalog': 'Barcha katalog',
+
+  // --- HUDUD BELGISI ---
+  // "Sizga mos" katalog bo'yicha topadi, broker navbati esa profildagi
+  // hudud cheklovini QATTIQ to'siq sifatida qo'llaydi. Qator
+  // yashirilmaydi — belgilanadi: hududni kengaytirish SOTUV qarori.
+  'match.outOfRegion': 'hududdan tashqari',
+  'match.outOfRegionNote':
+    '{n} ta mos tender profilingizdagi hududdan tashqarida — ular broker '
+    + 'navbatiga tushmaydi.',
+  'match.toProfile': 'Hududni o‘zgartirish',
   'app.matchedBy.code': 'Mahsulot lotiga aniq mos: {items}',
   'cat.fNameNote': 'Turini aniq yozing, masalan: “Kompyuter monitori”.',
   'cat.moreOptions': 'Qo‘shimcha ma’lumotlar',

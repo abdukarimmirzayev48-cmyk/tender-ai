@@ -2696,7 +2696,7 @@ def routing_queue(request: Request,
 @app.post("/routing/refresh")
 def routing_refresh(request: Request,
                     barchasi: bool = Query(False),
-                    limit: int = Query(500, ge=1, le=2000)):
+                    limit: int = Query(2000, ge=1, le=2000)):
     """Navbatni qayta baholaydi. MODEL CHAQIRILMAYDI.
 
     MUSBAT TASDIQ: nechta baholandi VA nechtasi navbatga tushdi —
@@ -3506,8 +3506,21 @@ def catalog_match(body: CatalogMatchIn, request: Request):
     if not prods:
         return {"total": 0, "limit": body.limit, "offset": body.offset,
                 "items": [], "holat": kodlash.holat(cid),
-                "atama_kesildi": 0}
+                "atama_kesildi": 0,
+                # SHAKL BIR XIL BO'LSIN: interfeys `hudud` kalitini
+                # HAR javobda kutadi. Yo'q bo'lsa u "belgilanmagan"
+                # bilan "tashqarida yo'q" ni ajrata olmasdi.
+                "hudud": {"regions": [], "tashqari": 0, "jami": 0}}
     product_ids = [p["id"] for p in prods]
+
+    # PROFIL HUDUDLARI — bir marta o'qiladi, har tender uchun emas.
+    # Bo'sh bo'lsa cheklov yo'q va hech narsa belgilanmaydi
+    # (`sf.regionsHint`: "Bo'sh — butun respublika").
+    #
+    # Import MAHALLIY — `tender_qualification` dagi bilan ayni uslub.
+    from api import qualification
+    profil_regions = (db.query_one(qualification.SQL_PROFIL, {"c": cid})
+                      or {}).get("regions") or []
 
     # ------------------------------------------------------------------
     # SOLISHTIRISH SQL DA BAJARILADI, Python siklida EMAS.
@@ -3544,7 +3557,9 @@ def catalog_match(body: CatalogMatchIn, request: Request):
         # boshqa.
         return {"total": 0, "limit": body.limit, "offset": body.offset,
                 "items": [], "holat": kodlash.holat(cid),
-                "atama_kesildi": kesilgan}
+                "atama_kesildi": kesilgan,
+                "hudud": {"regions": profil_regions, "tashqari": 0,
+                          "jami": 0}}
 
     # Filtrlar (hudud/valyuta/mahsulot) SHU YERDA qo'llanadi — nomzodlar
     # allaqachon id bo'yicha qisqargan, ya'ni so'rov arzon.
@@ -3602,6 +3617,25 @@ def catalog_match(body: CatalogMatchIn, request: Request):
             n_poz = len(nomlar)
 
         item = _shape_tender(c)
+        # HUDUD BELGISI — "Sizga mos" bilan navbat BIR XIL qoidani
+        # ko'rsatsin.
+        #
+        # O'LCHANGAN NOMUVOFIQLIK (2026-09-03). Bu bo'lim profildagi
+        # hudud cheklovini UMUMAN hisobga olmasdi, malaka tekshiruvi
+        # esa uni QATTIQ `fail` sifatida qo'llardi. Natijada katalogga
+        # mos 28 ta ochiq tenderdan 11 tasi broker navbatida yo'q edi
+        # va sababi hech qayerda ko'rinmasdi — hammasi kompaniyaning
+        # O'Z profili "biz u yerda ishlamaymiz" degan viloyatlarda
+        # (Jizzax, Andijon, Farg'ona, Qoraqalpog'iston, ...).
+        #
+        # RO'YXATDAN OLIB TASHLANMAYDI, BELGILANADI. Yashirish
+        # kompaniyaga "hududni kengaytirsam nima yutaman" degan
+        # savolga javob berish imkonini yo'q qilardi — va bu qaror
+        # SOTUV qarori, filtr emas.
+        # O'LCHAB BO'LMAGANI (`None`) "tashqarida" DEGANI EMAS —
+        # cheklov qo'yilmagan yoki tenderning hududi noma'lum.
+        mos = qualification.hudud_mos(c.get("area_path"), profil_regions)
+        item["hudud_tashqari"] = (mos is False)
         item["catalog"] = {
             # kod — rasmiy tasniflagich, inson tasdiqlagan   -> 100
             # nom — matn mosligi, morfologik jihatdan mo'rt  ->  60
@@ -3640,7 +3674,15 @@ def catalog_match(body: CatalogMatchIn, request: Request):
             "items": page, "holat": kodlash.holat(cid),
             # Atama chegarasi ishga tushgan bo'lsa JIMGINA kesmaymiz —
             # foydalanuvchi qamrov to'liq emasligini bilishi kerak.
-            "atama_kesildi": kesilgan}
+            "atama_kesildi": kesilgan,
+            # HUDUD XULOSASI — SAHIFADAN emas, BUTUN natijadan.
+            # Sahifadagi sonni ko'rsatish "2 tasi tashqarida" derdi,
+            # holbuki jami 11 ta bo'lishi mumkin. Bu bo'lim aynan
+            # "nechtasini yo'qotyapman" savoliga javob beradi.
+            "hudud": {"regions": profil_regions,
+                      "tashqari": sum(1 for it in matched
+                                      if it["hudud_tashqari"]),
+                      "jami": total}}
 
 
 @app.get("/catalog/new-count")

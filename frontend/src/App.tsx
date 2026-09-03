@@ -42,7 +42,7 @@ const TenderDrawer = lazy(() => import('./components/TenderDrawer'))
 const ChatPanel = lazy(() => import('./components/ChatPanel'))
 import type {
   Category, CompanyProfileData, CatalogMatchInfo, Freshness as FreshnessData,
-  Product, Region, SavedSearch, Stats, Status, TenderRow,
+  HududXulosa, Product, Region, SavedSearch, Stats, Status, TenderRow,
 } from '@/types'
 
 const PAGE_SIZE = 25
@@ -105,6 +105,9 @@ export default function App() {
   // Ichki tasniflagich kodi interfeysga olib chiqilmaydi.
   const [catalogProduct, setCatalogProduct] = useState<Product | null>(null)
   const [catalogNew, setCatalogNew] = useState({ new: 0, total: 0 })
+  // "Sizga mos" natijasidagi hudud xulosasi. `null` — hali
+  // o'lchanmagan yoki bu ko'rinish katalog rejimida emas.
+  const [hudud, setHudud] = useState<HududXulosa | null>(null)
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [catalogError, setCatalogError] = useState<string | null>(null)
 
@@ -259,6 +262,7 @@ export default function App() {
       let rows: { items: TenderRow[]; total: number }
       if (view === 'match' && activeSearchId) {
         // Saqlangan qidiruv faol — kalit so'z bo'yicha ballaydi
+        setHudud(null)
         rows = await api.match({
           profile: profile || { keywords: [], regions: [], currency: null, min_cost: null, max_cost: null },
           status: filters.status, region: filters.region, currency: filters.currency,
@@ -292,8 +296,10 @@ export default function App() {
             },
           })),
         }
+        setHudud(r.hudud ?? null)
         api.catalogSeen().then(() => setCatalogNew((n) => ({ ...n, new: 0 }))).catch(() => {})
       } else {
+        setHudud(null)
         rows = await api.tenders({
           status: filters.status, region: filters.region,
           currency: filters.currency, q: filters.q, category: filters.category,
@@ -452,6 +458,21 @@ export default function App() {
                 {t('app.emptyCatalog')}
                 <button className="ml-1.5 font-semibold underline-offset-2 hover:underline"
                   onClick={() => goto('catalog')}>{t('app.toCatalog')}</button>
+              </Info>
+            )}
+
+            {/* HUDUD XULOSASI — "nechtasini yo'qotyapman" savoliga javob.
+                O'LCHANGAN NOMUVOFIQLIK (2026-09-03): bu ro'yxat profildagi
+                hudud cheklovini hisobga olmasdi, broker navbati esa uni
+                QATTIQ to'siq sifatida qo'llardi. Natijada katalogga mos 28
+                tenderdan 11 tasi navbatda yo'q edi va SABABI hech qayerda
+                ko'rinmasdi. Qatorlar YASHIRILMAYDI: hududni kengaytirish
+                sotuv qarori va uni kompaniya o'zi qabul qiladi. */}
+            {view === 'match' && !!hudud?.tashqari && (
+              <Info>
+                {t('match.outOfRegionNote', { n: hudud.tashqari })}
+                <button className="ml-1.5 font-semibold underline-offset-2 hover:underline"
+                  onClick={() => goto('profile')}>{t('match.toProfile')}</button>
               </Info>
             )}
 

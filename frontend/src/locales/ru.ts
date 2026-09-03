@@ -27,6 +27,13 @@ export const ru: Dict = {
   'aktor.trust.unknown': 'Записано до внедрения учёта акторов.',
   'app.catalogProductMatch': 'Тендеры именно для товара:',
   'app.allCatalog': 'Весь каталог',
+
+  // --- ОТМЕТКА РЕГИОНА ---
+  'match.outOfRegion': 'вне региона',
+  'match.outOfRegionNote':
+    'Подходящих тендеров вне указанных в профиле регионов: {n}. '
+    + 'В очередь брокера они не попадают.',
+  'match.toProfile': 'Изменить регионы',
   'app.matchedBy.code': 'Точное совпадение с позицией лота: {items}',
   'cat.fNameNote': 'Укажите точный тип, например: «Компьютерный монитор».',
   'cat.moreOptions': 'Дополнительные данные',

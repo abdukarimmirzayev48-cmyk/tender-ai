@@ -105,6 +105,57 @@ WHERE tender_routing.ai_qaror IS DISTINCT FROM EXCLUDED.ai_qaror
 RETURNING id, ai_qaror, inson_qaror, ai_ozgardi
 """
 
+#: NAVBAT NOMZODLARI — "qaysi tenderni brokerga tavsiya qilish MUMKIN".
+#:
+#: O'LCHANGAN NUQSON (2026-09-03). Nomzodlar `v_requirement_review`
+#: dan olinardi. O'sha ko'rinishning TIRIK ta'rifi
+#: (`schema_patch_requirement_8.sql`, migratsiya 0055) esa bu:
+#:
+#:     FROM tender_requirement WHERE review_status = 'pending_review'
+#:
+#: Ya'ni u "brokerga nomzod" ro'yxati EMAS, "inson hali KO'RMAGAN
+#: talablar" ro'yxati. Ikkisi bir joyga qo'shib yuborilgan edi va
+#: bu IKKITA aniq oqibat berdi:
+#:
+#: 1. REYESTR TALABI NOMZOD BO'LMAYDI. `source='api'` qatorlari
+#:    `review_status='extracted'` bilan yoziladi — ular ko'rikka
+#:    muhtoj emas, chunki reyestrdan keladi. Natijada FAQAT reyestr
+#:    talabi bor tender navbatga HECH QACHON tushmaydi.
+#:    O'LCHANDI: talabi bor 584 ta ochiq tenderdan 100 tasi.
+#:
+#: 2. KO'RIKNI TUGATISH TENDERNI NAVBATDAN CHIQARADI. Talablar
+#:    tasdiqlangach `pending_review` qolmaydi, tender ko'rinishdan
+#:    yo'qoladi va `yonaltir_hammasi` uni BOSHQA QAYTA BAHOLAMAYDI.
+#:    Ya'ni inson halqasi ishlay boshlagan zahoti tenderlar
+#:    yo'naltirishdan JIMGINA tusha boshlaydi. Bugun ko'rilgan
+#:    qator atigi 2 ta, shuning uchun bu hali KO'RINMAGAN edi.
+#:
+#: To'g'ri chegara: "malaka tekshiruvi uchun DALIL bormi", ya'ni
+#: tenderning talabi ajratilganmi. Ko'rik HOLATI bunga aloqasiz —
+#: u dalil sifatini oshiradi, dalilni yo'q qilmaydi.
+#:
+#: Talabi UMUMAN yo'q tender ataylab kirmaydi: `qualification.check`
+#: unda hech narsa o'lchamaydi va natija `olchandi=0` bo'lardi —
+#: "o'lchanmagan" ni "yomon" ga aylantirish bu loyihada eng qimmat
+#: xato sinfi.
+SQL_NOMZOD_SONI = """
+SELECT count(DISTINCT r.tender_id)
+FROM tender_requirement r
+JOIN tender t ON t.id = r.tender_id
+WHERE r.company_id = %(c)s
+  AND (t.close_at IS NULL OR t.close_at > now())
+"""
+
+SQL_NOMZODLAR = """
+SELECT DISTINCT r.tender_id
+FROM tender_requirement r
+JOIN tender t ON t.id = r.tender_id
+WHERE r.company_id = %(c)s
+  AND (t.close_at IS NULL OR t.close_at > now())
+ORDER BY r.tender_id
+LIMIT %(n)s
+"""
+
 SQL_NAVBAT = """
 SELECT * FROM v_routing_queue
 WHERE company_id = %(c)s
@@ -181,9 +232,13 @@ def yonaltir(tender_id: int, company_id: int,
             **natija}
 
 
-def yonaltir_hammasi(company_id: int, limit: int = 500,
+def yonaltir_hammasi(company_id: int, limit: int = 2000,
                      barchasi: bool = False) -> Dict[str, Any]:
-    """Navbatdagi barcha tenderlarni baholaydi.
+    """Nomzod tenderlarning HAMMASINI baholaydi.
+
+    NOMZOD = talabi ajratilgan ochiq tender (`SQL_NOMZODLAR` dagi
+    izohga qarang). Ilgari bu "talabi hali ko'rilmagan tender" edi
+    va u ikkita tenderni navbatdan chiqarardi.
 
     MUSBAT TASDIQ: nechta baholandi va nechtasi navbatga tushdi —
     ikkalasi ham qaytariladi. "Xato chiqmadi" yetarli emas.
@@ -192,19 +247,16 @@ def yonaltir_hammasi(company_id: int, limit: int = 500,
     # hajmiga (500) TENG chiqdi — korpus 600 ga o'ssa 100 tasi
     # tushib qolardi va jurnal "baholandi 500" deb muvaffaqiyat
     # ko'rsatardi. Jami son ALOHIDA o'lchanadi va farq aytiladi.
-    jami = db.scalar(
-        """SELECT count(DISTINCT v.tender_id) FROM v_requirement_review v
-           JOIN tender t ON t.id = v.tender_id
-           WHERE v.company_id = %(c)s
-             AND (t.close_at IS NULL OR t.close_at > now())""",
-        {"c": company_id}) or 0
+    #
+    # 2026-09-03: bu KUTILGAN holat RO'Y BERDI. Nomzod ta'rifi
+    # to'g'rilangach ularning soni 484 dan 584 ga chiqdi, ya'ni
+    # eski standart 500 endi 84 tasini kesardi. Standart 2000 ga
+    # ko'tarildi (`run_etl.py` allaqachon shuni ishlatardi va
+    # HTTP chegarasi ham 2000 edi — ya'ni uchta joyda uch xil
+    # raqam turgan edi).
+    jami = db.scalar(SQL_NOMZOD_SONI, {"c": company_id}) or 0
     ids = [r["tender_id"] for r in db.query(
-        """SELECT DISTINCT v.tender_id FROM v_requirement_review v
-           JOIN tender t ON t.id = v.tender_id
-           WHERE v.company_id = %(c)s
-             AND (t.close_at IS NULL OR t.close_at > now())
-           ORDER BY v.tender_id LIMIT %(n)s""",
-        {"c": company_id, "n": limit})]
+        SQL_NOMZODLAR, {"c": company_id, "n": limit})]
     kesildi = max(0, int(jami) - len(ids))
 
     baholandi = qoshildi = ozgardi = eskirdi = 0

@@ -656,6 +656,226 @@ def test_http():
 
 
 # =====================================================================
+def test_navbat_nomzodlari():
+    """I. NAVBAT NOMZODI "ko'rilmagan" EMAS, "dalili bor" bo'lsin.
+
+    O'LCHANGAN NUQSON (2026-09-03). `yonaltir_hammasi` nomzodlarni
+    `v_requirement_review` dan olardi. O'sha ko'rinishning TIRIK
+    ta'rifi (`schema_patch_requirement_8.sql`) —
+    `review_status = 'pending_review'`, ya'ni u "inson hali
+    KO'RMAGAN talablar" ro'yxati, "brokerga nomzod" ro'yxati EMAS.
+
+    IKKITA OQIBAT o'lchandi:
+
+      1. `source='api'` (reyestr) qatorlari `extracted` bilan
+         yoziladi — ko'rikka muhtoj emas. Faqat reyestr talabi bor
+         tender navbatga HECH QACHON tushmasdi.
+      2. Talablar tasdiqlangach tender ko'rinishdan chiqadi va
+         BOSHQA qayta baholanmaydi — ya'ni inson halqasi ishlay
+         boshlagan zahoti tenderlar yo'naltirishdan JIMGINA tusha
+         boshlardi.
+
+    Ikkalasi ham `grep` bilan ko'rinmasdi: so'rov sintaktik
+    to'g'ri edi, xato MA'NODA edi.
+    """
+    section("I. Navbat nomzodlari")
+
+    cid = _cid()
+
+    # STRUKTURAVIY QULF: nomzod so'rovi ko'rik holatiga QAYTMASIN.
+    src = io.open(os.path.join(ROOT, "api", "routing.py"),
+                  encoding="utf-8").read()
+    gavda = src[src.index("def yonaltir_hammasi"):]
+    check("nomzod so'rovi `v_requirement_review` ga TAYANMAYDI",
+          "v_requirement_review" not in gavda,
+          "ko'rik ro'yxati nomzod ro'yxati EMAS")
+    check("nomzod so'rovi `review_status` ni FILTRLAMAYDI",
+          "review_status" not in R.SQL_NOMZODLAR
+          and "review_status" not in R.SQL_NOMZOD_SONI)
+
+    nomzod = {r["tender_id"] for r in db.query(
+        R.SQL_NOMZODLAR, {"c": cid, "n": 100000})}
+    check("nomzod ro'yxati bo'sh emas", len(nomzod) > 0, str(len(nomzod)))
+
+    # --- 1) FAQAT REYESTR talabi bor tender ham nomzod bo'lsin -------
+    faqat_reyestr = {r["tender_id"] for r in db.query("""
+        SELECT DISTINCT r.tender_id FROM tender_requirement r
+        JOIN tender t ON t.id = r.tender_id
+        WHERE r.company_id = %(c)s
+          AND (t.close_at IS NULL OR t.close_at > now())
+          AND NOT EXISTS (SELECT 1 FROM tender_requirement d
+                          WHERE d.company_id = r.company_id
+                            AND d.tender_id = r.tender_id
+                            AND d.source <> 'api')""", {"c": cid})}
+    # O'LCHAB BO'LMASA — BU HAM NATIJA. Bo'sh to'plam ustida
+    # "hammasi ichida" tekshiruvi HAR DOIM o'tadi va sinov hech
+    # narsa isbotlamagan bo'lardi.
+    check("o'lchov bazasi bor: faqat-reyestr tenderlari topildi",
+          len(faqat_reyestr) > 0, f"{len(faqat_reyestr)} ta")
+    check("FAQAT REYESTR talabi bor tender ham NOMZOD",
+          faqat_reyestr <= nomzod,
+          f"tashqarida qolgan: {sorted(faqat_reyestr - nomzod)[:5]}")
+
+    # --- 2) KO'RIGI TUGAGAN tender navbatdan CHIQIB KETMASIN --------
+    korigi_tugagan = {r["tender_id"] for r in db.query("""
+        SELECT DISTINCT r.tender_id FROM tender_requirement r
+        JOIN tender t ON t.id = r.tender_id
+        WHERE r.company_id = %(c)s
+          AND (t.close_at IS NULL OR t.close_at > now())
+          AND NOT EXISTS (SELECT 1 FROM tender_requirement p
+                          WHERE p.company_id = r.company_id
+                            AND p.tender_id = r.tender_id
+                            AND p.review_status = 'pending_review')""",
+        {"c": cid})}
+    check("o'lchov bazasi bor: ko'rigi tugagan tenderlar topildi",
+          len(korigi_tugagan) > 0, f"{len(korigi_tugagan)} ta")
+    check("KO'RIGI TUGAGAN tender ham NOMZOD bo'lib qoladi",
+          korigi_tugagan <= nomzod,
+          f"tashqarida qolgan: {sorted(korigi_tugagan - nomzod)[:5]}")
+
+    # --- 3) ESKI ta'rif YANGISINING ICHIDA bo'lsin ------------------
+    # Tuzatish KENGAYTIRISH bo'lishi kerak, ALMASHTIRISH emas:
+    # ilgari navbatga tushadigan biror tender endi tushmay qolsa,
+    # bu tuzatish emas, yangi nuqson bo'lardi.
+    eski = {r["tender_id"] for r in db.query("""
+        SELECT DISTINCT v.tender_id FROM v_requirement_review v
+        JOIN tender t ON t.id = v.tender_id
+        WHERE v.company_id = %(c)s
+          AND (t.close_at IS NULL OR t.close_at > now())""", {"c": cid})}
+    check("eski nomzodlarning HAMMASI saqlanib qoldi",
+          eski <= nomzod, f"yo'qolgan: {sorted(eski - nomzod)[:5]}")
+    print(f"       qamrov: {len(eski)} -> {len(nomzod)} "
+          f"(+{len(nomzod - eski)})")
+
+    # --- 4) MUDDATI O'TGAN tender nomzod BO'LMASIN ------------------
+    yopiq = db.scalar("""
+        SELECT count(*) FROM tender t
+        WHERE t.id = ANY(%(ids)s)
+          AND t.close_at IS NOT NULL AND t.close_at <= now()""",
+        {"ids": list(nomzod)}) or 0
+    check("nomzodlar orasida MUDDATI O'TGAN tender yo'q", yopiq == 0,
+          str(yopiq))
+
+    # --- 5) CHEGARA uch joyda BIR XIL bo'lsin ----------------------
+    # Ilgari uch xil edi: `yonaltir_hammasi` 500, HTTP 500/le=2000,
+    # `run_etl.py` 2000. Nomzodlar 584 ga chiqqach standart 500
+    # ularning 84 tasini kesardi.
+    import inspect
+    std = inspect.signature(R.yonaltir_hammasi).parameters["limit"].default
+    msrc = io.open(os.path.join(ROOT, "api", "main.py"),
+                   encoding="utf-8").read()
+    # AYNAN SHU endpoint'dan qidiriladi. `main.py` da oltita
+    # `limit: int = Query(...)` bor va birinchisini olish BOSHQA
+    # endpoint'ni o'lchardi — sinov "yiqildi" desa ham sababi
+    # noto'g'ri joyda bo'lardi.
+    i = msrc.index("def routing_refresh")
+    http = re.search(r"limit: int = Query\((\d+), ge=1, le=(\d+)\)",
+                     msrc[i:i + 400])
+    check("standart chegara nomzodlar sonidan KATTA",
+          std >= len(nomzod), f"standart={std}, nomzod={len(nomzod)}")
+    check("`/routing/refresh` standarti modul standartiga TENG",
+          http is not None and int(http.group(1)) == std,
+          f"http={http.group(1) if http else '?'} modul={std}")
+
+
+def test_hudud_yagona_qoida():
+    """J. HUDUD QOIDASI BITTA JOYDA yozilsin.
+
+    O'LCHANGAN NOMUVOFIQLIK (2026-09-03). Uch bo'lim hududga uch xil
+    munosabatda edi:
+
+        Sizga mos       profildagi cheklovni UMUMAN hisobga olmasdi
+        Talablar/navbat uni QATTIQ `fail` sifatida qo'llardi
+
+    Natijada katalogga mos 28 ta ochiq tenderdan 11 tasi broker
+    navbatida yo'q edi va SABABI hech qayerda ko'rinmasdi. O'sha 11
+    tasining hammasi bitta mezonda — `hudud` — yiqilgan va har biri
+    boshqa viloyatda (Jizzax, Andijon, Farg'ona, Qoraqalpog'iston,
+    Buxoro, Toshkent viloyati, Qashqadaryo, Namangan). Kompaniya
+    profilida `regions = ['33.2137']` — `dim_area` da bu level 1,
+    ya'ni to'g'ri viloyat kodi ("Toshkent shahri"), xato ma'lumot
+    EMAS.
+
+    Endi qoida `qualification.hudud_mos()` da — YAGONA manba.
+    """
+    section("J. Hudud qoidasi")
+
+    # --- PREFIKS TUZOG'I ---------------------------------------------
+    # Oddiy `startswith` `33.21` ni `33.2137` ga ham moslashtirardi,
+    # ya'ni BOSHQA viloyat "mos" bo'lib chiqardi. Nuqta TALAB
+    # QILINADI. Bu tuzoq kodda tuzatilgan, lekin hech narsa uni
+    # qaytib kelishdan saqlamasdi.
+    check("aynan mos", Q.hudud_mos("33.2137", ["33.2137"]) is True)
+    check("ichki tuman ham mos",
+          Q.hudud_mos("33.2137.2138.2142", ["33.2137"]) is True)
+    check("PREFIKS TUZOG'I: `33.21` `33.2137` ni QAMRAMAYDI",
+          Q.hudud_mos("33.2137", ["33.21"]) is False,
+          "nuqtasiz prefiks boshqa viloyatni MOS deb ko'rsatardi")
+    check("boshqa viloyat mos emas",
+          Q.hudud_mos("33.711", ["33.2137"]) is False)
+    check("bir nechta hududdan biri mos bo'lsa yetadi",
+          Q.hudud_mos("33.711", ["33.2137", "33.711"]) is True)
+
+    # O'LCHAB BO'LMAGANI "MOS EMAS" DEGANI EMAS.
+    check("cheklov yo'q -> O'LCHAB BO'LMAYDI",
+          Q.hudud_mos("33.711", []) is None)
+    check("tender hududi noma'lum -> O'LCHAB BO'LMAYDI",
+          Q.hudud_mos(None, ["33.2137"]) is None)
+
+    # --- IKKI ISTE'MOLCHI BIR XIL JAVOB BERSIN ------------------------
+    src = io.open(os.path.join(ROOT, "api", "main.py"),
+                  encoding="utf-8").read()
+    i = src.index("def catalog_match")
+    gavda = src[i:src.index('@app.get("/catalog/new-count")')]
+    check("`/catalog/match` YAGONA qoidani chaqiradi",
+          "qualification.hudud_mos(" in gavda,
+          "qoidaning ikkinchi nusxasi ajralib ketardi")
+    check("`/catalog/match` qoidani QAYTA YOZMAYDI",
+          "startswith" not in gavda,
+          "hudud solishtiruvi shu yerda takrorlanmasin")
+    # AYNAN `_hudud` GAVDASI olinadi — qat'iy belgilangan uzunlikdagi
+    # oyna ("birinchi 400 belgi") funksiya o'sganda jimgina noto'g'ri
+    # javob berardi va sinov o'zi yolg'on gapirardi.
+    qsrc = io.open(os.path.join(ROOT, "api", "qualification.py"),
+                   encoding="utf-8").read()
+    h0 = qsrc.index("def _hudud")
+    h1 = qsrc.index("\ndef ", h0 + 1)
+    check("`_hudud` ham shu qoidaga tayanadi",
+          "hudud_mos(" in qsrc[h0:h1],
+          "malaka tekshiruvi qoidaning O'Z nusxasini ishlatmasin")
+
+    # --- BELGI `fail` BILAN MOS TUSHSIN -------------------------------
+    # HAQIQIY ma'lumot ustida: `hudud_tashqari` rost bo'lgan tender
+    # malaka tekshiruvida ham `hudud` mezonida yiqilishi SHART.
+    # Ikkisi ajralsa foydalanuvchi "belgisi yo'q, lekin navbatda ham
+    # yo'q" tenderni ko'rardi — ya'ni belgi YOLG'ON tinchlik berardi.
+    cid = _cid()
+    regions = (db.query_one(Q.SQL_PROFIL, {"c": cid}) or {}).get("regions")
+    check("o'lchov bazasi bor: profilda hudud cheklovi bor",
+          bool(regions), f"regions={regions}")
+    if not regions:
+        return
+    rows = db.query("""
+        SELECT t.id, t.area_path FROM tender t
+        WHERE (t.close_at IS NULL OR t.close_at > now())
+          AND t.area_path IS NOT NULL AND t.area_path <> ''
+        ORDER BY t.id LIMIT 60""")
+    nomuvofiq = []
+    tashqari = 0
+    for r in rows:
+        belgi = Q.hudud_mos(r["area_path"], regions) is False
+        tashqari += belgi
+        mezon = Q.check(r["id"], cid)
+        yiqildi = any(m["key"] == "hudud" and m["status"] == "fail"
+                      for m in mezon["criteria"])
+        if belgi != yiqildi:
+            nomuvofiq.append(r["id"])
+    check("o'lchov bazasi bor: hududdan tashqaridagilar topildi",
+          tashqari > 0, f"{tashqari}/{len(rows)}")
+    check("BELGI va malaka `fail` i BIR XIL javob beradi",
+          not nomuvofiq, f"ajralganlar: {nomuvofiq[:5]}")
+
+
 def qoldiqni_supur() -> int:
     """OLDINGI yurishdan qolgan sinov yozuvlarini o'chiradi.
 
@@ -715,6 +935,8 @@ def main() -> None:
             test_izolyatsiya()
             test_http()
             test_olchovsizlik()
+            test_navbat_nomzodlari()
+            test_hudud_yagona_qoida()
     finally:
         try:
             tozala()

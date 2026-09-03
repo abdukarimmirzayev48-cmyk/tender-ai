@@ -117,6 +117,32 @@ export interface TenderRow {
   goods_preview?: string[]
   match?: MatchInfo
   catalog?: CatalogMatchInfo
+  /**
+   * Tender kompaniya profilida ko'rsatilgan hududlardan TASHQARIDA.
+   *
+   * `false` ikki holatni bildiradi: hudud ichida YOKI o'lchab
+   * bo'lmadi (cheklov qo'yilmagan / tender hududi noma'lum).
+   * Faqat `true` aniq da'vo — shuning uchun belgi ham shunda
+   * ko'rsatiladi.
+   */
+  hudud_tashqari?: boolean
+}
+
+/**
+ * "Sizga mos" natijasidagi hudud xulosasi.
+ *
+ * SAHIFADAN emas, BUTUN natijadan hisoblanadi: sahifadagi son
+ * "2 tasi tashqarida" derdi, holbuki jami 11 ta bo'lishi mumkin.
+ */
+export interface HududXulosa {
+  regions: string[]
+  tashqari: number
+  jami: number
+}
+
+export interface CatalogMatchResponse extends Paged<TenderRow> {
+  hudud?: HududXulosa
+  atama_kesildi?: number
 }
 
 export interface AiSummary {
