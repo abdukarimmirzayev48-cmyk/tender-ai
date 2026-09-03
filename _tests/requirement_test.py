@@ -1002,9 +1002,98 @@ def test_pilot():
         SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
         WHERE c.relname = 'review_pilot_tartib_idx' AND i.indisunique""")),
         "review_pilot_tartib_idx UNIQUE bo'lishi kerak")
-    check("takror tartib yo'q", not db.query("""
-        SELECT 1 FROM review_pilot GROUP BY company_id, tartib
+    # TARTIB AVLOD ICHIDA noyob. Avlodlar ORASIDA takrorlanishi
+    # SHART — har pilot o'z 1..N tartibini oladi. Guruhlash `avlod`
+    # siz bo'lsa ikkinchi avlod paydo bo'lishi bilan sinov YOLG'ON
+    # yiqilardi.
+    check("takror tartib yo'q (avlod ichida)", not db.query("""
+        SELECT 1 FROM review_pilot GROUP BY company_id, avlod, tartib
         HAVING count(*) > 1 LIMIT 1"""))
+
+    # --- AVLOD HAYOT SIKLI ---
+    #
+    # O'LCHANGAN NUQSON (2026-09-03): `pilot_yarat()` shartи
+    # `count(*) > 0` edi va jadvalda holat ustuni UMUMAN YO'Q edi.
+    # Ya'ni bitta qator ham yangi pilotni ABADIY to'sardi va yagona
+    # yechim tarixiy dalilni SQL bilan o'chirish bo'lardi — bu esa
+    # namunani va "30 tenderda mediana" maxrajini yo'q qiladi.
+    #
+    # Sinov HAQIQIY pilotga TEGMAYDI: o'z sinov kompaniyasini va
+    # sintetik avlodlarini ishlatadi.
+    ZZ_CID = db.scalar("""
+        SELECT id FROM company_account WHERE username = 'zztest_pilot'""")
+    if ZZ_CID is None:
+        ZZ_CID = db.execute_returning("""
+            INSERT INTO company_account (username, company_name,
+                                         password_hash, active)
+            VALUES ('zztest_pilot', 'ZZTEST pilot',
+                    '!sinov-yaroqsiz-xesh', false) RETURNING id""")["id"]
+    zz_tid = db.scalar("SELECT id FROM tender WHERE status='open' "
+                       " AND close_at > now() LIMIT 1")
+    try:
+        db.execute_returning("""
+            INSERT INTO review_pilot_avlod (company_id, avlod, yaratgan)
+            VALUES (%(c)s, 1, 'sinov')
+            ON CONFLICT (company_id, avlod) DO NOTHING RETURNING avlod""",
+            {"c": ZZ_CID})
+        db.execute_returning("""
+            INSERT INTO review_pilot (company_id, avlod, tender_id,
+                                      guruh, rejim, tartib)
+            VALUES (%(c)s, 1, %(t)s, 'tasodif', 'blind', 1)
+            ON CONFLICT (company_id, avlod, tender_id) DO NOTHING
+            RETURNING tender_id""", {"c": ZZ_CID, "t": zz_tid})
+
+        h = db.query_one("""SELECT holat, tenderlar FROM v_pilot_avlod
+                            WHERE company_id=%(c)s AND avlod=1""",
+                         {"c": ZZ_CID})
+        check("ochiq tenderli avlod -> 'faol'", h["holat"] == "faol",
+              str(h))
+        r3 = R.pilot_yarat(ZZ_CID)
+        check("FAOL avlod bor -> yangisi OCHILMAYDI",
+              r3.get("mavjud") is True and r3.get("avlod") == 1, str(r3))
+
+        # ARXIVLASH — qatorlar O'CHIRILMAYDI.
+        oldingi_qatorlar = db.scalar("""SELECT count(*) FROM review_pilot
+            WHERE company_id=%(c)s AND avlod=1""", {"c": ZZ_CID})
+        R.pilot_arxivla(ZZ_CID, 1, kim="sinov")
+        h2 = db.query_one("""SELECT holat FROM v_pilot_avlod
+                             WHERE company_id=%(c)s AND avlod=1""",
+                          {"c": ZZ_CID})
+        check("arxivlangach holat 'arxivlandi'",
+              h2["holat"] == "arxivlandi", str(h2))
+        check("ARXIVLASH QATORLARNI O'CHIRMAYDI (tarix saqlanadi)",
+              db.scalar("""SELECT count(*) FROM review_pilot
+                  WHERE company_id=%(c)s AND avlod=1""",
+                  {"c": ZZ_CID}) == oldingi_qatorlar,
+              f"{oldingi_qatorlar} qator")
+
+        # IKKINCHI AVLOD — `tartib` unikal indeksi to'smasligi kerak.
+        # 0076 da bu indeks unutilgan edi va ikkinchi avlod JIMGINA
+        # yozilmasdi (`ON CONFLICT DO NOTHING` xato ham bermasdi).
+        db.execute_returning("""
+            INSERT INTO review_pilot_avlod (company_id, avlod, yaratgan)
+            VALUES (%(c)s, 2, 'sinov')
+            ON CONFLICT (company_id, avlod) DO NOTHING RETURNING avlod""",
+            {"c": ZZ_CID})
+        yozildi = db.execute_returning("""
+            INSERT INTO review_pilot (company_id, avlod, tender_id,
+                                      guruh, rejim, tartib)
+            VALUES (%(c)s, 2, %(t)s, 'tasodif', 'blind', 1)
+            ON CONFLICT (company_id, avlod, tender_id) DO NOTHING
+            RETURNING tender_id""", {"c": ZZ_CID, "t": zz_tid})
+        check("IKKINCHI avlod yoziladi (tartib indeksi to'smaydi)",
+              yozildi is not None, "1-avlodda ham tartib=1 bor edi")
+        check("ikkala avlod ham KO'RINADI",
+              db.scalar("""SELECT count(*) FROM v_pilot_avlod
+                  WHERE company_id=%(c)s""", {"c": ZZ_CID}) == 2)
+        # Bir tender IKKI avlodda — rejim ENG YANGISIDAN olinadi.
+        check("pilot_rejim eng yangi avloddan oladi",
+              R.pilot_rejim(zz_tid, ZZ_CID) == "blind")
+    finally:
+        db.execute_returning("""DELETE FROM review_pilot
+            WHERE company_id=%(c)s RETURNING tender_id""", {"c": ZZ_CID})
+        db.execute_returning("""DELETE FROM review_pilot_avlod
+            WHERE company_id=%(c)s RETURNING avlod""", {"c": ZZ_CID})
 
     # --- REJIM serverdan keladi ---
     if blind:

@@ -28,7 +28,7 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Any, Dict, List, Literal, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 from dotenv import load_dotenv
@@ -349,6 +349,62 @@ class MatchIn(BaseModel):
     offset: int = 0
 
 
+class JoylashuvXato(RuntimeError):
+    """Joylashtirish sozlamalari BIR-BIRIGA ZID."""
+
+
+def joylashuv_tekshir(ommaviy: str) -> None:
+    """Proksi ortidagi sozlamalar IZCHILMI — ISHGA TUSHISHDA.
+
+    NEGA KERAK. Uchta sozlama bir-biriga bog'liq, lekin uch xil
+    joyda turadi: `APP_PUBLIC_URL` (muhit fayli), `TRUST_PROXY`,
+    `AUTH_COOKIE_SECURE`. Namunalar (`deploy/env/*.example`) to'g'ri,
+    lekin haqiqiy fayl `/etc/tenderai/<muhit>.env` da QO'LDA
+    tahrirlanadi (`docs/deploy.md` §3) — ya'ni ziddiyat qonuniy
+    yo'l bilan paydo bo'ladi.
+
+    IKKI ZIDDIYAT, IKKI XIL OG'IRLIK:
+
+    1. `http://` + `AUTH_COOKIE_SECURE=1` -> **O'LIMGA OLIB KELADI**.
+       Brauzer `Secure` cookie ni shifrlanmagan ulanish orqali
+       YUBORMAYDI (`localhost` dan tashqari). Xizmat ko'tariladi,
+       `/health` va `/ready` YASHIL bo'ladi, va HECH KIM KIRA
+       OLMAYDI. Aynan shu sinf — "yashil, lekin o'lik" — bu
+       loyihada bir necha marta chiqqan, shuning uchun bu
+       TO'XTATADI, ogohlantirmaydi.
+
+    2. `https://` + `TRUST_PROXY=0` -> **JIMGINA NOTO'G'RI**.
+       Caddy ortida har so'rov `127.0.0.1` dan kelgandek ko'rinadi:
+       kirish urinishlari chegarasi BUTUN DUNYO uchun bitta
+       hisoblagichga aylanadi va audit IP si ma'nosiz bo'ladi.
+       Xizmat ishlaydi, shuning uchun bu OGOHLANTIRISH — lekin
+       jurnalda KO'RINADI.
+
+    `dev` da ikkalasi ham tekshirilmaydi: u yerda `http://localhost`
+    normal va `Secure` cookie `localhost` uchun brauzerda ishlaydi.
+    """
+    muhit = ommaviy_url.muhit()
+    if muhit == "dev":
+        return
+    sxema = urlsplit(ommaviy).scheme.lower()
+
+    if sxema == "http" and COOKIE_SECURE:
+        raise JoylashuvXato(
+            f"APP_PUBLIC_URL={ommaviy} (http) va AUTH_COOKIE_SECURE=1 — "
+            "ZID.\n"
+            "  Brauzer `Secure` cookie ni http orqali YUBORMAYDI: "
+            "xizmat yashil ko'rinadi, kirish esa IMKONSIZ.\n"
+            "  Tuzatish: HTTPS qo'ying (tavsiya) yoki "
+            "`AUTH_COOKIE_SECURE=0` (faqat ichki tarmoqda).")
+
+    if sxema == "https" and not TRUST_PROXY:
+        logging.getLogger("api").warning(
+            "APP_PUBLIC_URL https, lekin TRUST_PROXY=0 — proksi ortida "
+            "har so'rov 127.0.0.1 dan kelgandek ko'rinadi: kirish "
+            "chegarasi va audit IP si NOTO'G'RI bo'ladi. "
+            "Tuzatish: muhit faylida TRUST_PROXY=1.")
+
+
 # ---------------------------------------------------------------------------
 # Lifespan — pool init/close
 # ---------------------------------------------------------------------------
@@ -368,7 +424,8 @@ async def lifespan(app: FastAPI):
     # yuborish paytida edi: `APP_ENV=production` da manzil
     # berilmagan bo'lsa ham xizmat yashil ko'rinardi va nosozlik
     # soatlar keyin, ETL jurnalida chiqardi.
-    ommaviy_url.ishga_tushishda_tekshir()
+    _ommaviy = ommaviy_url.ishga_tushishda_tekshir()
+    joylashuv_tekshir(_ommaviy)
     db.init_pool()
     # Embedding modelini FON IPIDA isitamiz: yuklanish ~17 s, keyingi
     # so'rovlar 19-54 ms. Isitmasak birinchi chat savoli 17 soniya
@@ -2814,7 +2871,40 @@ def requirements_pilot_create(request: Request):
     kelishmovchilik darajasini o'lchash imkonini beradi.
     """
     from api import requirement
-    return requirement.pilot_yarat(company_id_of(request))
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    # Pilot QURISH — namunani belgilaydi, ya'ni keyingi barcha
+    # o'lchovlarning maxrajini belgilaydi. Shuning uchun `sozlama`.
+    ruxsat(k, "sozlama")
+    natija = requirement.pilot_yarat(
+        cid, yaratgan=(k.login or k.ishonch))
+    if not natija.get("mavjud"):
+        audit_yoz(k, request, amal="pilot_yaratildi", entity="review_pilot",
+                  entity_id=int(natija.get("avlod") or 0), keyin=natija)
+    return natija
+
+
+@app.post("/requirements/pilot/{avlod}/arxiv")
+def requirements_pilot_arxiv(avlod: int, request: Request):
+    """Pilot avlodini ARXIVLAYDI — qatorlar O'CHIRILMAYDI.
+
+    Ungacha eskirgan pilotni yopishning yagona yo'li `review_pilot`
+    dan qatorlarni SQL bilan o'chirish edi — ya'ni namunani va
+    tarixiy dalilni yo'qotish. Endi arxivlash FAKT sifatida
+    yoziladi, qatorlar joyida qoladi va yangi avlod ochiladi.
+    """
+    from api import requirement
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "sozlama")
+    try:
+        natija = requirement.pilot_arxivla(cid, avlod,
+                                           kim=(k.login or k.ishonch))
+    except Exception as e:                                    # noqa: BLE001
+        raise xatolar.kodli(e, "NOT_FOUND")
+    audit_yoz(k, request, amal="pilot_arxivlandi", entity="review_pilot",
+              entity_id=avlod, keyin=natija)
+    return natija
 
 
 @app.get("/requirements/pilot")
@@ -4012,6 +4102,54 @@ def aktor_qosh(body: AktorIn, request: Request):
               keyin={"login": row["login"], "rol": row["rol"],
                      "manba": row["manba"], "erp_user_id": row["erp_user_id"]})
     return row
+
+
+@app.get("/aktor/erp")
+def aktor_erp_nomzodlar(request: Request):
+    """ERP odamlari va ularning xaritadagi holati. FAQAT O'QISH.
+
+    `sozlama` talab qilinadi: bu ro'yxat "kim qaror qo'ya oladigan
+    bo'lishi mumkin" degan ma'lumot, ya'ni tashkilot tarkibi.
+
+    `token_hash` QAYTMAYDI — u `erp.v_tai_actor` da bor, lekin sir.
+    """
+    from api import aktor
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "sozlama")
+    return aktor.erp_nomzodlar(cid)
+
+
+@app.post("/aktor/erp/sinxron")
+def aktor_erp_sinxron(request: Request, quruq: bool = False):
+    """ERP odamlarini aktor xaritasiga IDEMPOTENT qo'shadi.
+
+    Ijarachi SESSIYADAN olinadi (`company_id_of`), so'rov tanasidan
+    EMAS — kompaniyalararo xaritalash shu bilan imkonsiz.
+
+    `?quruq=true` — reja ko'rsatiladi, hech narsa yozilmaydi.
+    """
+    from api import aktor
+    cid = company_id_of(request)
+    k = kimlik_of(request, cid)
+    ruxsat(k, "sozlama")
+    natija = aktor.erp_sinxron(cid, quruq=quruq)
+    # AUDIT HAR AKTOR UCHUN ALOHIDA. Yig'ma qator `entity_id` ni hech
+    # narsaga ishora qilmaydigan qilib qo'yardi; bu yerda esa har
+    # yozuv AYNAN qaysi aktorga tegishli ekani ko'rinadi.
+    # QURUQ yurish audit yozmaydi: hech narsa o'zgarmagan.
+    if not quruq and natija.get("bajarildi"):
+        for r in natija.get("natija", []):
+            if r.get("amal") not in ("yaratildi", "nofaollashtirildi"):
+                continue
+            audit_yoz(k, request,
+                      amal=f"aktor_sinxron_{r['amal']}", entity="actor",
+                      entity_id=int(r["actor_id"]),
+                      keyin={"login": r["login"], "rol": r["tai_rol"],
+                             "erp_user_id": r["erp_user_id"],
+                             "erp_faol": r["erp_faol"]},
+                      izoh=r.get("sabab"))
+    return natija
 
 
 @app.patch("/aktor/{actor_id}")

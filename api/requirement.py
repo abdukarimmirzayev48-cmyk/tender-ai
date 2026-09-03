@@ -818,7 +818,8 @@ GURUH_N = 10
 
 
 def pilot_yarat(company_id: int, blind_n: int = BLIND_N,
-                guruh_n: int = GURUH_N) -> Dict[str, Any]:
+                guruh_n: int = GURUH_N,
+                yaratgan: str = "nomalum") -> Dict[str, Any]:
     """Pilot to'plamini quradi: muddat + tasodif + summa.
 
     TO'PLAM BIR MARTA MUZLAYDI. Agar kompaniyada pilot allaqachon
@@ -837,13 +838,36 @@ def pilot_yarat(company_id: int, blind_n: int = BLIND_N,
     kelishmovchilik darajasi bitta guruhning xususiyatini
     ko'rsatardi.
     """
-    bor = db.scalar("""SELECT count(*) FROM review_pilot
-                       WHERE company_id = %(c)s""", {"c": company_id}) or 0
-    if bor:
-        return {"qoshildi": 0, "jami": int(bor), "mavjud": True,
+    # AVLOD TEKSHIRUVI — "qator bormi" EMAS, "FAOL avlod bormi".
+    #
+    # O'LCHANGAN NUQSON (2026-09-03): shart `count(*) > 0` edi, ya'ni
+    # BITTA qator ham yangi pilotni ABADIY to'sardi. Jadvalda holat
+    # ustuni umuman yo'q edi, shuning uchun tugagan yoki eskirgan
+    # pilotni belgilash JOYI ham yo'q edi — yagona yo'l tarixiy
+    # dalilni SQL bilan o'chirish bo'lardi, bu esa namunani va
+    # "30 tenderda mediana" maxrajini yo'q qilardi.
+    #
+    # Endi holat `v_pilot_avlod` da DALILDAN hisoblanadi va yangi
+    # avlod `faol` avlod BO'LMAGANDA ochiladi. Eski avlod JOYIDA
+    # QOLADI — u boshqa `avlod` raqami ostida saqlanadi.
+    faol = db.query_one("""
+        SELECT avlod, tenderlar, hali_ochiq, qarorli_tender
+          FROM v_pilot_avlod
+         WHERE company_id = %(c)s AND holat = 'faol'
+         ORDER BY avlod DESC LIMIT 1""", {"c": company_id})
+    if faol:
+        return {"qoshildi": 0, "jami": int(faol["tenderlar"]), "mavjud": True,
+                "avlod": int(faol["avlod"]), "holat": "faol",
+                "hali_ochiq": int(faol["hali_ochiq"]),
+                "qarorli_tender": int(faol["qarorli_tender"]),
                 "blind": int(db.scalar("""SELECT count(*) FROM review_pilot
-                    WHERE company_id = %(c)s AND rejim = 'blind'""",
-                    {"c": company_id}) or 0)}
+                    WHERE company_id = %(c)s AND avlod = %(a)s
+                      AND rejim = 'blind'""",
+                    {"c": company_id, "a": faol["avlod"]}) or 0)}
+
+    yangi_avlod = int(db.scalar("""
+        SELECT COALESCE(max(avlod), 0) + 1 FROM review_pilot_avlod
+         WHERE company_id = %(c)s""", {"c": company_id}) or 1)
 
     tanlangan: List[dict] = []
     korilgan: set = set()
@@ -895,22 +919,61 @@ def pilot_yarat(company_id: int, blind_n: int = BLIND_N,
                 aralash.append(guruhlar[g].pop(0))
         i += 1
 
+    # AVLOD REYESTRI AVVAL yoziladi: `review_pilot` qatorlari unga
+    # tayanadi va reyestrsiz avlod `v_pilot_avlod` da UMUMAN
+    # ko'rinmasdi — pilot "yo'q" bo'lib qolardi.
+    db.execute_returning("""
+        INSERT INTO review_pilot_avlod (company_id, avlod, yaratgan)
+        VALUES (%(c)s, %(a)s, %(k)s)
+        ON CONFLICT (company_id, avlod) DO NOTHING
+        RETURNING avlod""",
+        {"c": company_id, "a": yangi_avlod, "k": yaratgan})
+
     yozildi = 0
     for tartib, x in enumerate(aralash, 1):
         r = db.execute_returning("""
             INSERT INTO review_pilot
-                (company_id, tender_id, guruh, rejim, tartib)
-            VALUES (%(c)s, %(t)s, %(g)s, %(r)s, %(n)s)
-            ON CONFLICT (company_id, tender_id) DO NOTHING
+                (company_id, avlod, tender_id, guruh, rejim, tartib)
+            VALUES (%(c)s, %(a)s, %(t)s, %(g)s, %(r)s, %(n)s)
+            ON CONFLICT (company_id, avlod, tender_id) DO NOTHING
             RETURNING tender_id""",
-            {"c": company_id, "t": x["id"], "g": x["guruh"],
+            {"c": company_id, "a": yangi_avlod, "t": x["id"],
+             "g": x["guruh"],
              "r": "blind" if tartib <= blind_n else "anchored",
              "n": tartib})
         if r:
             yozildi += 1
 
     return {"qoshildi": yozildi, "jami": len(aralash), "mavjud": False,
+            "avlod": yangi_avlod, "holat": "faol",
             "blind": min(blind_n, len(aralash))}
+
+
+def pilot_arxivla(company_id: int, avlod: int, kim: str) -> dict:
+    """Avlodni ARXIVLAYDI — qatorlar O'CHIRILMAYDI.
+
+    NEGA KERAK: `eskirdi` va `tugallandi` dalildan HOSIL bo'ladi,
+    lekin ba'zan operator hali ochiq pilotni ATAYLAB yopmoqchi
+    bo'ladi (namuna noto'g'ri tanlangan, ustuvorlik o'zgardi).
+    Ungacha yagona yo'l qatorlarni o'chirish edi — ya'ni tarixiy
+    dalilni yo'qotish.
+
+    `kim` MAJBURIY: atributsiz arxivlash keyinchalik tiklab
+    bo'lmaydigan bo'shliq qoldirardi (baza CHECK i ham talab qiladi).
+    """
+    if not (kim or "").strip():
+        raise xatolar.Xato("FIELD_REQUIRED", {"maydon": "kim"})
+    r = db.execute_returning("""
+        UPDATE review_pilot_avlod
+           SET arxivlandi_at = now(), arxivlagan = %(k)s
+         WHERE company_id = %(c)s AND avlod = %(a)s
+           AND arxivlandi_at IS NULL
+        RETURNING avlod, arxivlandi_at""",
+        {"c": company_id, "a": avlod, "k": kim.strip()})
+    if not r:
+        raise xatolar.Xato("NOT_FOUND",
+                           {"nima": f"pilot avlodi {avlod} (yoki allaqachon arxivlangan)"})
+    return {"avlod": int(r["avlod"]), "holat": "arxivlandi"}
 
 
 def pilot_royxat(company_id: int) -> List[dict]:
@@ -928,13 +991,24 @@ def pilot_royxat(company_id: int) -> List[dict]:
         LEFT JOIN requirement_review_open o
                ON o.tender_id = p.tender_id AND o.company_id = p.company_id
         WHERE p.company_id = %(c)s
+          -- OXIRGI ARXIVLANMAGAN AVLOD. Busiz ro'yxat barcha
+          -- avlodlarni ARALASHTIRIB berardi va ko'ruvchi qaysi
+          -- to'plam ustida ishlayotganini bilmasdi.
+          AND p.avlod = COALESCE((
+                SELECT max(avlod) FROM review_pilot_avlod a
+                 WHERE a.company_id = p.company_id
+                   AND a.arxivlandi_at IS NULL), p.avlod)
         ORDER BY p.tartib""", {"c": company_id})
 
 
 def pilot_rejim(tender_id: int, company_id: int) -> str:
     """Bu tender qaysi rejimda ko'riladi. Pilotda bo'lmasa 'anchored'."""
     r = db.scalar("""SELECT rejim FROM review_pilot
-        WHERE company_id = %(c)s AND tender_id = %(t)s""",
+        WHERE company_id = %(c)s AND tender_id = %(t)s
+        -- Bir tender ikki avlodda bo'lishi mumkin; ENG YANGISI amal
+        -- qiladi, aks holda `blind`/`anchored` rejimi eski
+        -- avloddan kelib qolardi.
+        ORDER BY avlod DESC LIMIT 1""",
         {"c": company_id, "t": tender_id})
     return r or "anchored"
 
