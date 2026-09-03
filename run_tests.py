@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import io
 import os
 import subprocess
 import sys
@@ -76,8 +77,18 @@ REJIM = {
 }
 
 
-def yurgiz(yol: str, rejim_nomi: str) -> Tuple[str, int, float, str]:
-    """Bitta to'plamni yurgizadi. -> (nom, chiqish_kodi, sekund, oxirgi_qator)."""
+def yurgiz(yol: str, rejim_nomi: str) -> Tuple[str, int, float, str, str]:
+    """Bitta to'plamni yurgizadi.
+
+    -> (nom, chiqish_kodi, sekund, xulosa, TO'LIQ_CHIQISH)
+
+    TO'LIQ CHIQISH NEGA QAYTARILADI (2026-09-03 da o'lchandi):
+    `auth_test` to'plam ichida 128/132 berdi, yakka yurgizilganda esa
+    UCH MARTA 132/132. Qaysi 4 tekshiruv yiqilgani ANIQLANMADI —
+    yurgizuvchi bolaning chiqishini SAQLAMASDI, faqat oxirgi
+    xulosa qatorini olardi. Ya'ni flaky yiqilishni keyin tahlil
+    qilishning imkoni yo'q edi. Endi chiqish faylga yoziladi.
+    """
     nom = os.path.basename(yol)[:-3]
     args = [sys.executable, yol] + REJIM[rejim_nomi]
 
@@ -96,8 +107,19 @@ def yurgiz(yol: str, rejim_nomi: str) -> Tuple[str, int, float, str]:
                            timeout=TIMEOUT)
         kod = r.returncode
         chiqish = (r.stdout or "") + (r.stderr or "")
-    except subprocess.TimeoutExpired:
-        return nom, -1, time.time() - t0, f"TIMEOUT ({TIMEOUT}s)"
+    except subprocess.TimeoutExpired as e:
+        # BESHTA qiymat — normal yo'l bilan BIR XIL. Ilgari bu tarmoq
+        # TO'RTTA qaytarardi va `main()` uni beshta deb ochardi:
+        # to'plam TIMEOUT bo'lganda yurgizuvchining O'ZI `ValueError`
+        # bilan qulardi — ya'ni eng kerak paytda natija YO'QOLARDI.
+        qisman = ""
+        for oqim in (getattr(e, "stdout", None), getattr(e, "stderr", None)):
+            if isinstance(oqim, bytes):
+                qisman += oqim.decode("utf-8", "backslashreplace")
+            elif isinstance(oqim, str):
+                qisman += oqim
+        return (nom, -1, time.time() - t0, f"TIMEOUT ({TIMEOUT}s)",
+                qisman or f"(timeout {TIMEOUT}s — chiqish saqlanmadi)")
     dt = time.time() - t0
 
     # Natija qatorini topamiz. To'plamlar turli shakl ishlatadi,
@@ -115,7 +137,56 @@ def yurgiz(yol: str, rejim_nomi: str) -> Tuple[str, int, float, str]:
         # qatori yo'q, chunki to'plam o'rtada o'lgan.
         oxiri = chiqish.strip().splitlines()[-1:] or ["(chiqish bo'sh)"]
         xulosa = f"XULOSA QATORI YO'Q — {oxiri[0][:80]}"
-    return nom, kod, dt, xulosa
+    return nom, kod, dt, xulosa, chiqish
+
+
+def muhit_qoldigi() -> None:
+    """Oldingi yurishdan QOLGAN sinov hisoblarini KO'RSATADI.
+
+    NEGA KERAK (o'lchangan 2026-09-03). To'plam o'ldirilsa (timeout,
+    tashqi to'xtatish, Ctrl+C) sinovning `finally` bloki UMUMAN
+    bajarilmaydi va sinov kompaniyasi FAOL qolib ketadi. Keyingi
+    yurishda `sole_company_id()` ikki faol kompaniyani ko'rib rad
+    etadi va ALOQASI YO'Q to'plam (`catalog_kod_test`, 4-o'rinda)
+    yiqiladi. Sabab esa 30 ta to'plam narida — topish qiyin.
+
+    NEGA JIMGINA TOZALAMAYMIZ: qoldiqni avtomatik o'chirish uni
+    KO'RINMAS qiladi va "nega yiqildi" degan savol javobsiz qoladi.
+    Bu loyihada "mexanizm qoldiqni abadiylashtiradi" sinfi bir necha
+    marta chiqqan. Shuning uchun KO'RSATAMIZ va buyruqni beramiz,
+    o'zimiz tegmaymiz.
+
+    Baza yetib bo'lmasa jim o'tamiz: bu qulaylik, to'plamning sharti emas.
+    """
+    try:
+        import psycopg2                                     # noqa: PLC0415
+        dsn = os.environ.get("XT_DB_DSN")
+        if not dsn:
+            return
+        conn = psycopg2.connect(dsn, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, username FROM company_account "
+                    " WHERE active AND (username LIKE 'zz%' "
+                    "                   OR username LIKE '_mt_test_%') "
+                    " ORDER BY id")
+                qoldiq = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:                                       # noqa: BLE001
+        return
+
+    if not qoldiq:
+        return
+    print(f"  [!] OLDINGI YURISHDAN QOLDIQ: {len(qoldiq)} ta sinov hisobi FAOL.")
+    for cid, login in qoldiq:
+        print(f"      id={cid} {login}")
+    print("      Bu `sole_company_id()` ga tayangan to'plamlarni yiqitadi.")
+    idlar = ", ".join(str(c) for c, _ in qoldiq)
+    print(f"      Tozalash:  UPDATE company_account SET active=false "
+          f"WHERE id IN ({idlar});")
+    print()
 
 
 def main() -> None:
@@ -131,6 +202,8 @@ def main() -> None:
     ap.add_argument("--only", default="",
                     help="Faqat nomida shu bo'lak bor to'plamlar")
     ap.add_argument("--list", action="store_true", help="Ro'yxat, yurgizmaydi")
+    ap.add_argument("--natija-dir", default="",
+                    help="To'plam chiqishlari va JSON xulosa shu katalogga yoziladi (standart: _test_natija/)")
     args = ap.parse_args()
 
     if args.online and args.bazasiz:
@@ -163,19 +236,104 @@ def main() -> None:
           f"Unicode xavfsiz: {konsol.tekshir()}")
     print("=" * 78)
 
+    muhit_qoldigi()
+
+    # NATIJA KATALOGI. Har to'plamning TO'LIQ chiqishi saqlanadi —
+    # flaky yiqilishni KEYIN tahlil qilish uchun yagona yo'l.
+    natija_dir = args.natija_dir or os.path.join(HERE, "_test_natija")
+    os.makedirs(natija_dir, exist_ok=True)
+
     natijalar = []
     t0 = time.time()
     for yol in yollar:
-        nom, kod, dt, xulosa = yurgiz(yol, rejim_nomi)
+        nom, kod, dt, xulosa, chiqish = yurgiz(yol, rejim_nomi)
         natijalar.append((nom, kod, dt, xulosa))
+        try:
+            with io.open(os.path.join(natija_dir, f"{nom}.log"),
+                         "w", encoding="utf-8", newline="") as f:
+                f.write(chiqish)
+        except OSError as e:                                  # noqa: BLE001
+            print(f"  [!] {nom}: chiqish saqlanmadi: {e}")
         belgi = "OK  " if kod == 0 else "XATO"
         print(f"  [{belgi}] {nom:<24} {dt:6.1f}s  {xulosa}")
         sys.stdout.flush()
 
     yiqilgan = [n for n, k, _d, _x in natijalar if k != 0]
+
+    # MASHINA O'QIY OLADIGAN XULOSA — relis darvozasi shundan o'qiydi.
+    #
+    # `tekshiruv` XULOSA QATORIDAN ajratiladi ("NATIJA: 132/140").
+    # Ajratib bo'lmasa `null` qoladi va u NOLGA AYLANTIRILMAYDI:
+    # "o'lchanmadi" va "nol tekshiruv" BIR XIL KO'RINMASLIGI kerak —
+    # ikkinchisi to'plam o'rtada o'lganini bildiradi.
+    import json
+    import re
+
+    def _tekshiruv(x: str):
+        """Xulosa qatoridan (o'tdi, jami) ni ajratadi.
+
+        SHAKLLAR TURLICHA va ular BIR JOYGA KELTIRILMAGAN — har
+        to'plam o'z tarixiy formatini saqlaydi. Shuning uchun
+        ajratgich SHAKLGA emas, IKKI SONGA qaraydi:
+
+            "NATIJA: 132/132 o'tdi"
+            "NATIJA: 128 ta o'tdi, 4 ta xato"
+            "NATIJA: 149 ta tekshiruv o'tdi, 0 ta yiqildi"
+            "HAMMASI O'TDI: 29/29"
+
+        Ajratib bo'lmasa `None` — va u NOLGA AYLANTIRILMAYDI.
+        "O'lchanmadi" va "nol tekshiruv" bir xil ko'rinsa, o'rtada
+        o'lgan to'plam MUVAFFAQIYAT kabi o'qilardi.
+        """
+        m = re.search(r"(\d+)\s*/\s*(\d+)", x)
+        if m:
+            return {"otdi": int(m.group(1)), "jami": int(m.group(2))}
+        # Apostrof turlicha yoziladi (', ‘, ’) — `.` bilan olamiz.
+        m_ok = re.search(r"(\d+)[^\d]{0,24}?o.tdi", x, re.I)
+        m_bad = re.search(r"(\d+)[^\d]{0,16}?(?:xato|yiqildi)", x, re.I)
+        if m_ok and m_bad:
+            o, b = int(m_ok.group(1)), int(m_bad.group(1))
+            return {"otdi": o, "jami": o + b}
+        return None
+
+    xulosa_json = {
+        "rejim": rejim_nomi,
+        "boshlandi": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "davomiylik_sek": round(time.time() - t0, 1),
+        "toplam_jami": len(natijalar),
+        "toplam_otdi": len(natijalar) - len(yiqilgan),
+        "toplam_yiqildi": len(yiqilgan),
+        "yiqilgan": yiqilgan,
+        "toplamlar": [
+            {"nom": n, "kod": k, "sekund": round(d, 1), "xulosa": x,
+             "tekshiruv": _tekshiruv(x)}
+            for n, k, d, x in natijalar],
+    }
+    xulosa_json["tekshiruv_jami"] = sum(
+        (t["jami"] for t in (s2["tekshiruv"] for s2 in xulosa_json["toplamlar"])
+         if t), 0)
+    xulosa_json["tekshiruv_otdi"] = sum(
+        (t["otdi"] for t in (s2["tekshiruv"] for s2 in xulosa_json["toplamlar"])
+         if t), 0)
+    # XULOSA QATORI O'QILMAGAN to'plamlar ALOHIDA sanaladi — ular
+    # yuqoridagi yig'indiga KIRMAYDI va jimgina yo'qolmasligi kerak.
+    xulosa_json["tekshiruv_olchanmadi"] = [
+        s2["nom"] for s2 in xulosa_json["toplamlar"] if s2["tekshiruv"] is None]
+    try:
+        with io.open(os.path.join(natija_dir, "xulosa.json"), "w",
+                     encoding="utf-8", newline="") as f:
+            json.dump(xulosa_json, f, ensure_ascii=False, indent=2)
+    except OSError as e:                                      # noqa: BLE001
+        print(f"  [!] xulosa.json saqlanmadi: {e}")
+
     print("=" * 78)
     print(f"JAMI: {len(natijalar)} to'plam, {len(natijalar) - len(yiqilgan)} o'tdi, "
           f"{len(yiqilgan)} yiqildi · {time.time() - t0:.0f}s")
+    print(f"TEKSHIRUV: {xulosa_json['tekshiruv_otdi']}/"
+          f"{xulosa_json['tekshiruv_jami']}"
+          + (f" · o'lchanmadi: {', '.join(xulosa_json['tekshiruv_olchanmadi'])}"
+             if xulosa_json["tekshiruv_olchanmadi"] else ""))
+    print(f"Natijalar: {natija_dir}")
     if yiqilgan:
         print("YIQILGAN: " + ", ".join(yiqilgan))
     print("=" * 78)

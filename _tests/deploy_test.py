@@ -970,6 +970,68 @@ def test_mashq():
         shutil.rmtree(baza, ignore_errors=True)
 
 # =====================================================================
+def test_joylashuv_izchilligi():
+    """Proksi ortidagi sozlamalar ZIDDIYATI ISHGA TUSHISHDA tutilsin.
+
+    O'LCHANGAN XAVF (2026-09-03). Uchta sozlama bir-biriga bog'liq,
+    lekin uch xil joyda: `APP_PUBLIC_URL`, `TRUST_PROXY`,
+    `AUTH_COOKIE_SECURE`. `deploy/env/*.example` to'g'ri, lekin
+    haqiqiy `/etc/tenderai/<muhit>.env` QO'LDA tahrirlanadi
+    (`docs/deploy.md` §3) — ziddiyat qonuniy yo'l bilan paydo bo'ladi.
+
+    ENG XAVFLISI: `http://` + `AUTH_COOKIE_SECURE=1`. Brauzer
+    `Secure` cookie ni shifrlanmagan ulanish orqali YUBORMAYDI,
+    ya'ni xizmat ko'tariladi, `/health` va `/ready` YASHIL bo'ladi
+    va HECH KIM KIRA OLMAYDI. "Yashil, lekin o'lik" — bu loyihada
+    takrorlangan sinf, shuning uchun u TO'XTATADI.
+    """
+    bolim("Joylashuv izchilligi — ishga tushish tekshiruvi")
+    import os as _os
+    from api import main as M
+
+    eski = (M.COOKIE_SECURE, M.TRUST_PROXY, _os.environ.get("APP_ENV"))
+
+    def holat(muhit, url, secure, proxy):
+        _os.environ["APP_ENV"] = muhit
+        M.COOKIE_SECURE, M.TRUST_PROXY = secure, proxy
+        try:
+            M.joylashuv_tekshir(url)
+            return "otdi"
+        except M.JoylashuvXato:
+            return "toxtatdi"
+
+    try:
+        check("dev + http + secure -> O'TADI (localhost normal)",
+              holat("dev", "http://localhost:5173", True, False) == "otdi")
+        # ASOSIY TEKSHIRUV.
+        check("prod + http + AUTH_COOKIE_SECURE=1 -> TO'XTATADI",
+              holat("production", "http://tender.uz", True, True) == "toxtatdi",
+              "aks holda xizmat yashil, kirish esa IMKONSIZ bo'lardi")
+        check("prod + http + AUTH_COOKIE_SECURE=0 -> O'TADI (ichki tarmoq)",
+              holat("production", "http://tender.uz", False, True) == "otdi")
+        check("prod + https + TRUST_PROXY=1 -> O'TADI",
+              holat("production", "https://tender.uz", True, True) == "otdi")
+        # Bu ZIDDIYAT, lekin xizmat ISHLAYDI -> ogohlantirish, to'xtatish EMAS.
+        check("prod + https + TRUST_PROXY=0 -> O'TADI (ogohlantirish bilan)",
+              holat("production", "https://tender.uz", True, False) == "otdi",
+              "xizmat ishlaydi; nosozlik jurnalda ko'rinadi")
+    finally:
+        M.COOKIE_SECURE, M.TRUST_PROXY = eski[0], eski[1]
+        if eski[2] is None:
+            _os.environ.pop("APP_ENV", None)
+        else:
+            _os.environ["APP_ENV"] = eski[2]
+
+    # Namunalar shu sozlamalarni E'LON QILSIN — operator ularni
+    # ko'rmasa, qo'lda yozilgan faylda ular UMUMAN bo'lmasdi.
+    for nom in ("staging", "production"):
+        yol = os.path.join(ROOT, "deploy", "env", f"{nom}.env.example")
+        matn = io.open(yol, encoding="utf-8").read()
+        check(f"{nom}.env.example da TRUST_PROXY=1", "TRUST_PROXY=1" in matn)
+        check(f"{nom}.env.example da AUTH_COOKIE_SECURE=1",
+              "AUTH_COOKIE_SECURE=1" in matn)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Joylashtirish sinovi")
     rejim.bayroqlar(ap)
@@ -994,6 +1056,7 @@ def main():
     test_tashqi_nusxa()
     test_ogohlantirish()
     test_hujjat()
+    test_joylashuv_izchilligi()
     test_mashq()
 
     otdi = sum(1 for _n, ok, _d in _natija if ok)
