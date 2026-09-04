@@ -9,6 +9,7 @@ Dizayn:
   - Pool lifespan'da (main.py) init/close qilinadi.
 """
 import os
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
@@ -71,6 +72,26 @@ _KUTISH_SEK = float(os.environ.get("DB_POOL_WAIT_SEC", "10"))
 #: Qayta urinishlar orasidagi tanaffus.
 _TANAFFUS_SEK = 0.05
 
+#: Ulangandan keyin qaysi ROLGA tushiladi (bo'sh — tushilmaydi).
+#:
+#: Ishlab chiqarishda ilova `tai_app` bilan ULANISHI kerak. Lekin
+#: sinov muhitida `postgres` ishlatiladi va superuser huquq
+#: tekshiruvlarini chetlab o'tadi — grant asosidagi himoyalar
+#: sinalmay qoladi. `DB_SET_ROLE=tai_app` shu bo'shliqni yopadi.
+_SET_ROLE = (os.environ.get("DB_SET_ROLE") or "").strip()
+
+
+def _quote_ident(nom: str) -> str:
+    """Rol nomini SQL identifikatori sifatida qo'shtirnoqlaydi.
+
+    `SET ROLE` parametr QABUL QILMAYDI (u utility buyrug'i), ya'ni
+    nom matnga qo'shiladi. Shuning uchun u YOPIQ ro'yxat bilan
+    cheklanadi: faqat harf, raqam va pastki chiziq.
+    """
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", nom):
+        raise DBUnavailable(f"`DB_SET_ROLE` nomi yaroqsiz: {nom!r}")
+    return '"' + nom + '"'
+
 
 @contextmanager
 def get_conn():
@@ -99,11 +120,50 @@ def get_conn():
                     f"DB hovuzi {_KUTISH_SEK:.0f}s davomida bo'shamadi "
                     f"(band): {e}") from e
             time.sleep(_TANAFFUS_SEK)
+    # ILOVA ROLIGA TUSHISH — ixtiyoriy, `DB_SET_ROLE` bilan.
+    #
+    # NEGA KERAK (o'lchandi 2026-09-04): `.env` `postgres` SUPERUSER
+    # bilan ulanadi. Superuser huquq tekshiruvlarini CHETLAB o'tadi,
+    # ya'ni grant asosidagi himoyalar HECH QACHON sinalmagan.
+    # `auth_test` da ERP chegarasi uchun ikki shox bor — "huquq bilan
+    # yopiq" va "sanoqni solishtirish" — va superuser tufayli DOIM
+    # ikkinchisi, ZAIF shoxi ishlagan.
+    #
+    # `tai_app` roli LOGIN QILA OLMAYDI (`rolcanlogin = false`) va
+    # a'zosi ham yo'q, ya'ni u bilan ULANIB bo'lmaydi. `SET ROLE`
+    # esa ulanishni talab qilmaydi va superuser imtiyozini SHU
+    # SESSIYA uchun tushiradi — huquq shoxi aynan shunda sinaladi.
+    #
+    # Ulanish hovuzga QAYTGANDA `RESET ROLE` qilinadi: rol qolib
+    # ketsa keyingi chaqiruvchi buni bilmasdan cheklangan huquq
+    # bilan ishlardi (11-sinf — tiklash mexanizmi qoldiqni
+    # abadiylashtiradi).
+    if conn is not None and _SET_ROLE:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET ROLE %s" % _quote_ident(_SET_ROLE))
+            conn.commit()
+        except psycopg2.Error as e:
+            _pool.putconn(conn)
+            raise DBUnavailable(
+                f"`DB_SET_ROLE={_SET_ROLE}` qo'llanmadi: {e}") from e
     try:
         yield conn
     finally:
         if conn is not None:
-            _pool.putconn(conn)
+            if _SET_ROLE:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("RESET ROLE")
+                    conn.commit()
+                except psycopg2.Error:
+                    # Ulanish buzilgan — hovuzga qaytarmaymiz, aks
+                    # holda keyingi chaqiruvchi noma'lum rol bilan
+                    # ishlardi.
+                    _pool.putconn(conn, close=True)
+                    conn = None
+            if conn is not None:
+                _pool.putconn(conn)
 
 
 def query(sql: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:

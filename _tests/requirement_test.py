@@ -105,6 +105,12 @@ def section(t: str) -> None:
     print(f"\n=== {t} ===")
 
 
+#: Fikstura tenderi — korpusda BO'LMAYDIGAN, ataylab katta id.
+#: Haqiqiy `tender.id` lar 3-11 xonali; bu 15 xonali va `ZZTEST`
+#: nomi bilan yuradi, ya'ni jonli qator bilan ARALASHMAYDI.
+ZZ_TENDER_ID = 999_000_000_000_001
+
+
 def _bosh_ochiq_tender():
     """Talabi yo'q OCHIQ tender — fikstura uchun.
 
@@ -115,10 +121,39 @@ def _bosh_ochiq_tender():
     "navbatga tushmadi" deb yiqilardi — sabab esa FIKSTURADA
     bo'lardi, kodda emas. Bunday yiqilish eng chalg'ituvchi turi.
     """
-    return db.scalar("""SELECT t.id FROM tender t
+    tid = db.scalar("""SELECT t.id FROM tender t
         WHERE (t.close_at IS NULL OR t.close_at > now())
           AND NOT EXISTS (SELECT 1 FROM tender_requirement r
                           WHERE r.tender_id = t.id) LIMIT 1""")
+    if tid:
+        return tid
+
+    # HOVUZ QURISA SINOV O'Z TENDERINI YARATADI.
+    #
+    # O'LCHANGAN NUQSON (2026-09-04). Fikstura mavjud korpusdan
+    # QARZ olardi va shart "ochiq + talabsiz" edi. Vaqt o'tishi
+    # bilan bunday tender qolmaydi: o'sha kuni oxirgi 48 soatda
+    # 263 ta tender YOPILGAN va hovuz 3 taga tushgan — sinovning
+    # oldingi bo'limlari o'shalarni band qilgach, G bo'limi
+    # "bo'sh tender topilmadi" deb yiqilgan.
+    #
+    # Bu YANGI SINF: sinov KODGA emas, HOVUZ HOLATIGA bog'liq.
+    # Yiqilish sababi kodda emasligi uni eng chalg'ituvchi turga
+    # aylantiradi.
+    #
+    # `ZZTEST-` prefiksi ATAYLAB: `grill-me` 11-sinfi — belgi
+    # QONUNIY qiymat bo'lmasin (`Karimov` 30 ta haqiqiy qatorga
+    # tegib ketgan edi).
+    yangi = db.execute_returning("""
+        INSERT INTO tender (id, name, status, close_at, source_platform,
+                            source_id, raw_json, fetched_at, first_seen_at)
+        VALUES (%(id)s, 'ZZTEST fikstura — talabsiz ochiq tender',
+                'open', now() + interval '30 days', 'uzex',
+                %(id)s, '{}'::jsonb, now(), now())
+        ON CONFLICT (id) DO UPDATE
+           SET close_at = now() + interval '30 days'
+        RETURNING id""", {"id": ZZ_TENDER_ID})
+    return yangi["id"] if yangi else None
 
 
 # =====================================================================
@@ -588,8 +623,12 @@ def test_isteemolchilar():
                       encoding="utf-8").read()
     check("compare_tenders talablarni qo'shadi",
           '_req.qisqa(tid, company_id)' in chatsrc)
+    # IDENTIFIKATOR BIR JOYDA HAL QILINADI (2026-09-04): barcha
+    # tool `_tender_id_ol()` dan o'tadi va `int(args[...])` kodda
+    # QOLMAGAN. Shart shunga moslashtirildi — chaqiruv bor-yo'qligi
+    # tekshiriladi, uning ESKI SHAKLI emas.
     check("get_tender talablarni qo'shadi",
-          '_talab_xulosa(int(args["tender_id"])' in chatsrc)
+          '_talab_xulosa(tid, ctx.company_id)' in chatsrc)
     check("tool ta'rifida talablar eslatilgan",
           "AJRATILGAN TALABLAR" in chatsrc)
 
@@ -1664,6 +1703,48 @@ def test_navbat_filtri():
         tutildi = True
     check("noto'g'ri `manba` RAD ETILADI", tutildi)
 
+    # --- MANBA SONLARI YOLG'ON GAPIRMASIN ----------------------------
+    # O'LCHANGAN NUQSON (2026-09-03). "Manba" filtri ko'rinishdagi
+    # `naqshdan`/`modeldan` ustunlariga qarab qo'shilgan edi, lekin
+    # ular HAQIQATAN farq qiladimi degan savol berilmagan. Javob:
+    # YO'Q — kutayotgan talablarning HAMMASI `naqsh` dan (LLM
+    # qatlami pullik va qulflangan). Ya'ni "Naqshdan" jamini
+    # o'zgartirmasdi, "Modeldan" esa ro'yxatni bo'shatardi va
+    # foydalanuvchi ikkalasini ham BUZUQ deb xabar qildi.
+    #
+    # Filtr olib tashlanmadi, ROST GAPIRADIGAN qilindi: interfeys
+    # har variant yoniga sonini yozadi va nolini o'chiradi.
+    #
+    # ASOSIY INVARIANT: yorliqdagi son AYNAN o'sha filtr beradigan
+    # natija bo'lsin. Ular ajralsa yorliq yolg'on bo'lardi — bu
+    # filtrning o'zi ishlamaganidan YOMONROQ.
+    manbalar = R.review_queue_manbalar(A)
+    for nom in ("naqsh", "llm"):
+        _, j = R.review_queue(A, 500, manba=nom)
+        check(f"`manbalar[{nom}]` filtr natijasiga TENG",
+              manbalar[nom] == j, f"yorliq={manbalar[nom]}, natija={j}")
+
+    # SONLAR BOSHQA FILTRLARNI HISOBGA OLADI: savol "shu manbani
+    # tanlasam nechta qoladi", "umuman nechta bor" emas.
+    m_past = R.review_queue_manbalar(A, faqat_past=True)
+    for nom in ("naqsh", "llm"):
+        _, j = R.review_queue(A, 500, manba=nom, faqat_past=True)
+        check(f"`past` bilan ham `manbalar[{nom}]` TENG",
+              m_past[nom] == j, f"yorliq={m_past[nom]}, natija={j}")
+        check(f"`past` bilan `manbalar[{nom}]` kengaymaydi",
+              m_past[nom] <= manbalar[nom])
+
+    # INTERFEYS NOLNI O'CHIRSIN — son yozilib, tugma bosiladigan
+    # qolsa foydalanuvchi yana "ishlamayapti" deb o'qirdi.
+    tsx = io.open(os.path.join(ROOT, "frontend", "src", "components",
+                               "RequirementReview.tsx"), encoding="utf-8").read()
+    check("interfeys manba sonini KO'RSATADI", "manbalar.naqsh" in tsx
+          and "manbalar.llm" in tsx)
+    check("interfeys NOL variantni O'CHIRADI",
+          "disabled={!manbalar.naqsh}" in tsx
+          and "disabled={!manbalar.llm}" in tsx,
+          "bosiladigan lekin natijasiz variant BUZUQ deb o'qiladi")
+
     # --- "SIZGA MOS" FILTRI -------------------------------------------
     # To'plam ta'rifi `kodlash.mos_tender_idlari()` da — bu yerda
     # TAKRORLANMAYDI. Hudud qoidasi ikki joyda yozilgani uchun
@@ -1808,6 +1889,37 @@ def tozala():
                 "DELETE FROM tender_requirement_run WHERE company_id=%(c)s "
                 "AND tender_id=%(t)s RETURNING company_id", {"c": cid, "t": tid})
         n += 1
+    # FIKSTURA TENDERI HAM O'CHIRILADI.
+    #
+    # U `status='open'` va muddati 30 kun keyin — ya'ni tozalanmasa
+    # tender ro'yxatida va broker navbatida KO'RINARDI. Sinov o'z
+    # ma'lumotini o'zi qursa, o'zi YIG'ISHTIRISHI ham shart.
+    #
+    # `tender_requirement` dan keyin o'chiriladi: tartib muhim,
+    # aks holda tashqi kalit to'sardi.
+    zz = db.execute_returning(
+        "DELETE FROM tender WHERE id = %(id)s RETURNING id",
+        {"id": ZZ_TENDER_ID})
+    # TOZALANGANI TASDIQLANADI — "o'chirdim" yetarli emas.
+    #
+    # `DELETE` yiqilishi mumkin (tashqi kalit, huquq, ulanish) va
+    # `finally` ichida bo'lgani uchun bu JIMGINA o'tib ketardi:
+    # sinov "PASS" deb tugab, korpusda ochiq ZZTEST tenderi
+    # qolardi. Shuning uchun YO'QLIGI alohida so'raladi.
+    #
+    # Bu 2-sinf ("xato chiqmadi" != "ish bajarildi") ning tozalash
+    # bosqichidagi ko'rinishi.
+    qoldi = db.scalar("SELECT count(*) FROM tender WHERE id = %(id)s",
+                      {"id": ZZ_TENDER_ID})
+    if qoldi:
+        print(f"  [!] FIKSTURA TENDERI QOLDI ({ZZ_TENDER_ID}) — "
+              f"u ochiq holatda va tender ro'yxatida KO'RINADI. "
+              f"Qo'lda o'chiring: DELETE FROM tender WHERE id = "
+              f"{ZZ_TENDER_ID};")
+    elif zz:
+        print(f"Fikstura tenderi o'chirildi va yo'qligi tasdiqlandi: "
+              f"{ZZ_TENDER_ID}")
+
     qoldiq = db.scalar("SELECT count(*) FROM tender_requirement")
     print(f"\nTozalandi: {n} ta juftlik, {ochirildi} ta SINOV qatori "
           f"o'chirildi, {tegilmadi} ta mavjud qator TEGILMADI. "

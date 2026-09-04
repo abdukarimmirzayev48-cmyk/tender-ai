@@ -414,7 +414,14 @@ def prompt_block(tender_id: int, company_id: int,
     "talablar yo'q" degan yolg'on taassurot bo'lmaydi.
     """
     rows = db.query("""
-        SELECT name, method, attrs->>'qiymat' AS qiymat,
+        SELECT
+               -- KESILGANINI BILISH UCHUN. Oyna funksiyasi `LIMIT`
+               -- dan OLDIN hisoblanadi, ya'ni bu FILTRDAN o'tgan
+               -- HAMMASINING soni. Alohida `COUNT` so'rovi kerak
+               -- emas va ikki so'rov orasida ma'lumot o'zgarib
+               -- ketish ehtimoli ham yo'q.
+               count(*) OVER () AS _jami,
+               name, method, attrs->>'qiymat' AS qiymat,
                attrs->>'tur' AS tur, is_mandatory, confidence,
                file_ref, char_start, review_status, corrected_value,
                -- MODELGA AYTILADIGAN GAP DALILGA TAYANSIN.
@@ -469,6 +476,26 @@ def prompt_block(tender_id: int, company_id: int,
         izoh.append(f"DIQQAT: {past} ta talabning ishonchi past — ular "
                     "hujjatda TO'LDIRILMAGAN yoki chalkash yozilgan. "
                     "Ularni ANIQ ma'lumot sifatida ishlatma.")
+    # KESILGANI ALOHIDA AYTILADI.
+    #
+    # Quyidagi umumiy ogohlantirish ("hujjatning barchasi emas")
+    # BOSHQA narsa haqida: u hujjatda AJRATILMAGAN shartlar
+    # bo'lishi mumkinligini aytadi. Bu yerdagi kesim esa
+    # AJRATILGAN talablarning bir qismi ko'rsatilmaganini bildiradi
+    # — va uni aytmaslik yomonroq: model 40 ta talabni TO'LIQ
+    # ro'yxat deb o'qib, "boshqa majburiy shart yo'q" degan
+    # xulosaga kelardi.
+    #
+    # O'lchandi (2026-09-04): 4 ta tenderda 40 dan ko'p talab bor
+    # (eng kattasi 44). Bu blok PULLIK Go/No-Go promptiga kiradi.
+    jami = int(rows[0].get("_jami") or len(rows))
+    kesildi = max(0, jami - len(rows))
+    if kesildi:
+        izoh.append(
+            f"DIQQAT: bu tenderda {jami} ta ajratilgan talab bor, "
+            f"yuqorida FAQAT {len(rows)} tasi (majburiy va ishonchi "
+            f"yuqori bo'lganlari). Qolgan {kesildi} tasi bu yerda YO'Q "
+            f"— 'boshqa shart yo'q' deb XULOSA CHIQARMA.")
     izoh.append("Bu ro'yxat hujjatning BARCHASI emas — quyidagi xom "
                 "matnda qo'shimcha shartlar bo'lishi mumkin.")
     return "\n".join(qatorlar + izoh)
@@ -794,6 +821,53 @@ def review_queue(company_id: int, limit: int = 100,
         f" {SQL_REVIEW_QUEUE_FROM} {where} {SQL_REVIEW_QUEUE_TARTIB}"
         f" LIMIT %(limit)s", {**params, "limit": limit})
     return qatorlar, int(jami)
+
+
+def review_queue_manbalar(company_id: int, q: Optional[str] = None,
+                          region: Optional[str] = None,
+                          faqat_past: bool = False, otgan: bool = False,
+                          katalog: bool = False) -> Dict[str, int]:
+    """Har manba QANCHA natija berishini oldindan aytadi.
+
+    O'LCHANGAN NUQSON (2026-09-03). "Manba" filtri qo'shilganda
+    ko'rinishdagi `naqshdan` / `modeldan` ustunlariga qaraldi, lekin
+    ular HAQIQATAN farq qiladimi degan savol berilmadi. Javob:
+    YO'Q.
+
+        naqsh   document  pending_review  8455
+        reyestr api       extracted       2654   <- ko'rikka kirmaydi
+        naqshdan>0: 989 tender · modeldan>0: 0 tender
+
+    Ko'rik navbatiga faqat `pending_review` qatorlari kiradi, ular
+    esa faqat `naqsh` va `llm` dan chiqadi — reyestr qatorlari
+    `extracted` bilan yoziladi. LLM qatlami pullik va qulflangan
+    (`api/ai.paid_guard`), ya'ni hech qachon yurmagan. Natijada
+    "Naqshdan" hech narsani o'zgartirmasdi, "Modeldan" esa ro'yxatni
+    bo'shatardi — foydalanuvchi ikkalasini ham BUZUQ deb o'qidi.
+
+    FILTR OLIB TASHLANMADI, ROST GAPIRADIGAN QILINDI. LLM ajratish
+    yurgan kunda u o'z-o'zidan foydali bo'ladi; bugun esa "Modeldan
+    (0)" yozuvi sababni AYTADI. Hech narsa o'zgartira olmaydigan
+    boshqaruv elementi — boshqaruv yo'qligidan YOMONROQ: u
+    interfeys buzuq degan xulosani o'rgatadi.
+
+    SONLAR BOSHQA FILTRLARNI HISOBGA OLADI: savol "shu manbani
+    tanlasam nechta qoladi", "umuman nechta bor" emas.
+    """
+    katalog_ids = None
+    if katalog:
+        from api import kodlash
+        katalog_ids = sorted(
+            kodlash.mos_tender_idlari(company_id, only_open=not otgan))
+    # `manba=None` — shartning O'ZI chiqarib tashlanadi, aks holda
+    # har variant o'zini o'zi sanardi.
+    where, params = _review_queue_where(company_id, q, region, faqat_past,
+                                        None, otgan, katalog_ids)
+    r = db.query_one(
+        f"SELECT count(*) FILTER (WHERE {MANBA_FILTRLARI['naqsh']}) AS naqsh,"
+        f"       count(*) FILTER (WHERE {MANBA_FILTRLARI['llm']})   AS llm"
+        f" {SQL_REVIEW_QUEUE_FROM} {where}", params) or {}
+    return {"naqsh": int(r.get("naqsh") or 0), "llm": int(r.get("llm") or 0)}
 
 
 def review_items(tender_id: int, company_id: int) -> List[dict]:

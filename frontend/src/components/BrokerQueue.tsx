@@ -318,9 +318,31 @@ export default function BrokerQueue({
                 {t('broker.agreement', { n: moslik.inson_qarorlari })}
                 {moslik.qatorlar.map((r) => (
                   <span key={`${r.ai_manba}-${r.ai_qaror}`} className="ml-2">
-                    {r.ai_qaror}: <b className="tabular text-foreground">
-                      {r.moslik_foiz ?? 0}%
-                    </b>
+                    {r.ai_qaror}:{' '}
+                    {/* HISOBLANMAGAN QIYMAT O'ZINI TUSHUNTIRADI.
+                        Ilgari bu yerda `{r.moslik_foiz ?? 0}%` turardi
+                        va NULL ni `0%` ga aylantirardi — ya'ni
+                        "o'lchanmadi" broker uchun "AI 0% da haq"
+                        bo'lib ko'rinardi. `review` da bu HAR DOIM
+                        shunday edi: formula unga nolni KAFOLATLAYDI. */}
+                    {/* SHART SABABGA QO'YILGAN, foizga emas.
+                        `moslik_foiz === null` bo'yicha tekshirilganda
+                        TypeScript `foiz_yoq_sababi` ni hamon
+                        `null` bo'lishi mumkin deb ko'rardi va
+                        kalit `broker.noPct.null` ga aylanardi —
+                        ya'ni tarjimasiz satr. Sababning o'zi
+                        mavjudligini so'raymiz: shunda kalit
+                        HAR DOIM haqiqiy. */}
+                    {r.foiz_yoq_sababi ? (
+                      <span title={t(`broker.noPct.${r.foiz_yoq_sababi}`,
+                                     { n: r.jami, kerak: moslik.kerakli_qaror })}>
+                        {t(`broker.noPct.${r.foiz_yoq_sababi}.short`)}
+                      </span>
+                    ) : (
+                      <b className="tabular text-foreground">
+                        {r.moslik_foiz ?? '—'}%
+                      </b>
+                    )}
                   </span>
                 ))}
               </>

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react'
 import { api, getToken, setUnauthorizedHandler } from '@/api'
 import type { CompanyAccount } from '@/api'
+import type { ChatManba } from '@/hooks/useChatStream'
 import Icon from './components/Icon'
 import Sidebar from './components/Sidebar'
 import Filters from './components/Filters'
@@ -120,6 +121,13 @@ export default function App() {
   // AI-Chat paneli. `null` — yopiq; son — o'sha tender konteksti;
   // `0` — umumiy suhbat (kontekstsiz).
   const [chatFor, setChatFor] = useState<number | null>(null)
+  /**
+   * Chat QAYERDAN ochilgani. `chatFor` bilan birga yuradi, lekin
+   * ALOHIDA holat: `chatFor` faqat "qaysi tender" ni biladi,
+   * "nima uchun" ni emas. Server ikkinchisiga qarab tizim blokini
+   * quradi (`manba='gonogo'` -> saqlangan tahlil sharhi).
+   */
+  const [chatManba, setChatManba] = useState<ChatManba | null>(null)
 
   // KIRISH (auth-2). `undefined` — hali tekshirilmadi (token bor, so'rov
   // ketyapti); `null` — kirilmagan. Ikkisini ajratmasak, sahifa har
@@ -574,7 +582,8 @@ export default function App() {
                           flex-col border-l shadow-xl">
             <ChatPanel
               tenderId={chatFor || null}
-              onClose={() => setChatFor(null)}
+              manba={chatManba ?? undefined}
+              onClose={() => { setChatFor(null); setChatManba(null) }}
               onOpenCitation={(c) => setSelected({ id: c.tender_id })} />
           </div>
         </Suspense>
@@ -584,7 +593,7 @@ export default function App() {
       {chatFor === null && (
         <button
           type="button"
-          onClick={() => setChatFor(0)}
+          onClick={() => { setChatFor(0); setChatManba('global') }}
           title={t('chat.title')}
           className="fixed bottom-5 right-5 z-30 flex h-12 w-12 items-center
                      justify-center rounded-full bg-primary text-primary-foreground
@@ -599,7 +608,8 @@ export default function App() {
           <TenderDrawer
             id={selected.id} match={selected.match}
             onOpenDocuments={openDocuments}
-            onAskAi={(tid) => setChatFor(tid)}
+            onAskAi={(tid, m) => { setChatFor(tid)
+                                 setChatManba(m ?? 'panel') }}
             onClose={() => {
               setSelected(null)
               // Bildirishnomadan kelgan ?tender= parametrini olib tashlaymiz

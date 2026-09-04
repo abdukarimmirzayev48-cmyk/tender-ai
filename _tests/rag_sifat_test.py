@@ -116,22 +116,56 @@ def test_toplam():
     cs = holatlar()
     check("to'plam mavjud va bo'sh emas", len(cs) >= 18, f"{len(cs)} holat")
 
+    #: Hujjatdan javob qidiradigan guruhlar. F/G bundan TASHQARIDA:
+    #: ular tool tanlashni o'lchaydi va tenderga bog'lanmasligi
+    #: mumkin.
+    RAG_GURUHLARI = {"A", "B", "C", "D", "E"}
+
+    #: To'plamda BO'LISHI SHART bo'lgan guruhlar — RAG (A-E) va
+    #: tool yo'li (F, G). Guruh o'chirilsa sinov YIQILADI.
+    KUTILGAN_GURUHLAR = RAG_GURUHLARI | {"F", "G"}
+
     guruhlar = {}
     for c in cs:
         guruhlar[c["guruh"]] = guruhlar.get(c["guruh"], 0) + 1
     # BEShTA GURUH ATAYLAB: javob bor / yo'q / taxmin oson /
     # ziddiyat / injection. Faqat "javob bor" holatlar bilan
     # o'lchash RAD ETISHNI umuman sinamasdi.
-    check("beshta guruh ham bor",
-          set(guruhlar) == {"A", "B", "C", "D", "E"}, str(guruhlar))
+    # RAG GURUHLARI (A-E) MAJBURIY. F va G keyinroq qo'shildi va
+    # ular BOShQA narsani o'lchaydi — javob matnini emas, modelning
+    # TOOL YO'LINI (`run_eval.baho`, `tur = "tool_yoli"`).
+    #
+    # Shart TENGLIKDAN QAMRAB OLISHGA o'zgartirildi: aks holda har
+    # yangi guruh shu sinovni yiqitardi va u "RAG sifati buzildi"
+    # degan YOLG'ON signal bo'lardi.
+    # KUTILGAN GURUHLAR ANIQ YOZILADI, "kamida beshta" EMAS.
+    #
+    # Ilgari shart TENGLIK edi va har yangi guruh sinovni
+    # yiqitardi. Uni `>=` ga aylantirish teskari nuqson berardi:
+    # A-E o'chirilsa tutilardi, F yoki G o'chirilsa YO'Q. Ro'yxat
+    # to'liq yozilgani uchun IKKALA yo'nalish ham qo'riqlanadi.
+    check("kutilgan guruhlarning HAMMASI bor",
+          KUTILGAN_GURUHLAR <= set(guruhlar),
+          f"yo'q: {sorted(KUTILGAN_GURUHLAR - set(guruhlar))}")
+    # YANGI guruh qo'shilsa ham ko'rinsin — yiqitmaydi, AYTADI.
+    yangi = set(guruhlar) - KUTILGAN_GURUHLAR
+    if yangi:
+        print(f"       [i] ro'yxatda YO'Q guruh(lar): {sorted(yangi)} — "
+              f"`KUTILGAN_GURUHLAR` ga qo'shing")
 
     javobli = [c for c in cs if (c.get("kutilgan") or {}).get("manba_matn")]
     check("ground truth'li holat bor", len(javobli) >= 7,
           f"{len(javobli)} ta")
 
     # HAR HOLAT TEKSHIRILADIGAN bo'lsin: savol, tender, kutilgan tur.
+    #
+    # `tender_id` FAQAT RAG guruhlarida majburiy. F guruhi ATAYLAB
+    # GLOBAL sessiyada yuradi (`tender_id = None`): u tenderni
+    # xabardagi raqamdan hal qilishni o'lchaydi, ya'ni tender
+    # oldindan berilsa sinovning MA'NOSI yo'qolardi.
     yomon = [c["id"] for c in cs
-             if not c.get("savol") or not c.get("tender_id")
+             if not c.get("savol")
+             or (not c.get("tender_id") and c["guruh"] in RAG_GURUHLARI)
              or not (c.get("kutilgan") or {}).get("tur")]
     check("har holat to'liq (savol + tender + kutilgan tur)",
           not yomon, str(yomon))

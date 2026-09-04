@@ -96,3 +96,6 @@
 770	0077_pilot_tartib	schema_patch_pilot_tartib.sql
 780	0078_kod_pilot_atribut	schema_patch_kod_pilot_atribut.sql
 790	0079_kod_provenans	schema_patch_kod_provenans.sql
+800	0080_chat_manba	schema_patch_chat_manba.sql
+810	0081_chat_tiklash	schema_patch_chat_tiklash.sql
+820	0082_chat_tiklash_2	schema_patch_chat_tiklash_2.sql

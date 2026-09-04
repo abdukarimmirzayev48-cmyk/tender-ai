@@ -63,6 +63,13 @@ PASS, FAIL, BLOK = "PASS", "FAIL", "BLOKLANGAN"
 #: Kod o'zgargan bo'lishi mumkin, natija esa eskisiniki.
 SINOV_YANGILIK_SOAT = 6.0
 
+#: `tsc` kamida shuncha LOYIHA faylini ko'rishi kerak.
+#:
+#: Qattiq son mo'rt (9-sinf), lekin bu yerda u chegara emas —
+#: NOL QAMROV signali. Frontendda 75 ta `.ts/.tsx` bor; 20 dan
+#: kam ko'rilsa buyruq bo'sh konfiguratsiyaga urilgan.
+TSC_ENG_KAM_FAYL = 20
+
 #: ETL foydali yurish ulushi. Pastroq — ma'lumot eskirishi mumkin.
 ETL_MIN_FOIZ = 95.0
 
@@ -190,6 +197,40 @@ def gate_manba(kutilgan_ref: str) -> Tuple[str, List[str]]:
 # =====================================================================
 # GATE 2 — SINOVLAR
 # =====================================================================
+def _tsc_qamrovi() -> int:
+    """`tsc` nechta LOYIHA faylini ko'radi.
+
+    QAMROV RAQAMI — natijaning o'zi emas. Sinov to'plami "0 xato"
+    desa, savol qoladi: 0 xato nechta fayldan? Multitenant
+    skanerida bu allaqachon qilingan (`69 -> 139 funksiya`), bu
+    yerda ham kerak: qamrovsiz yashil raqam ISHONCHSIZ.
+
+    `--listFiles` kutubxona va `node_modules` fayllarini ham
+    chiqaradi — ular SANALMAYDI, aks holda bo'sh konfiguratsiya
+    ham yuzlab fayl ko'rsatardi va butun tekshiruv ma'nosini
+    yo'qotardi.
+
+    Yiqilsa `-1` qaytaradi: "o'lchay olmadim" ni "0 fayl" ga
+    aylantirish shu faylning o'zi qo'riqlayotgan xato bo'lardi.
+    """
+    fe = os.path.join(HERE, "frontend")
+    try:
+        r = subprocess.run(
+            ["npx", "tsc", "-p", "tsconfig.app.json", "--noEmit",
+             "--listFiles"],
+            cwd=fe, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", shell=True, timeout=300)
+    except Exception:                                     # noqa: BLE001
+        return -1
+    src = os.path.join(fe, "src").replace("\\", "/").lower()
+    n = 0
+    for ln in (r.stdout or "").split("\n"):
+        y = ln.strip().replace("\\", "/").lower()
+        if y.startswith(src) and "node_modules" not in y:
+            n += 1
+    return n
+
+
 def gate_sinov(frontend: bool) -> Tuple[str, List[str]]:
     dalil: List[str] = []
     holat = PASS
@@ -207,6 +248,48 @@ def gate_sinov(frontend: bool) -> Tuple[str, List[str]]:
     if d.get("rejim") != "toliq":
         holat = FAIL
         dalil.append("  rejim `toliq` EMAS — tarmoq/baza sinovlari yurmagan")
+    # QAMROV: HAMMA TO'PLAM YURDIMI.
+    #
+    # Filtrlangan yurish ("1/43 to'plam") xulosada "1 o'tdi, 0
+    # yiqildi" bo'lib chiqadi va darvoza uni MUVAFFAQIYAT deb
+    # o'qirdi. `tsc -p tsconfig.json` bilan bir sinf: yashil
+    # raqam, nol qamrov.
+    mavjud = d.get("toplam_mavjud")
+    otkazildi = d.get("toplam_otkazildi") or []
+    if mavjud is None:
+        holat = FAIL
+        dalil.append("  qamrov O'LCHANMAGAN — `run_tests.py` eski versiyada "
+                     "yurgizilgan (`toplam_mavjud` yo'q)")
+    elif otkazildi:
+        holat = FAIL
+        dalil.append(f"  QAMROV TO'LIQ EMAS: {d.get('toplam_jami')}/{mavjud} "
+                     f"to'plam yurgan, {len(otkazildi)} tasi o'tkazilgan "
+                     f"(filtr: {d.get('filtr')!r})")
+    # MAXRAJ KAMAYGANI — `glob` bilan topiladigan to'plam soni
+    # tushgan. `43/43` yashil qolaveradi, lekin qamrov kichraygan.
+    yoqoldi = d.get("toplam_yoqoldi")
+    if yoqoldi:
+        holat = FAIL
+        dalil.append(f"  TO'PLAM YO'QOLGAN: oldingi yurishda "
+                     f"{d.get('toplam_mavjud_oldingi')} ta edi, hozir "
+                     f"{mavjud} ta ({yoqoldi} ta kam). Sinov fayli "
+                     f"o'chirilgan yoki nomi o'zgargan bo'lishi mumkin.")
+    # ROL — tekshiruv soni SHUNGA bog'liq (`postgres` 3402,
+    # `tai_app` 3280). Rol yozilmagan bo'lsa taqqoslash ham yo'q.
+    rol = d.get("rol") or {}
+    dalil.append(f"rol: {rol.get('nom') or 'NOMA`LUM'}"
+                 + (" (SUPERUSER)" if rol.get("superuser") else ""))
+    if rol.get("superuser"):
+        holat = FAIL
+        dalil.append("  SINOVLAR SUPERUSER BILAN YURGAN — grant asosidagi "
+                     "himoyalar (ERP chegarasi) SINALMAGAN. "
+                     "`DB_SET_ROLE=tai_app` bilan qayta yurgizing.")
+    teks_yoq = d.get("tekshiruv_yoqoldi")
+    if teks_yoq:
+        holat = FAIL
+        dalil.append(f"  TEKSHIRUV YO'QOLGAN: bir xil rejimda "
+                     f"{d.get('tekshiruv_jami_oldingi')} dan "
+                     f"{d.get('tekshiruv_jami')} ga tushdi ({teks_yoq} ta).")
     if yosh_soat > SINOV_YANGILIK_SOAT:
         holat = FAIL
         dalil.append(f"  natija {SINOV_YANGILIK_SOAT} soatdan ESKI")
@@ -220,16 +303,37 @@ def gate_sinov(frontend: bool) -> Tuple[str, List[str]]:
         dalil.append(f"  tekshiruvi O'LCHANMAGAN: {', '.join(olchanmadi)}")
 
     if frontend:
+        # BUYRUQ `package.json` DAN — QO'LDA YOZILMAYDI.
+        #
+        # O'LCHANGAN NUQSON (2026-09-04, interaktiv seansda). Qo'lda
+        # `npx tsc --noEmit -p tsconfig.json` yozilgan va u har safar
+        # `exit 0` bergan. `frontend/tsconfig.json` da esa
+        # `"files": []` va faqat `references` bor — ya'ni bu buyruq
+        # HECH NARSANI tekshirmaydi. Konfiguratsiya to'g'ri, buyruq
+        # to'g'ri, chiqish kodi to'g'ri; QAMROV NOL.
+        #
+        # Yashil raqam hisobotga chiqdi va unga tayanib qaror qabul
+        # qilindi. To'g'ri buyruq (`tsc -b`) darhol haqiqiy xato
+        # topdi. Shuning uchun bu yerda `npm run gate` chaqiriladi
+        # va yonida QAMROV o'lchanadi.
         r = subprocess.run(["npm", "run", "gate"],
                            cwd=os.path.join(HERE, "frontend"),
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace", shell=True)
         ok = r.returncode == 0
+        n_fayl = _tsc_qamrovi()
         dalil.append(f"frontend gate (tsc + xulq + build): "
-                     f"{'PASS' if ok else 'FAIL'}")
+                     f"{'PASS' if ok else 'FAIL'} · "
+                     f"tsc {n_fayl} ta loyiha faylini ko'rdi")
         if not ok:
             holat = FAIL
             dalil.append("  " + (r.stdout or r.stderr or "")[-200:].strip())
+        # `0 xato` va `0 fayl, 0 xato` BIR XIL KO'RINMASIN.
+        if n_fayl < TSC_ENG_KAM_FAYL:
+            holat = FAIL
+            dalil.append(f"  tsc QAMROVI shubhali: {n_fayl} fayl "
+                         f"(kutilgan >= {TSC_ENG_KAM_FAYL}). Buyruq "
+                         f"bo'sh konfiguratsiyaga urilgan bo'lishi mumkin.")
     else:
         holat = FAIL if holat == PASS else holat
         dalil.append("frontend gate YURGIZILMADI (`--frontend` bering) — "

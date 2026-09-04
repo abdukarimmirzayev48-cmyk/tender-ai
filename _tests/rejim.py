@@ -67,3 +67,51 @@ def moslash(args: argparse.Namespace) -> argparse.Namespace:
         args.bazasiz = True
         args.tarmoqsiz = True
     return args
+
+
+# =====================================================================
+# ILOVA ROLI — HUQUQ SHOXI SINALSIN
+# =====================================================================
+def rol_tekshir(db) -> None:
+    """Sinov SUPERUSER bilan yurayotgan bo'lsa — YIQILADI.
+
+    O'LCHANGAN NUQSON (2026-09-04). `.env` `postgres` (superuser)
+    bilan ulanadi. Superuser huquq tekshiruvlarini CHETLAB o'tadi,
+    ya'ni grant asosidagi himoyalar HECH QACHON sinalmagan.
+
+    `auth_test` da ERP chegarasi uchun IKKI shox bor:
+
+        erp_yopiq = True   huquq bilan yopiq -> surat KERAK EMAS
+        erp_yopiq = False  sanoqni solishtirish (ZAIF)
+
+    Superuser tufayli DOIM ikkinchisi ishlagan. Ya'ni yashil natija
+    haqiqiy chegarani emas, uning ZAXIRA yo'lini tasdiqlagan.
+    Bu `tsc --noEmit -p tsconfig.json` bilan bir sinf, faqat
+    xavfliroq: u yerda tekshiruv yo'q edi, bu yerda tekshiruv bor,
+    lekin HIMOYASIZ shox tekshirilgan.
+
+    NEGA `skip` EMAS, `fail`: `skip` — "jimgina o'tkazib yuborish"
+    ning aynan o'zi va u bir hafta ichida e'tiborsiz qolinadi
+    (2-sinf).
+
+    CHIQISH YO'LI: `DB_SET_ROLE=tai_app`. `tai_app` LOGIN QILA
+    OLMAYDI (`rolcanlogin = false`), shuning uchun u bilan ulanib
+    bo'lmaydi — `SET ROLE` esa ulanishni talab qilmaydi va
+    superuser imtiyozini shu sessiya uchun tushiradi.
+    """
+    kim = db.query_one(
+        "SELECT current_user AS u, "
+        "(SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS s")
+    if not kim or not kim["s"]:
+        return
+    qatorlar = [
+        "",
+        "SINOV SUPERUSER BILAN YURMOQDA — TO'XTATILDI.",
+        f"  joriy rol: {kim['u']} (superuser)",
+        "  Superuser huquq tekshiruvlarini chetlab o'tadi, ya'ni",
+        "  grant asosidagi himoyalar (ERP chegarasi, IDOR) SINALMAYDI.",
+        "  Tuzatish:  DB_SET_ROLE=tai_app <buyruq>",
+        "  yoki `XT_DB_DSN` ni ilova roliga o'tkazing.",
+        "",
+    ]
+    raise SystemExit("\n".join(qatorlar))

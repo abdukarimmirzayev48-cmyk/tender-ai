@@ -130,6 +130,12 @@ export const uz = {
   'broker.needMore': '({n}/{kerak} qaror)',
   'broker.notMeasured': 'Moslik hali o\u2018lchanmagan \u2014 broker '
     + 'qarorlari yig\u2018ilgach chiqadi.',
+
+  // HISOBLANMAGAN FOIZ O'ZINI TUSHUNTIRADI — `0%` deb ko'rsatilmaydi.
+  'broker.noPct.ai_qaror_yoq.short': 'o‘lchanmaydi',
+  'broker.noPct.ai_qaror_yoq': 'AI bu yerda QAROR QILMAGAN (review) — moslik formulasi unga nolni kafolatlaydi, shuning uchun foiz berilmaydi.',
+  'broker.noPct.namuna_kam.short': 'namuna kam',
+  'broker.noPct.namuna_kam': 'Bu qator {n} ta kuzatuvga tayanadi, kamida {kerak} kerak.',
   // SINOV PROFILI \u2014 yorliq yo'qolmasin.
   'broker.sampleTitle': 'Sinov profili.',
   'broker.sampleBody': 'Kompaniya ma\u2019lumotlari o\u2018ylab topilgan '
@@ -205,6 +211,7 @@ export const uz = {
   'fresh.lagTitle': 'E’lon chiqishi bilan bizda paydo bo‘lishi orasidagi vaqt',
   'fresh.lag': 'Aniqlash kechikishi:',
   'fresh.lagHours': '{n} soat',
+  'fresh.lagNone': 'o‘lchanmagan',
   'fresh.within1h': '1 soatda: {pct}%',
 
   // ── Vaqt formatlari ───────────────────────────────────────────────────
@@ -251,6 +258,7 @@ export const uz = {
   // ── Tenderlar jadvali ─────────────────────────────────────────────────
   'table.empty': 'Filtrlarni o‘zgartirib ko‘ring.',
   'table.score': 'Ball',
+  'table.scoreNone': 'Moslik hisoblanmagan — nol EMAS',
   'table.subject': 'Xarid predmeti',
   'table.source': 'Manba',
   'table.customer': 'Buyurtmachi',
@@ -338,6 +346,14 @@ export const uz = {
   'gonogo.nextSteps': 'Keyingi qadamlar',
   'gonogo.missing': 'Profilga qo‘shing — qaror aniqroq bo‘ladi',
   'gonogo.yoursDecision': 'qaror sizniki',
+
+  // TAHLIL HAQIDA SUHBAT — `manba='gonogo'`, tahlil QAYTA HISOBLANMAYDI.
+  'gonogo.ask': 'Bu tahlil haqida so‘rang',
+  'gonogo.askTitle': 'Suhbat saqlangan tahlilga tayanadi — qayta hisoblanmaydi',
+  'gonogo.chip.why': 'Nega shunday hukm chiqdi?',
+  'gonogo.chip.criteria': 'Qaysi mezonlar yiqildi?',
+  'gonogo.chip.docs': 'Qaysi hujjat yetishmayapti?',
+  'gonogo.chip.improve': 'Bu natijani qanday yaxshilash mumkin?',
 
   // ── Ombor qoldig'i ────────────────────────────────────────────────────
   'stock.noMatch': '{n} ta pozitsiyaning hech biri katalogingizga mos kelmadi.',
@@ -829,6 +845,16 @@ export const uz = {
   'req.correct': 'Tuzatish',
   'req.correctHint': 'To‘g‘ri qiymatni yozing',
   'req.approveAll': 'Hammasini tasdiqlash',
+
+  // KO'RIK TUGAGACH NAVBATGA NIMA BO'LGANI — JIM QOLMAYDI.
+  'req.route.queued': 'Broker navbati yangilandi: {q}',
+  'req.route.nogo': 'Malaka o‘tmadi — tender broker navbatiga tushmadi',
+  'req.route.left': 'DIQQAT: tender broker navbatidan CHIQDI (malaka o‘tmadi)',
+  'req.route.stale': 'DIQQAT: broker allaqachon qaror bergan, tahlil esa o‘zgardi — qaror ESKIRDI',
+  'req.route.same': 'Broker navbati o‘zgarmadi ({q})',
+  'req.route.closed': 'Tender muddati o‘tgan — navbat yangilanmadi',
+  'req.route.missing': 'Tender topilmadi — navbat yangilanmadi',
+  'req.route.failed': 'Navbatni yangilab bo‘lmadi (tasdiq YOZILDI)',
   'req.status.approved': 'tasdiqlangan',
   'req.status.rejected': 'rad etilgan',
   'req.status.corrected': 'tuzatilgan',
@@ -841,6 +867,7 @@ export const uz = {
   'chat.scope.tender': 'Kontekst: {id}-tender',
   'chat.scope.global': 'Umumiy suhbat',
   'chat.new': 'Yangi suhbat',
+  'chat.resumed': 'Oldingi suhbat davom etmoqda — {n} ta xabar eslanadi',
   'chat.send': 'Yuborish',
   'chat.stop': 'To‘xtatish',
   'chat.thinking': 'O‘ylayapman…',

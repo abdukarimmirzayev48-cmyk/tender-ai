@@ -14,11 +14,24 @@ import type { TenderRow } from '@/types'
 // Ball rozetkasi rangi (Sizga mos ko'rinishi uchun).
 // Tailwind sinf nomlarini DINAMIK QURIB bo'lmaydi (JIT ularni topa olmaydi),
 // shuning uchun to'liq sinflar shu yerda yozilgan.
-function scoreClass(s: number) {
+/**
+ * Ball rangi. `null` — O'LCHANMAGAN, nol EMAS.
+ *
+ * O'LCHANGAN NUQSON (2026-09-04): bu yerda `m?.score ?? 0` turardi
+ * va moslik hisoblanmagan qatorga QIZIL "0" chiqarardi — ya'ni
+ * "o'lchanmadi" foydalanuvchiga "eng yomon moslik" bo'lib
+ * ko'rinardi. `v_routing_agreement` dagi `review: 0%` bilan bir
+ * xil sinf, faqat teskari tomonga og'gan.
+ */
+function scoreClass(s: number | null | undefined) {
+  if (s == null) return 'bg-muted/50 text-muted-foreground'
   if (s >= 70) return 'bg-ok-soft text-ok-strong'
   if (s >= 40) return 'bg-soon-soft text-soon-strong'
   return 'bg-muted text-muted-foreground'
 }
+
+/** O'lchanmagan ball uchun belgi — `0` YOZILMAYDI. */
+const BALL_YOQ = '—'
 
 // Manba qisqa yorlig'i — qaysi platformadan kelganini bir qarashda bilish uchun.
 const SRC: Record<string, { label: string; cls: string }> = {
@@ -160,7 +173,9 @@ export default function TenderTable({
             <div className="mb-1.5 flex items-center gap-2">
               {isMatch && (
                 <span className={cn('tabular rounded-md px-1.5 py-0.5 text-caption font-semibold',
-                  scoreClass(m?.score ?? 0))}>{m?.score ?? 0}</span>
+                  scoreClass(m?.score))}
+                  title={m?.score == null ? t('table.scoreNone') : undefined}
+                >{m?.score ?? BALL_YOQ}</span>
               )}
               <span className={cn('rounded px-1.5 py-0.5 text-micro font-semibold', src.cls)}>
                 {src.label}
@@ -263,8 +278,9 @@ export default function TenderTable({
                   <TableCell className="text-right">
                     <span className={cn(
                       'tabular inline-block min-w-[34px] rounded-md px-2 py-0.5 text-center text-body font-semibold',
-                      scoreClass(m?.score ?? 0),
-                    )}>{m?.score ?? 0}</span>
+                      scoreClass(m?.score),
+                    )} title={m?.score == null ? t('table.scoreNone') : undefined}
+                    >{m?.score ?? BALL_YOQ}</span>
                   </TableCell>
                 )}
                 <TableCell className="pr-0">

@@ -532,8 +532,26 @@ def test_audit_tuzatish(db):
             db.execute_returning(sql, {})
             check(f"audit_jurnal {op} TAQIQLANGAN", False, "bajarildi!")
         except Exception as e:                                # noqa: BLE001
-            check(f"audit_jurnal {op} TAQIQLANGAN",
-                  "FAQAT QO" in str(e), str(e).splitlines()[0][:70])
+            # IKKI XIL QO'RIQCHI — IKKALASI HAM QABUL QILINADI.
+            #
+            # O'LCHANGAN NUQSON (2026-09-04). Shart faqat
+            # TRIGGER xabarini ("FAQAT QO'SHISH...") tanirdi.
+            # Ilova roli (`tai_app`) bilan yurganda `audit_jurnal`
+            # ga UPDATE/DELETE HUQUQ darajasida to'siladi va xato
+            # boshqacha keladi ("нет доступа к таблице") — ya'ni
+            # himoya KUCHLIROQ, sinov esa YIQILARDI.
+            #
+            # `auth_test` dagi `erp_yopiq` bilan bir shakl: huquq
+            # OLDIN to'sadi, trigger KEYIN aytadi. Sinov "amal
+            # bajarilmadimi" ni tekshirsin, QAYSI qatlam to'sganini
+            # emas.
+            xato = str(e)
+            trigger = "FAQAT QO" in xato
+            huquq = ("нет доступа" in xato or "permission denied" in xato
+                     or "доступ" in xato.lower())
+            check(f"audit_jurnal {op} TAQIQLANGAN", trigger or huquq,
+                  ("trigger" if trigger else "huquq" if huquq else "?")
+                  + ": " + xato.splitlines()[0][:60])
 
 
 def test_api(db, a_cid, b_cid, a_aktor, b_aktor):

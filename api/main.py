@@ -2429,7 +2429,19 @@ def requirements_queue(request: Request, limit: int = 100,
     queue, jami = requirement.review_queue(
         cid, min(max(limit, 1), 500), q=q, region=region,
         faqat_past=past, manba=manba, otgan=otgan, katalog=katalog)
-    return {"queue": queue, "jami": jami, "korsatildi": len(queue)}
+    # MANBA SONLARI — interfeys "Modeldan (0)" deb YOZADI va variantni
+    # o'chiradi. Busiz filtr hech narsa qilmayotgandek ko'rinardi:
+    # bugun HAMMA kutayotgan talab `naqsh` dan (LLM qatlami pullik va
+    # qulflangan), ya'ni "Naqshdan" jamini o'zgartirmaydi, "Modeldan"
+    # esa ro'yxatni bo'shatadi. Ikkalasi ham BUZUQ deb o'qilardi.
+    #
+    # `manba` ning O'ZI hisobga OLINMAYDI: savol "shu manbani
+    # tanlasam nechta qoladi", "umuman nechta bor" emas.
+    manbalar = requirement.review_queue_manbalar(
+        cid, q=q, region=region, faqat_past=past, otgan=otgan,
+        katalog=katalog)
+    return {"queue": queue, "jami": jami, "korsatildi": len(queue),
+            "manbalar": manbalar}
 
 
 @app.get("/tenders/{tender_id}/requirements")
@@ -2499,6 +2511,37 @@ class ReviewIn(BaseModel):
     blind_value: Optional[str] = None
 
 
+# KO'RIK TUGAGACH NAVBAT YANGILANADI.
+#
+# Ilgari zanjir shu yerda UZILARDI: tasdiq `tender_requirement` ga
+# yozilardi, `tender_routing` esa keyingi ETL yurishigacha (yoki
+# brokerning "Yangilash" tugmasigacha) ESKI ballni ko'rsatib turardi.
+# Ya'ni tasdiqning butun ma'nosi -- dalilni yaxshilash -- navbatga
+# soatlab yetib bormasdi.
+#
+# QOIDA IKKI JOYDA TAKRORLANMAYDI: "kimni baholash mumkin" ta'rifi
+# `api/routing.py` da (`korik_tugadi`), bu yerda faqat CHAQIRUV.
+def _navbatni_yangila(tender_id: int, cid: int) -> Dict[str, Any]:
+    """Ko'rik tugagach navbatni qayta hisoblaydi.
+
+    YIQILSA KO'RIKNI BUZMAYDI. Talab allaqachon YOZILGAN va u
+    asosiy ish; navbat -- ikkilamchi. Xato 500 ga aylansa
+    foydalanuvchi "tasdiq o'tmadi" deb o'ylab QAYTA bosardi.
+
+    Lekin JIMGINA ham yutilmaydi: sabab javobda qaytadi va
+    interfeys uni ko'rsatadi (`api/topshiriq.py` dagi naqsh).
+    """
+    from api import routing
+    try:
+        return routing.korik_tugadi(tender_id, cid)
+    except Exception as e:                              # noqa: BLE001
+        _log.warning("navbatni yangilash yiqildi tender=%s: %s",
+                    tender_id, e)
+        return {"holat": "xato", "xato": f"{type(e).__name__}: {e}"[:200],
+                "ozgardi": False, "inson_qarori_eskirdi": False,
+                "ai_qaror": None, "routing_id": None}
+
+
 @app.post("/requirements/{req_id}/review")
 def requirement_review(req_id: int, body: ReviewIn, request: Request):
     """Talabni tasdiqlash / rad etish / tuzatish.
@@ -2543,6 +2586,7 @@ def requirement_review(req_id: int, body: ReviewIn, request: Request):
         "WHERE company_id=%(c)s AND tender_id=%(t)s "
         "AND review_status='pending_review'",
         {"c": cid, "t": row["tender_id"]})
+    yonaltirish: Optional[Dict[str, Any]] = None
     if not qolgan:
         # OXIRGI talab belgilandi — vaqtni yopamiz.
         #
@@ -2566,7 +2610,15 @@ def requirement_review(req_id: int, body: ReviewIn, request: Request):
             "AND reviewed_by IS NOT NULL",
             {"c": cid, "t": row["tender_id"]}) or 0
         requirement.review_tugadi(row["tender_id"], cid, int(korilgan))
-    return {**row, "qolgan_kutayotgan": int(qolgan or 0)}
+        # KO'RIK TUGADI -> NAVBAT SHU ZAHOTI QAYTA HISOBLANADI.
+        # Oraliq tasdiqlarda emas: har talabda qayta baholash
+        # `qualification.check` ni ko'rik tezligiga bog'lardi va
+        # oxirgi natijadan boshqa hech narsa bermasdi.
+        yonaltirish = _navbatni_yangila(row["tender_id"], cid)
+    return {**row, "qolgan_kutayotgan": int(qolgan or 0),
+            # NAVBATGA NIMA BO'LGANI JIM QOLMAYDI. Ko'rik hali
+            # tugamagan bo'lsa `None` -- "hali baholanmadi".
+            "yonaltirish": yonaltirish}
 
 
 # ---------------------------------------------------------------------------
@@ -2882,9 +2934,14 @@ def requirements_review_all(tender_id: int, body: ReviewBulkIn,
                   izoh=f"{n} ta talab bir amalda")
     except ValueError as e:
         raise xatolar.kodli(e, "FIELD_INVALID")
+    yonaltirish: Optional[Dict[str, Any]] = None
     if n:
         requirement.review_tugadi(tender_id, cid, n)
-    return {"tender_id": tender_id, "ozgardi": n, "status": body.status}
+        # OMMAVIY AMAL BUTUN TENDERNI YOPADI (`pending_review`
+        # qolmaydi), ya'ni bu ham KO'RIK TUGAGAN nuqta.
+        yonaltirish = _navbatni_yangila(tender_id, cid)
+    return {"tender_id": tender_id, "ozgardi": n, "status": body.status,
+            "yonaltirish": yonaltirish}
 
 
 @app.post("/requirements/pilot")
@@ -4501,6 +4558,14 @@ class ChatIn(BaseModel):
     session_id: Optional[str] = None
     tender_id: Optional[int] = None
     lang: Optional[str] = None
+    #: Suhbat QAYERDAN boshlangani: `panel` | `global` | `gonogo` |
+    #: `match`. `eval` bu yerdan KELMAYDI -- uni faqat
+    #: `run_eval.py` o'zi yozadi (`ai_chat.create_session`).
+    #:
+    #: Berilmasa `None` qoladi va o'lchovda "noma'lum" deb sanaladi.
+    #: Taxmin qilinmaydi: `tender_id` bor degani "tender panelidan"
+    #: degani EMAS -- global suhbatda ham tender ko'rsatilishi mumkin.
+    manba: Optional[str] = None
 
     @field_validator("message")
     @classmethod
@@ -4540,17 +4605,47 @@ async def chat(body: ChatIn, request: Request):
         except LookupError as e:
             raise xatolar.kodli(e, "CHAT_SESSION_NOT_FOUND")
     else:
+        # `eval` MIJOZDAN QABUL QILINMAYDI. Aks holda interfeys
+        # (yoki so'rovni qo'lda yasagan kim bo'lsa) o'z sessiyasini
+        # "avto-yaratilgan" deb belgilab, uni o'lchovdan yashira
+        # olardi -- yoki teskarisi, eval hovuzini ifloslantirardi.
+        manba = body.manba if body.manba in ("panel", "global",
+                                             "gonogo", "match") else None
+        # TAHLIL SURATI — SESSIYA OCHILGANDA.
+        #
+        # `ai_analysis.content_hash` ni yozib qo'yamiz va keyingi
+        # har xabarda joriysi bilan solishtiramiz. Farq bo'lsa —
+        # tahlil suhbat o'rtasida QAYTA HISOBLANGAN va model buni
+        # foydalanuvchiga aytishi kerak (`tender_routing.ai_ozgardi`
+        # bilan bir tamoyil).
+        #
+        # Tahlil YO'Q bo'lsa `None` qoladi: "yo'q" bilan "o'zgardi"
+        # aralashmasin.
+        t_hash = None
+        if body.tender_id:
+            try:
+                from api import tahlil as _tahlil
+                t_hash = _tahlil.joriy_hash(body.tender_id, company_id)
+            except Exception as e:                      # noqa: BLE001
+                _log.warning("tahlil_hash olinmadi: %s", e)
         sid = ai_chat.create_session(company_id, body.tender_id,
                                      body.message[:120],
-                                     i18n.norm_lang(body.lang))
+                                     i18n.norm_lang(body.lang),
+                                     manba=manba, tahlil_hash=t_hash)
         s = {"id": sid, "tender_id": body.tender_id,
-             "lang": i18n.norm_lang(body.lang)}
+             "lang": i18n.norm_lang(body.lang),
+             "manba": manba, "tahlil_hash": t_hash}
 
     ctx = ai_chat.ChatContext(
         company_id=company_id,          # <-- SESSIYADAN, modeldan EMAS
         session_id=str(s["id"]),
         lang=s.get("lang") or i18n.DEFAULT_LANG,
         tender_id=s.get("tender_id"),
+        # SESSIYADAN, MIJOZDAN EMAS. Davom etayotgan suhbatda ular
+        # `load_session` dan keladi — ya'ni mijoz keyingi xabarda
+        # `manba` ni o'zgartirib kontekstni almashtira olmaydi.
+        manba=s.get("manba"),
+        tahlil_hash=s.get("tahlil_hash"),
     )
     profile = _shape_profile(db.query_one(queries.PROFILE_GET_SQL,
                                           {"company_id": company_id}))
@@ -4573,6 +4668,36 @@ def chat_sessions(request: Request,
     """Suhbatlar ro'yxati (arxivlanmaganlar, oxirgi faollik bo'yicha)."""
     _chat_tayyor()
     return ai_chat.list_sessions(company_id_of(request), limit=limit)
+
+
+class ChatTiklashIn(BaseModel):
+    """`tiklandi` — panelga tiklandi; `rad` — "Yangi suhbat" bosildi."""
+    holat: Literal["tiklandi", "rad"]
+
+
+@app.post("/chat/sessions/{session_id}/tiklash")
+def chat_tiklash(session_id: str, body: ChatTiklashIn, request: Request):
+    """Suhbat tiklanishini QAYD ETADI — `DAVOM_SOAT` chegarasi uchun.
+
+    `ChatPanel` ochilganda oxirgi suhbatni davom ettiradi
+    (`DAVOM_SOAT = 24`). Bu raqam O'LCHANMAGAN TAXMIN: u hech
+    qanday ma'lumotdan chiqmagan.
+
+    "Yangi suhbat" tugmasi — tiklanishdan chiqish yo'li, ya'ni
+    UNING BOSILISHI chegara noto'g'ri ekanining signali. Global
+    suhbat uchun 24 soat ko'p bo'lishi mumkin (mavzu o'zgaradi),
+    tender uchun esa oz — shuning uchun `v_chat_tiklash` ikki
+    kesimni ALOHIDA sanaydi.
+
+    `company_id` SESSIYADAN va SQL SHARTIDA — boshqa kompaniyaning
+    suhbatiga belgi qo'yib bo'lmaydi (IDOR himoyasi).
+    """
+    _chat_tayyor()
+    cid = company_id_of(request)
+    ok = ai_chat.tiklash_qayd(session_id, cid, body.holat)
+    if not ok:
+        raise xatolar.Xato("CHAT_SESSION_NOT_FOUND")
+    return {"session_id": session_id, "holat": body.holat}
 
 
 @app.get("/chat/sessions/{session_id}")

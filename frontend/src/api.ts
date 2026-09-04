@@ -7,15 +7,15 @@ import type {
   PricingSaved, Product, ProductSuggestion, Region, SavedSearch, Stats, Status,
   StockCheckResult, TelegramBot, TelegramLink, TelegramLinkStatus,
   Aktor, AktorHolat, AktorRol, AuditYozuv, Kimlik,
-  HujjatTuri, InsonQarori, ReviewRejim, ReviewTezlik, Talab, TalabHolat,
-  TalabNavbat,
+  HujjatTuri, InsonQarori, ManbaSonlari, ReviewRejim, ReviewTezlik,
+  Talab, TalabHolat, TalabNavbat,
   AiQaror, InsonQaror, MalakaNatija, NavbatFiltr, RoutingHolat,
   RoutingItem, TalabFiltr,
   KodNavbat, KodQaror, KodQidiruv, KodOlchov, Manba,
   RoutingMoslik,
   TalabXulosa,
   TelegramSubscriber, TenderDetail, TenderRow, NotifySettingsData, Nullable,
-  ValidatsiyaHolat,
+  ValidatsiyaHolat, Yonaltirish,
 } from './types'
 
 // ZAXIRA QIYMAT `/api` — SAME-ORIGIN.
@@ -288,6 +288,14 @@ export interface ChatSession {
   tender_id: Nullable<number>
   title: Nullable<string>
   lang: Nullable<string>
+  /**
+   * Suhbat manbasi. `'eval'` -- AVTO-YARATILGAN sessiya
+   * (`run_eval.py`), inson suhbati EMAS: eval haqiqiy ijarachi
+   * bilan yuradi (`EVAL_COMPANY_ID = 2`), shuning uchun u shu
+   * ro'yxatga TUSHADI va interfeys uni ajratishi shart.
+   * `null` -- manba yozilmagan davr.
+   */
+  manba: Nullable<'eval' | 'gonogo' | 'match' | 'panel' | 'global'>
   created_at: string
   updated_at: string
 }
@@ -402,7 +410,11 @@ export const api = {
   // Tasdiqlash MAJBURIY: tekshirilmagan talabni cheklistga ulash AI
   // xatosini qaror qatlamiga o'tkazadi (arvoh blocker).
   talabNavbat: (limit = 100, f?: Partial<TalabFiltr>) =>
-    request<{ queue: TalabNavbat[]; jami: number; korsatildi: number }>(
+    // `manbalar` — har manba QANCHA natija berishi. Filtr o'zgartira
+    // olmaydigan variantni interfeys o'chirib qo'yadi va sonini
+    // yozadi; aks holda u BUZUQ tugma bo'lib ko'rinardi.
+    request<{ queue: TalabNavbat[]; jami: number; korsatildi: number
+              manbalar: ManbaSonlari }>(
       'GET', `/requirements/queue?limit=${limit}`
              + (f?.region ? `&region=${encodeURIComponent(f.region)}` : '')
              + (f?.q ? `&q=${encodeURIComponent(f.q)}` : '')
@@ -431,10 +443,14 @@ export const api = {
                  reviewed_by: number; reviewed_at: string
                  previous_value: string | null
                  corrected_value: string | null
-                 qolgan_kutayotgan: number }>(
+                 qolgan_kutayotgan: number
+                 // KO'RIK TUGAGANDA navbat SHU ZAHOTI qayta
+                 // hisoblanadi. `null` — ko'rik hali tugamagan.
+                 yonaltirish: Yonaltirish | null }>(
     'POST', `/requirements/${reqId}/review`, { body }),
   talabReviewAll: (tenderId: number, status: 'approved' | 'rejected') =>
-    request<{ tender_id: number; ozgardi: number; status: string }>(
+    request<{ tender_id: number; ozgardi: number; status: string
+              yonaltirish: Yonaltirish | null }>(
       'POST', `/tenders/${tenderId}/requirements/review-all`,
       { body: { status } }),
 
@@ -582,6 +598,20 @@ export const api = {
   chatHistory: (id: string) =>
     request<{ session: ChatSession; messages: ChatStoredMessage[] }>(
       'GET', `/chat/sessions/${encodeURIComponent(id)}`),
+  /**
+   * TIKLANISH QAYDI — `DAVOM_SOAT` chegarasi uchun o'lchov.
+   *
+   * `tiklandi` maxraj, `rad` surat. "Yangi suhbat" bosilishi
+   * chegara noto'g'ri ekanining signali; global va tenderli
+   * kesimlar `v_chat_tiklash` da ALOHIDA sanaladi.
+   *
+   * XATOSI YUTILADI (chaqiruvchida): o'lchov foydalanuvchi
+   * ishini to'xtatmasin.
+   */
+  chatTiklash: (id: string, holat: 'tiklandi' | 'rad') =>
+    request<{ session_id: string; holat: string }>(
+      'POST', `/chat/sessions/${encodeURIComponent(id)}/tiklash`,
+      { body: { holat } }),
   // O'CHIRMAYDI, ARXIVLAYDI — jurnal va xarajat hisobi saqlanadi.
   chatArchive: (id: string) =>
     request<null>('DELETE', `/chat/sessions/${encodeURIComponent(id)}`),

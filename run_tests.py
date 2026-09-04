@@ -215,7 +215,24 @@ def main() -> None:
     else:
         rejim_nomi = "tarmoq_yoq"
 
+    # QAMROV: NECHTA TO'PLAM BOR va nechtasi YURADI.
+    #
+    # O'LCHANGAN NUQSON (2026-09-04, uchinchi marta). Filtrlangan
+    # yurish o'zini TO'LIQ yurish kabi ko'rsatardi: xulosada
+    # "12/12 to'plam o'tdi" chiqardi va o'sha 12 tasi mavjud 40
+    # tadan tanlab olingani HECH QAYERDA aytilmasdi.
+    #
+    # Bu `tsc --noEmit -p tsconfig.json` (0 fayl ko'rdi, exit 0) va
+    # `requirement_test` (o'zgartirildi, yurgizilmadi) bilan BIR
+    # SINF: yashil raqam berilgan, qamrov esa aytilmagan.
+    #
+    # Endi ikkala son ham chiqadi va o'tkazib yuborilganlar
+    # NOMMA-NOM yoziladi — "qaysi to'plamni yurgizaman" degan
+    # tanlovning o'zi xato manbai.
+    hamma_yol = toplamlar("")
     yollar = toplamlar(args.only)
+    otkazildi = [os.path.basename(p)[:-3] for p in hamma_yol
+                 if p not in yollar]
     if not yollar:
         print(f"To'plam topilmadi (filtr: {args.only!r})")
         sys.exit(1)
@@ -242,6 +259,69 @@ def main() -> None:
     # flaky yiqilishni KEYIN tahlil qilish uchun yagona yo'l.
     natija_dir = args.natija_dir or os.path.join(HERE, "_test_natija")
     os.makedirs(natija_dir, exist_ok=True)
+
+    # MAXRAJ KICHRAYSA SEZILSIN.
+    #
+    # `toplam_mavjud` `glob` bilan topiladi, ya'ni sinov fayli
+    # O'CHIRILSA yoki nomi o'zgarsa MAXRAJ ham kichrayadi va
+    # `43/43` yashil qolaveradi. Qamrov o'lchovi o'zini o'lchagan
+    # bo'lardi (1-sinf: asbob tekshirayotgan narsasining xatosini
+    # takrorlaydi).
+    #
+    # QATTIQ SON EMAS (`>= 120` shakli mo'rt — kod o'sganda qamrov
+    # joyida qolsa ham yashil bo'ladi). O'RNIGA: oldingi yurish
+    # bilan solishtiriladi. Qiymat `xulosa.json` da allaqachon bor
+    # va u YOZILISHIDAN OLDIN o'qiladi.
+    oldingi = {}
+    try:
+        import json as _json
+        with io.open(os.path.join(natija_dir, "xulosa.json"),
+                     encoding="utf-8") as _f:
+            oldingi = _json.load(_f) or {}
+    except (OSError, ValueError):
+        # Birinchi yurish yoki buzilgan fayl — solishtirish YO'Q.
+        # Buni "kamaymadi" deb ko'rsatish o'lchanmaganni o'lchangan
+        # deb aytish bo'lardi; `None` shundayligicha qoladi.
+        pass
+    oldingi_mavjud = oldingi.get("toplam_mavjud")
+
+    # QAYSI ROL BILAN YURDIK.
+    #
+    # NEGA KERAK (2026-09-04): tekshiruv soni ROLGA BOG'LIQ.
+    # `postgres` (superuser) bilan 3402, `tai_app` bilan 3280 —
+    # farq YO'QOTISH emas, ALMASHISH: `auth_test` huquq shoxiga
+    # o'tganda sanoq solishtiruvlari o'rniga bitta "surat kerak
+    # emas" tekshiruvi qoladi.
+    #
+    # Ya'ni IKKI BAZAVIY RAQAM bor. Ularni aralashtirib
+    # solishtirish qo'riqchini yolg'on qiladi: `tai_app` dan
+    # `postgres` ga o'tilganda son OSHADI va "hammasi joyida"
+    # deb ko'rinadi, holbuki REJIM o'zgargan.
+    #
+    # Shuning uchun rol YOZILADI va taqqoslash faqat BIR XIL
+    # rejim ichida qilinadi.
+    rol = None
+    try:
+        sys.path.insert(0, HERE)
+        # `.env` SHU YERDA yuklanadi: `run_tests.py` faqat bola
+        # jarayonlarni ochadi va o'zi bazaga bormaydi, shuning
+        # uchun `XT_DB_DSN` uning muhitida yo'q edi. Buni
+        # yuklamasdan rol DOIM "NOMA'LUM" chiqardi — ya'ni
+        # o'lchov qo'shildi-yu, hech qachon o'lchamasdi (3-sinf).
+        from dotenv import load_dotenv as _ld
+        _ld(os.path.join(HERE, ".env"))
+        from api import db as _db
+        _db.init_pool()
+        _r = _db.query_one(
+            "SELECT current_user AS u, "
+            "(SELECT rolsuper FROM pg_roles WHERE rolname=current_user) AS s")
+        rol = {"nom": _r["u"], "superuser": bool(_r["s"])}
+        _db.close_pool()
+    except Exception:                                         # noqa: BLE001
+        # Bazasiz muhit yoki ulanish yo'q — `None` QOLADI.
+        # "Noma'lum rol" ni "postgres" deb taxmin qilish shu
+        # faylning o'zi qo'riqlayotgan xato bo'lardi.
+        pass
 
     natijalar = []
     t0 = time.time()
@@ -303,6 +383,19 @@ def main() -> None:
         "toplam_jami": len(natijalar),
         "toplam_otdi": len(natijalar) - len(yiqilgan),
         "toplam_yiqildi": len(yiqilgan),
+        # QAMROV. `toplam_jami` FAQAT yurganlarni sanaydi — mavjud
+        # to'plamlar soni ALOHIDA, aks holda filtrlangan yurish
+        # to'liq yurish kabi ko'rinardi.
+        "toplam_mavjud": len(hamma_yol),
+        # OLDINGI YURISHDAGI MAXRAJ — kamayganini darvoza ko'rsin.
+        # `None` = solishtirilmadi (birinchi yurish), `0` EMAS.
+        "toplam_mavjud_oldingi": oldingi_mavjud,
+        "toplam_yoqoldi": (max(0, oldingi_mavjud - len(hamma_yol))
+                           if oldingi_mavjud is not None else None),
+        "toplam_otkazildi": otkazildi,
+        "filtr": args.only or None,
+        # ROL — tekshiruv sonini SHUNGA qarab solishtiramiz.
+        "rol": rol,
         "yiqilgan": yiqilgan,
         "toplamlar": [
             {"nom": n, "kod": k, "sekund": round(d, 1), "xulosa": x,
@@ -319,6 +412,30 @@ def main() -> None:
     # yuqoridagi yig'indiga KIRMAYDI va jimgina yo'qolmasligi kerak.
     xulosa_json["tekshiruv_olchanmadi"] = [
         s2["nom"] for s2 in xulosa_json["toplamlar"] if s2["tekshiruv"] is None]
+
+    # TEKSHIRUV SONI KAMAYDIMI — FAQAT BIR XIL REJIM ICHIDA.
+    #
+    # Rol o'zgargan bo'lsa taqqoslash MA'NOSIZ: `postgres` -> 3402,
+    # `tai_app` -> 3280. Farqni "yo'qolgan tekshiruv" deb o'qish
+    # ham, "oshgan" deb tinchlanish ham xato bo'lardi.
+    #
+    # Rejim boshqa bo'lsa `None` yoziladi va SABABI aytiladi —
+    # "solishtirilmadi" jimgina "kamaymadi" ga aylanmaydi.
+    o_rol = (oldingi.get("rol") or {}).get("nom")
+    y_rol = (rol or {}).get("nom")
+    o_teks = oldingi.get("tekshiruv_jami")
+    if o_rol and y_rol and o_rol == y_rol and o_teks:
+        xulosa_json["tekshiruv_jami_oldingi"] = o_teks
+        xulosa_json["tekshiruv_yoqoldi"] = max(
+            0, int(o_teks) - int(xulosa_json["tekshiruv_jami"]))
+        xulosa_json["tekshiruv_taqqos_sababi"] = None
+    else:
+        xulosa_json["tekshiruv_jami_oldingi"] = o_teks
+        xulosa_json["tekshiruv_yoqoldi"] = None
+        xulosa_json["tekshiruv_taqqos_sababi"] = (
+            "oldingi yurish yo'q" if not o_teks else
+            f"REJIM BOSHQA: oldin `{o_rol}`, hozir `{y_rol}` — "
+            f"tekshiruv soni rolga bog'liq, taqqoslanmadi")
     try:
         with io.open(os.path.join(natija_dir, "xulosa.json"), "w",
                      encoding="utf-8", newline="") as f:
@@ -327,12 +444,37 @@ def main() -> None:
         print(f"  [!] xulosa.json saqlanmadi: {e}")
 
     print("=" * 78)
-    print(f"JAMI: {len(natijalar)} to'plam, {len(natijalar) - len(yiqilgan)} o'tdi, "
+    print(f"JAMI: {len(natijalar)}/{len(hamma_yol)} to'plam yurdi, "
+          f"{len(natijalar) - len(yiqilgan)} o'tdi, "
           f"{len(yiqilgan)} yiqildi · {time.time() - t0:.0f}s")
+    # O'TKAZIB YUBORILGANLAR JIM QOLMAYDI. Filtrlangan yurish
+    # natijasi to'liq yurish bilan bir xil ko'rinmasligi kerak.
+    if otkazildi:
+        korsat = ", ".join(otkazildi[:8])
+        print(f"QAMROV TO'LIQ EMAS — filtr {args.only!r}, "
+              f"{len(otkazildi)} to'plam O'TKAZILDI: {korsat}"
+              + (f" (+{len(otkazildi) - 8})" if len(otkazildi) > 8 else ""))
+    # MAXRAJ KAMAYGANI — sinov fayli o'chirilgan yoki nomi
+    # o'zgargan bo'lishi mumkin. Bu YASHIL yurishda ham chiqadi.
+    if xulosa_json["toplam_yoqoldi"]:
+        print(f"DIQQAT: to'plamlar soni KAMAYDI — {oldingi_mavjud} dan "
+              f"{len(hamma_yol)} ga ({xulosa_json['toplam_yoqoldi']} ta). "
+              f"Fayl o'chirilgan yoki nomi o'zgargan bo'lishi mumkin.")
     print(f"TEKSHIRUV: {xulosa_json['tekshiruv_otdi']}/"
           f"{xulosa_json['tekshiruv_jami']}"
+          + (f" · rol: {y_rol}" if y_rol else " · rol: NOMA'LUM")
           + (f" · o'lchanmadi: {', '.join(xulosa_json['tekshiruv_olchanmadi'])}"
              if xulosa_json["tekshiruv_olchanmadi"] else ""))
+    # BIR XIL REJIMDA tekshiruv soni tushgani — sinov jimgina
+    # yo'qolgan bo'lishi mumkin.
+    if xulosa_json["tekshiruv_yoqoldi"]:
+        print(f"DIQQAT: tekshiruv soni KAMAYDI — {o_teks} dan "
+              f"{xulosa_json['tekshiruv_jami']} ga "
+              f"({xulosa_json['tekshiruv_yoqoldi']} ta), rol o'zgarmagan "
+              f"(`{y_rol}`). Tekshiruv o'chirilgan bo'lishi mumkin.")
+    elif xulosa_json["tekshiruv_taqqos_sababi"]:
+        print(f"(tekshiruv soni taqqoslanmadi: "
+              f"{xulosa_json['tekshiruv_taqqos_sababi']})")
     print(f"Natijalar: {natija_dir}")
     if yiqilgan:
         print("YIQILGAN: " + ", ".join(yiqilgan))

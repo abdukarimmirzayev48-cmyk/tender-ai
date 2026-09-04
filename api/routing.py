@@ -161,6 +161,21 @@ ORDER BY r.tender_id
 LIMIT %(n)s
 """
 
+#: Bu tenderning navbat yozuvi BORMI. `yonaltir` shu asosda hal
+#: qiladi: yangi `no_go` navbatga QO'SHILMAYDI, lekin allaqachon
+#: turgan yozuv `no_go` ga o'tsa YANGILANADI.
+SQL_MAVJUD = """
+SELECT 1 FROM tender_routing
+WHERE company_id = %(c)s AND tender_id = %(t)s
+"""
+
+#: Tender hali OCHIQMI. `korik_tugadi` shu bilan cheklanadi --
+#: nomzod ta'rifi (`SQL_NOMZODLAR`) bilan AYNI qoida.
+SQL_OCHIQMI = """
+SELECT (t.close_at IS NULL OR t.close_at > now()) AS ochiq
+FROM tender t WHERE t.id = %(t)s
+"""
+
 #: Navbat tartibi — filtrdan MUSTAQIL. Ikki joyda (ro'yxat va
 #: sanoq) bir xil `WHERE` ishlatiladi, `ORDER BY` esa faqat
 #: ro'yxatda.
@@ -266,7 +281,26 @@ def yonaltir(tender_id: int, company_id: int,
     """
     natija = qualification.check(tender_id, company_id)
     if not barchasi and natija["decision"] not in NAVBAT_QARORLARI:
-        return None
+        # MAVJUD YOZUV BARIBIR YANGILANADI.
+        #
+        # O'LCHANGAN NUQSON (2026-09-03). `no_go` shu yerdan
+        # QAYTARDI va navbatdagi ESKI qator TEGILMAY qolardi. Ya'ni
+        # yuqoridagi `SQL_UPSERT` izohi va'da qilgan holat -- "`go`
+        # `no_go` ga o'tdi, broker xabar topsin" -- HECH QACHON ro'y
+        # bermasdi: `ai_ozgardi` ni yozadigan UPSERT ga umuman
+        # yetib borilmasdi.
+        #
+        # O'LCHANDI: 347 yozuvdan 48 tasining `ai_qaror` i eskirgan
+        # (43 ta `review`->`no_go`, 5 ta `go`->`no_go`), shundan
+        # 11 tasida INSON qarori bor va 5 tasi "olindi". Ya'ni
+        # broker besh tenderni AI endi rad etgan asosda olib
+        # o'tiribdi va buni bilmaydi.
+        #
+        # YANGI `no_go` NAVBATGA QO'SHILMAYDI (qator yo'q bo'lsa
+        # baribir `None`) -- navbat uzunligi o'zgarmaydi, faqat
+        # allaqachon turgan yozuv HAQIQATNI aytadi.
+        if not db.scalar(SQL_MAVJUD, {"c": company_id, "t": tender_id}):
+            return None
 
     to_siq = [m["label"] for m in natija["criteria"]
               if m["status"] in ("fail", "risk")]
@@ -340,7 +374,15 @@ def yonaltir_hammasi(company_id: int, limit: int = 2000,
             qarorlar["no_go"] = qarorlar.get("no_go", 0) + 1
             continue
         qarorlar[out["decision"]] = qarorlar.get(out["decision"], 0) + 1
-        qoshildi += 1
+        # "NAVBATGA TUSHDI" FAQAT `go`/`review` NI SANAYDI.
+        #
+        # `yonaltir` endi MAVJUD yozuvni `no_go` bilan ham yangilaydi
+        # va nol o'rniga natija qaytaradi. Shartsiz sanalsa
+        # `navbatga_tushdi` shishar va ETL jurnali "navbatga 48 ta
+        # ko'proq tushdi" deb YOLG'ON aytardi -- aslida ular
+        # navbatdan CHIQQANLAR.
+        if out["decision"] in NAVBAT_QARORLARI:
+            qoshildi += 1
         if out["ozgardi"]:
             ozgardi += 1
         if out["inson_qarori_eskirdi"]:
@@ -354,6 +396,72 @@ def yonaltir_hammasi(company_id: int, limit: int = 2000,
             "navbat_hajmi": db.scalar(
                 "SELECT count(*) FROM v_routing_queue WHERE company_id=%(c)s",
                 {"c": company_id}) or 0}
+
+
+#: `korik_tugadi` natijasi. Interfeys shu qiymatga qarab xabar
+#: beradi, shuning uchun ular YOPIQ ro'yxat.
+KORIK_HOLATLARI = ("navbatda", "no_go", "yopiq", "tender_yoq")
+
+
+def korik_tugadi(tender_id: int, company_id: int) -> Dict[str, Any]:
+    """Talab KO'RIGI tugagach navbatni DARHOL qayta hisoblaydi.
+
+    NEGA BOR (2026-09-03 da o'lchandi). Broker "Talablar" da oxirgi
+    talabni tasdiqlaganda zanjir UZILARDI: `tender_requirement`
+    yozilardi, `tender_routing` esa TEGILMASDI. Ya'ni tasdiq
+    navbatga faqat KEYINGI ETL yurishida (`run_etl.py`) yoki
+    brokerning "Yangilash" tugmasidan keyin yetib borardi.
+
+    Amalda bu shuni anglatardi: talab tuzatildi, `qualification`
+    natijasi o'zgardi, lekin broker navbatda ESKI ballni ko'rib
+    turaverdi. Tasdiqning butun ma'nosi -- dalilni yaxshilash --
+    soatlab ko'rinmasdi.
+
+    NEGA `yonaltir_hammasi` EMAS: u 584 nomzodni qayta baholaydi
+    (~1.3 s). Bitta tender uchun bu 583 ta keraksiz ish va ko'rik
+    ritmiga sezilarli kechikish qo'shardi. Bu yerda ATAYLAB BITTA
+    tender baholanadi.
+
+    NEGA YOPIQ TENDER TASHLANADI: `SQL_NOMZODLAR` bilan AYNI qoida.
+    Aks holda ikki yo'l ikki xil javob berardi -- bu loyihada
+    takrorlangan nuqson sinfi (hudud qoidasi ikki joyda yozilgani
+    §16.71). Muddati o'tgan tenderga yozuv ochish ma'nosiz ham:
+    `v_routing_queue` uni baribir ko'rsatmaydi.
+
+    QAYTARADI -- JIM QOLMAYDIGAN natija:
+        holat    "navbatda" | "no_go" | "yopiq" | "tender_yoq"
+        ozgardi  yozuv HAQIQATAN o'zgardimi (matn tahriri ham
+                 sanaladi -- `SQL_UPSERT` dagi `WHERE` ga qarang)
+        inson_qarori_eskirdi
+                 broker allaqachon qaror bergan va AI fikri
+                 o'zgargan -- ENG SHOSHILINCH holat
+    """
+    r = db.query_one(SQL_OCHIQMI, {"t": tender_id})
+    if r is None:
+        return {"holat": "tender_yoq", "ozgardi": False,
+                "inson_qarori_eskirdi": False,
+                "ai_qaror": None, "routing_id": None}
+    if not r["ochiq"]:
+        return {"holat": "yopiq", "ozgardi": False,
+                "inson_qarori_eskirdi": False,
+                "ai_qaror": None, "routing_id": None}
+
+    out = yonaltir(tender_id, company_id)
+    if out is None:
+        # `no_go` va navbatda yozuv ham YO'Q -- hech narsa yozilmadi.
+        return {"holat": "no_go", "ozgardi": False,
+                "inson_qarori_eskirdi": False,
+                "ai_qaror": "no_go", "routing_id": None}
+    return {
+        # `no_go` YOZUVI YANGILANGAN bo'lishi ham mumkin (mavjud
+        # qator). Shunda `holat` "no_go" bo'ladi-yu `ozgardi` ROST --
+        # tender navbatdan CHIQDI va buni aytish kerak.
+        "holat": ("navbatda" if out["decision"] in NAVBAT_QARORLARI
+                  else "no_go"),
+        "ozgardi": bool(out["ozgardi"]),
+        "inson_qarori_eskirdi": bool(out["inson_qarori_eskirdi"]),
+        "ai_qaror": out["decision"],
+        "routing_id": out["routing_id"]}
 
 
 def navbat(company_id: int, holat: Optional[str] = None,
@@ -513,6 +621,38 @@ def moslik(company_id: int) -> Dict[str, Any]:
         SELECT ai_manba, ai_qaror, jami, olindi, rad, moslik_foiz
         FROM v_routing_agreement WHERE company_id = %(c)s
         ORDER BY ai_manba, ai_qaror""", {"c": company_id})
+    # HAR QATOR O'ZINI OQLASIN.
+    #
+    # O'LCHANGAN NUQSON (2026-09-04). Yuqoridagi `MOSLIK_MIN`
+    # darvozasi JAMIGA qo'yilgan (`n_qaror`), qatorlarga emas.
+    # Natijada broker ekranida shu ikkisi turgan edi:
+    #
+    #     go: 71.4%       -- jami 7 ta kuzatuvdan
+    #     review: 0.0%    -- STRUKTURA BO'YICHA nol
+    #
+    # Birinchisi `MOSLIK_MIN` qoidasini chetlab o'tadi: darvoza
+    # 32 ta umumiy qarorni ko'radi, qator esa 7 taga tayanadi.
+    #
+    # Ikkinchisi undan yomon. `v_routing_agreement` formulasi
+    # `(go AND olindi) OR (no_go AND rad)` -- `review` uchun u
+    # HECH QACHON rost bo'lolmaydi, ya'ni nol KAFOLATLANGAN.
+    # "AI 0% da haq" deb o'qiladi, holbuki `review` "AI QAROR
+    # QILMADI" degani. Bu `v_routing_kelishuv` tuzatgan xatoning
+    # o'zi -- lekin eski ko'rinish interfeysga hamon shu yerdan
+    # boradi.
+    #
+    # Ikkalasida ham foiz OLIB TASHLANADI va SABAB yoziladi:
+    # hisoblanmagan qiymat o'zini tushuntirsin
+    # (`v_chat_tiklash.foiz_yoq_sababi` bilan bir qoida).
+    for r in qatorlar:
+        if r["ai_qaror"] == "review":
+            r["moslik_foiz"] = None
+            r["foiz_yoq_sababi"] = "ai_qaror_yoq"
+        elif int(r["jami"] or 0) < MOSLIK_MIN:
+            r["moslik_foiz"] = None
+            r["foiz_yoq_sababi"] = "namuna_kam"
+        else:
+            r["foiz_yoq_sababi"] = None
     n_qaror = db.scalar("""SELECT count(*) FROM tender_routing
         WHERE company_id = %(c)s AND inson_qaror IS NOT NULL""",
         {"c": company_id}) or 0

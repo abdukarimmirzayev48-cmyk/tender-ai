@@ -116,6 +116,12 @@ export const en: Dict = {
   'broker.needMore': '({n}/{kerak} decisions)',
   'broker.notMeasured': 'Agreement not yet measured \u2014 it appears once '
     + 'broker decisions accumulate.',
+
+  // AN UNCOMPUTED PERCENTAGE EXPLAINS ITSELF — never rendered as “0%”.
+  'broker.noPct.ai_qaror_yoq.short': 'not measurable',
+  'broker.noPct.ai_qaror_yoq': 'The AI made NO decision here (review) — the match formula guarantees zero, so no percentage is given.',
+  'broker.noPct.namuna_kam.short': 'sample too small',
+  'broker.noPct.namuna_kam': 'This row rests on {n} observations; at least {kerak} are needed.',
   'broker.sampleTitle': 'Sample profile.',
   'broker.sampleBody': 'Company data is filled with invented values. '
     + 'Do not draw statistical conclusions from these numbers.',
@@ -185,6 +191,7 @@ export const en: Dict = {
   'fresh.lagTitle': 'Time between a notice being published and appearing here',
   'fresh.lag': 'Detection lag:',
   'fresh.lagHours': '{n} h',
+  'fresh.lagNone': 'not measured',
   'fresh.within1h': 'within 1 h: {pct}%',
 
   // ── Time formats ──────────────────────────────────────────────────────
@@ -233,6 +240,7 @@ export const en: Dict = {
   // ── Tender table ──────────────────────────────────────────────────────
   'table.empty': 'Try changing the filters.',
   'table.score': 'Score',
+  'table.scoreNone': 'Match not computed — this is not a zero',
   'table.subject': 'Procurement subject',
   'table.source': 'Source',
   'table.customer': 'Customer',
@@ -323,6 +331,14 @@ export const en: Dict = {
   'gonogo.nextSteps': 'Next steps',
   'gonogo.missing': 'Add to your profile — the decision gets sharper',
   'gonogo.yoursDecision': 'the decision is yours',
+
+  // CHAT ABOUT THE ANALYSIS — manba='gonogo', nothing is recomputed.
+  'gonogo.ask': 'Ask about this analysis',
+  'gonogo.askTitle': 'The chat uses the saved analysis — no recomputation',
+  'gonogo.chip.why': 'Why this verdict?',
+  'gonogo.chip.criteria': 'Which criteria failed?',
+  'gonogo.chip.docs': 'Which document is missing?',
+  'gonogo.chip.improve': 'How can this result be improved?',
 
   // ── Stock check ───────────────────────────────────────────────────────
   'stock.noMatch': 'None of the {n} items matched your catalogue.',
@@ -816,6 +832,16 @@ export const en: Dict = {
   'req.correct': 'Correct',
   'req.correctHint': 'Enter the correct value',
   'req.approveAll': 'Approve all',
+
+  // WHAT HAPPENED TO THE QUEUE AFTER REVIEW — NEVER SILENT.
+  'req.route.queued': 'Broker queue updated: {q}',
+  'req.route.nogo': 'Qualification failed — did not enter the broker queue',
+  'req.route.left': 'WARNING: tender LEFT the broker queue (qualification failed)',
+  'req.route.stale': 'WARNING: the broker already decided and the analysis changed — the decision is STALE',
+  'req.route.same': 'Broker queue unchanged ({q})',
+  'req.route.closed': 'Tender deadline has passed — queue not updated',
+  'req.route.missing': 'Tender not found — queue not updated',
+  'req.route.failed': 'Could not update the queue (the review WAS saved)',
   'req.status.approved': 'approved',
   'req.status.rejected': 'rejected',
   'req.status.corrected': 'corrected',
@@ -828,6 +854,7 @@ export const en: Dict = {
   'chat.scope.tender': 'Context: tender {id}',
   'chat.scope.global': 'General chat',
   'chat.new': 'New chat',
+  'chat.resumed': 'Continuing the previous chat — {n} messages remembered',
   'chat.send': 'Send',
   'chat.stop': 'Stop',
   'chat.thinking': 'Thinking…',
